@@ -42,11 +42,6 @@ npm run dev
 
 Backend chạy tại: `http://localhost:5000`
 
-**Tài khoản Admin mặc định:**
-
-- Email: `admin@ezformat.com`
-- Password: `admin123456`
-
 ### 2. Frontend
 
 ```bash
