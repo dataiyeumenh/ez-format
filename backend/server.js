@@ -8,9 +8,16 @@ connectDB();
 
 const app = express();
 
+// CORS config: allow localhost for dev + Vercel production URL
+const allowedOrigins = [
+  "http://localhost:5173", // Dev Vite
+  "http://localhost:3000", // Dev alternative
+  process.env.FRONTEND_URL, // Production (e.g., https://ez-format.vercel.app)
+].filter(Boolean);
+
 app.use(
   cors({
-    origin: ["http://localhost:5173", "https://ez-format.vercel.app"],
+    origin: allowedOrigins,
     credentials: true,
   }),
 );
