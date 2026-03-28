@@ -31,11 +31,6 @@ npm install
 
 # Cấu hình môi trường
 cp .env.example .env
-# Sửa .env: MONGO_URI, JWT_SECRET
-
-# Tạo tài khoản admin mặc định
-npm run seed
-
 # Chạy development
 npm run dev
 ```
