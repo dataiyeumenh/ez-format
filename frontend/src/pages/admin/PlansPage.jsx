@@ -31,7 +31,7 @@ const plans = [
   },
   {
     name: "THEO LƯỢT",
-    price: "5K VND",
+    price: "10K VND",
     period: "/1 file",
     users: 120,
     badge: null,

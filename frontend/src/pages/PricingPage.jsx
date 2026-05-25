@@ -46,7 +46,7 @@ const plans = [
   {
     id: "perfile",
     name: "THEO LƯỢT",
-    price: "5k",
+    price: "10k",
     period: "/ 1 file",
     description: "Phù hợp cho mỗi lần sử dụng",
     buttonText: "Nâng cấp",

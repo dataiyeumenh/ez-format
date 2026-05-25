@@ -98,7 +98,7 @@ const LoginPage = () => {
                   to="#"
                   className="text-xs text-blue-600 hover:text-blue-700"
                 >
-                  Forgot password?
+                  Quên mật khẩu?
                 </Link>
               </div>
               <div className="relative">

@@ -12,7 +12,8 @@ const app = express();
 const allowedOrigins = [
   "http://localhost:5173", // Dev Vite
   "http://localhost:3000", // Dev alternative
-  process.env.FRONTEND_URL, // Production (e.g., https://ez-format.vercel.app)
+  process.env.FRONTEND_URL, // Production (e.g., https://ezformat.io.vn)
+  process.env.FRONTEND_URL_WWW, // www variant (e.g., https://www.ezformat.io.vn)
 ].filter(Boolean);
 
 app.use(
@@ -21,11 +22,13 @@ app.use(
     credentials: true,
   }),
 );
-app.use(express.json());
+app.use(express.json({ limit: "50mb" }));
+app.use(express.urlencoded({ extended: true, limit: "50mb" }));
 
 // Routes
 app.use("/api/auth", require("./routes/auth"));
 app.use("/api/admin", require("./routes/admin"));
+app.use("/api/convert", require("./routes/convert"));
 
 // Health check
 app.get("/api/health", (req, res) => {
