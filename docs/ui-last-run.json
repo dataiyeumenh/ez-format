@@ -1,0 +1,24 @@
+{
+  "failed": [],
+  "timestamp": "2026-05-30 00:16:48",
+  "steps": [
+    {
+      "name": "ESLint (frontend)",
+      "status": "ok"
+    },
+    {
+      "name": "Prettier check",
+      "status": "ok"
+    },
+    {
+      "name": "Frontend build",
+      "status": "ok"
+    }
+  ],
+  "ok": true,
+  "passed": [
+    "ESLint (frontend)",
+    "Prettier check",
+    "Frontend build"
+  ]
+}

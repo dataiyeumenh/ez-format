@@ -1,6 +1,15 @@
 import {
-  LineChart, Line, BarChart, Bar, XAxis, YAxis, Tooltip,
-  ResponsiveContainer, PieChart, Pie, Cell,
+  LineChart,
+  Line,
+  BarChart,
+  Bar,
+  XAxis,
+  YAxis,
+  Tooltip,
+  ResponsiveContainer,
+  PieChart,
+  Pie,
+  Cell,
 } from "recharts";
 import { TrendingUp, ArrowUpRight, Users, FileText, Activity } from "lucide-react";
 import { Link } from "react-router-dom";
@@ -103,10 +112,6 @@ const statusStyle = {
   Failed: "bg-red-100 text-red-700",
 };
 
-const navItems = [
-  { label: "Tổng quan", path: "/admin" },
-];
-
 // ─── Component ───────────────────────────────────────────────────────────────
 const DashboardPage = () => {
   return (
@@ -115,14 +120,43 @@ const DashboardPage = () => {
         {/* Stats */}
         <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4">
           {[
-            { label: "TỔNG NGƯỜI DÙNG", value: "12,450", change: "+12%", icon: Users, color: "text-blue-600 bg-blue-50" },
-            { label: "ĐANG HOẠT ĐỘNG", value: "8,210", change: "+9%", icon: Activity, color: "text-purple-600 bg-purple-50" },
-            { label: "FILE ĐÃ XỬ LÝ HÔM NAY", value: "450", change: "+18%", icon: FileText, color: "text-orange-600 bg-orange-50" },
-            { label: "DOANH THU THÁNG", value: "$15,200", change: "+7%", icon: TrendingUp, color: "text-green-600 bg-green-50" },
+            {
+              label: "TỔNG NGƯỜI DÙNG",
+              value: "12,450",
+              change: "+12%",
+              icon: Users,
+              color: "text-blue-600 bg-blue-50",
+            },
+            {
+              label: "ĐANG HOẠT ĐỘNG",
+              value: "8,210",
+              change: "+9%",
+              icon: Activity,
+              color: "text-purple-600 bg-purple-50",
+            },
+            {
+              label: "FILE ĐÃ XỬ LÝ HÔM NAY",
+              value: "450",
+              change: "+18%",
+              icon: FileText,
+              color: "text-orange-600 bg-orange-50",
+            },
+            {
+              label: "DOANH THU THÁNG",
+              value: "$15,200",
+              change: "+7%",
+              icon: TrendingUp,
+              color: "text-green-600 bg-green-50",
+            },
           ].map((stat) => (
-            <div key={stat.label} className="bg-white rounded-xl p-5 border border-gray-100">
+            <div
+              key={stat.label}
+              className="bg-white rounded-xl p-5 border border-gray-100"
+            >
               <div className="flex items-center justify-between mb-3">
-                <div className={`w-10 h-10 rounded-lg flex items-center justify-center ${stat.color}`}>
+                <div
+                  className={`w-10 h-10 rounded-lg flex items-center justify-center ${stat.color}`}
+                >
                   <stat.icon size={20} />
                 </div>
                 <span className="flex items-center gap-1 text-xs text-green-600 font-medium">
@@ -131,7 +165,9 @@ const DashboardPage = () => {
                 </span>
               </div>
               <p className="text-2xl font-black text-gray-900">{stat.value}</p>
-              <p className="text-xs text-gray-500 mt-1 uppercase tracking-wide">{stat.label}</p>
+              <p className="text-xs text-gray-500 mt-1 uppercase tracking-wide">
+                {stat.label}
+              </p>
             </div>
           ))}
         </div>
@@ -149,22 +185,56 @@ const DashboardPage = () => {
             </div>
             <ResponsiveContainer width="100%" height={140}>
               <LineChart data={lineData}>
-                <XAxis dataKey="day" tick={{ fontSize: 10, fill: "#9CA3AF" }} axisLine={false} tickLine={false} />
+                <XAxis
+                  dataKey="day"
+                  tick={{ fontSize: 10, fill: "#9CA3AF" }}
+                  axisLine={false}
+                  tickLine={false}
+                />
                 <YAxis hide />
-                <Tooltip contentStyle={{ fontSize: 12, border: "none", boxShadow: "0 2px 8px rgba(0,0,0,0.1)", borderRadius: 8 }} cursor={{ stroke: "#E5E7EB" }} />
-                <Line type="monotone" dataKey="value" stroke="#3B82F6" strokeWidth={2} dot={false} />
+                <Tooltip
+                  contentStyle={{
+                    fontSize: 12,
+                    border: "none",
+                    boxShadow: "0 2px 8px rgba(0,0,0,0.1)",
+                    borderRadius: 8,
+                  }}
+                  cursor={{ stroke: "#E5E7EB" }}
+                />
+                <Line
+                  type="monotone"
+                  dataKey="value"
+                  stroke="#3B82F6"
+                  strokeWidth={2}
+                  dot={false}
+                />
               </LineChart>
             </ResponsiveContainer>
           </div>
 
           {/* Bar chart */}
           <div className="bg-white rounded-xl p-5 border border-gray-100">
-            <h3 className="text-sm font-semibold text-gray-900 mb-4">Doanh thu hàng tháng</h3>
+            <h3 className="text-sm font-semibold text-gray-900 mb-4">
+              Doanh thu hàng tháng
+            </h3>
             <ResponsiveContainer width="100%" height={140}>
               <BarChart data={barData} barSize={28}>
-                <XAxis dataKey="week" tick={{ fontSize: 10, fill: "#9CA3AF" }} axisLine={false} tickLine={false} />
+                <XAxis
+                  dataKey="week"
+                  tick={{ fontSize: 10, fill: "#9CA3AF" }}
+                  axisLine={false}
+                  tickLine={false}
+                />
                 <YAxis hide />
-                <Tooltip contentStyle={{ fontSize: 12, border: "none", boxShadow: "0 2px 8px rgba(0,0,0,0.1)", borderRadius: 8 }} cursor={false} />
+                <Tooltip
+                  contentStyle={{
+                    fontSize: 12,
+                    border: "none",
+                    boxShadow: "0 2px 8px rgba(0,0,0,0.1)",
+                    borderRadius: 8,
+                  }}
+                  cursor={false}
+                />
                 <Bar dataKey="value" fill="#3B82F6" radius={[4, 4, 0, 0]} />
               </BarChart>
             </ResponsiveContainer>
@@ -172,12 +242,22 @@ const DashboardPage = () => {
 
           {/* Pie chart */}
           <div className="bg-white rounded-xl p-5 border border-gray-100">
-            <h3 className="text-sm font-semibold text-gray-900 mb-4">Phân bổ gói dịch vụ</h3>
+            <h3 className="text-sm font-semibold text-gray-900 mb-4">
+              Phân bổ gói dịch vụ
+            </h3>
             <div className="flex items-center gap-4">
               <div className="relative">
                 <ResponsiveContainer width={100} height={100}>
                   <PieChart>
-                    <Pie data={pieData} cx={45} cy={45} innerRadius={30} outerRadius={45} dataKey="value" strokeWidth={0}>
+                    <Pie
+                      data={pieData}
+                      cx={45}
+                      cy={45}
+                      innerRadius={30}
+                      outerRadius={45}
+                      dataKey="value"
+                      strokeWidth={0}
+                    >
                       {pieData.map((entry, index) => (
                         <Cell key={index} fill={entry.color} />
                       ))}
@@ -193,10 +273,15 @@ const DashboardPage = () => {
                 {pieData.map((item) => (
                   <div key={item.name} className="flex items-center justify-between">
                     <div className="flex items-center gap-1.5">
-                      <div className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: item.color }} />
+                      <div
+                        className="w-2.5 h-2.5 rounded-full"
+                        style={{ backgroundColor: item.color }}
+                      />
                       <span className="text-xs text-gray-600">{item.name}</span>
                     </div>
-                    <span className="text-xs font-medium text-gray-700">{item.value}%</span>
+                    <span className="text-xs font-medium text-gray-700">
+                      {item.value}%
+                    </span>
                   </div>
                 ))}
               </div>
@@ -209,8 +294,13 @@ const DashboardPage = () => {
           {/* Recent conversions */}
           <div className="bg-white rounded-xl border border-gray-100 col-span-2">
             <div className="flex items-center justify-between p-5 border-b border-gray-100">
-              <h3 className="text-sm font-semibold text-gray-900">Chuyển đổi gần đây</h3>
-              <Link to="/admin/files" className="text-xs text-blue-600 hover:text-blue-700 font-medium">
+              <h3 className="text-sm font-semibold text-gray-900">
+                Chuyển đổi gần đây
+              </h3>
+              <Link
+                to="/admin/files"
+                className="text-xs text-blue-600 hover:text-blue-700 font-medium"
+              >
                 Xem tất cả
               </Link>
             </div>
@@ -218,26 +308,42 @@ const DashboardPage = () => {
               <table className="w-full">
                 <thead>
                   <tr className="border-b border-gray-50">
-                    {["Người dùng", "File", "Định dạng", "Trạng thái", "Thời gian"].map((h) => (
-                      <th key={h} className="text-left text-xs font-medium text-gray-400 uppercase px-5 py-3">{h}</th>
-                    ))}
+                    {["Người dùng", "File", "Định dạng", "Trạng thái", "Thời gian"].map(
+                      (h) => (
+                        <th
+                          key={h}
+                          className="text-left text-xs font-medium text-gray-400 uppercase px-5 py-3"
+                        >
+                          {h}
+                        </th>
+                      ),
+                    )}
                   </tr>
                 </thead>
                 <tbody>
                   {recentConversions.map((row, i) => (
-                    <tr key={i} className="border-b border-gray-50 last:border-0 hover:bg-gray-50/50 transition-colors">
+                    <tr
+                      key={i}
+                      className="border-b border-gray-50 last:border-0 hover:bg-gray-50/50 transition-colors"
+                    >
                       <td className="px-5 py-3">
                         <div>
-                          <p className="text-sm font-medium text-gray-900">{row.user}</p>
+                          <p className="text-sm font-medium text-gray-900">
+                            {row.user}
+                          </p>
                           <p className="text-xs text-gray-400">{row.email}</p>
                         </div>
                       </td>
                       <td className="px-5 py-3 text-sm text-gray-600">{row.file}</td>
                       <td className="px-5 py-3">
-                        <span className="bg-blue-50 text-blue-700 text-xs font-medium px-2 py-0.5 rounded">{row.format}</span>
+                        <span className="bg-blue-50 text-blue-700 text-xs font-medium px-2 py-0.5 rounded">
+                          {row.format}
+                        </span>
                       </td>
                       <td className="px-5 py-3">
-                        <span className={`text-xs font-medium px-2 py-0.5 rounded-full ${statusStyle[row.status]}`}>
+                        <span
+                          className={`text-xs font-medium px-2 py-0.5 rounded-full ${statusStyle[row.status]}`}
+                        >
                           ● {row.status}
                         </span>
                       </td>
@@ -252,13 +358,17 @@ const DashboardPage = () => {
           {/* New users */}
           <div className="bg-white rounded-xl border border-gray-100">
             <div className="p-5 border-b border-gray-100">
-              <h3 className="text-sm font-semibold text-gray-900">Người dùng mới hôm nay</h3>
+              <h3 className="text-sm font-semibold text-gray-900">
+                Người dùng mới hôm nay
+              </h3>
             </div>
             <div className="p-5 space-y-4">
               {newUsers.map((u, i) => (
                 <div key={i} className="flex items-center justify-between">
                   <div className="flex items-center gap-3">
-                    <div className={`w-8 h-8 rounded-full ${u.planColor} flex items-center justify-center text-white text-xs font-bold`}>
+                    <div
+                      className={`w-8 h-8 rounded-full ${u.planColor} flex items-center justify-center text-white text-xs font-bold`}
+                    >
                       {u.initials}
                     </div>
                     <div>
@@ -271,7 +381,10 @@ const DashboardPage = () => {
                   </span>
                 </div>
               ))}
-              <Link to="/admin/users" className="block w-full text-center text-xs text-blue-600 hover:text-blue-700 font-medium pt-2">
+              <Link
+                to="/admin/users"
+                className="block w-full text-center text-xs text-blue-600 hover:text-blue-700 font-medium pt-2"
+              >
                 Xem 42 người dùng đăng mới
               </Link>
             </div>

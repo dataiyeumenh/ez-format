@@ -1,0 +1,10 @@
+fastapi
+uvicorn
+python-multipart
+openpyxl
+xlrd
+xlwt
+pdfplumber
+fpdf2
+pytest
+httpx

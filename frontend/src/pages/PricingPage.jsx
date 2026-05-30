@@ -32,15 +32,10 @@ const plans = [
     name: "GÓI NĂM",
     price: "109k",
     period: "/tháng",
-    description:
-      "Lựa chọn tối ưu dành cho người dùng chuyên sâu và gói chuyên môn",
+    description: "Lựa chọn tối ưu dành cho người dùng chuyên sâu và gói chuyên môn",
     buttonText: "Nâng cấp lên GÓI NĂM",
     buttonVariant: "primary",
-    features: [
-      "Các chức năng của gói tháng",
-      "Không giới hạn files",
-      "Bảo mật cao",
-    ],
+    features: ["Các chức năng của gói tháng", "Không giới hạn files", "Bảo mật cao"],
     popular: true,
   },
   {
@@ -81,8 +76,8 @@ const PricingPage = () => {
               Lựa chọn gói dịch vụ phù hợp với nhu cầu của bạn
             </h1>
             <p className="text-gray-500 text-base max-w-lg mx-auto">
-              Dành cho sinh viên và các chuyên gia. Chuyển đổi mọi loại biểu mẫu
-              một cách nhanh chóng và chính xác.
+              Dành cho sinh viên và các chuyên gia. Chuyển đổi mọi loại biểu mẫu một
+              cách nhanh chóng và chính xác.
             </p>
           </div>
 

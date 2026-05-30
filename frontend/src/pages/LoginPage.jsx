@@ -4,6 +4,8 @@ import { Mail, Lock, Eye, EyeOff } from "lucide-react";
 import { useAuth } from "../context/AuthContext";
 import Navbar from "../components/Navbar";
 import Footer from "../components/Footer";
+import Alert from "../components/ui/Alert";
+import { getApiErrorMessage } from "../utils/apiError";
 
 const LoginPage = () => {
   const navigate = useNavigate();
@@ -31,14 +33,14 @@ const LoginPage = () => {
         navigate("/");
       }
     } catch (err) {
-      setError(err.response?.data?.message || "Đăng nhập thất bại");
+      setError(getApiErrorMessage(err, "Đăng nhập thất bại"));
     } finally {
       setLoading(false);
     }
   };
 
   return (
-    <div className="min-h-screen flex flex-col bg-gray-50">
+    <div className="min-h-screen flex flex-col bg-mesh">
       <Navbar />
       <main className="flex-1 flex items-center justify-center px-4 py-12">
         <div className="w-full max-w-sm bg-white rounded-2xl shadow-sm border border-gray-100 p-8">
@@ -49,7 +51,6 @@ const LoginPage = () => {
               <div className="absolute inset-0 bg-green-500 rounded-xl transform -rotate-6 opacity-80" />
               <div className="absolute inset-0 flex items-center justify-center">
                 <span className="text-white font-black text-xl">EZ</span>
-                <br />
               </div>
             </div>
             <p className="text-sm text-gray-500 text-center">
@@ -60,9 +61,9 @@ const LoginPage = () => {
 
           {/* Error */}
           {error && (
-            <div className="bg-red-50 border border-red-200 text-red-600 text-sm px-4 py-3 rounded-lg mb-4">
+            <Alert variant="error" className="mb-4">
               {error}
-            </div>
+            </Alert>
           )}
 
           <form onSubmit={handleSubmit} className="space-y-4">
@@ -92,11 +93,11 @@ const LoginPage = () => {
             <div>
               <div className="flex items-center justify-between mb-1.5">
                 <label className="block text-sm font-medium text-gray-700">
-                  Password
+                  Mật khẩu
                 </label>
                 <Link
-                  to="#"
-                  className="text-xs text-blue-600 hover:text-blue-700"
+                  to="/contact"
+                  className="text-xs text-primary-600 hover:text-primary-700"
                 >
                   Quên mật khẩu?
                 </Link>
@@ -152,9 +153,7 @@ const LoginPage = () => {
           {/* Divider */}
           <div className="flex items-center gap-3 my-5">
             <div className="flex-1 h-px bg-gray-200" />
-            <span className="text-xs text-gray-400 uppercase">
-              HOẶC TIẾP TỤC VỚI
-            </span>
+            <span className="text-xs text-gray-400 uppercase">HOẶC TIẾP TỤC VỚI</span>
             <div className="flex-1 h-px bg-gray-200" />
           </div>
 
