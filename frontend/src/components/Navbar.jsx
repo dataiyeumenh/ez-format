@@ -2,22 +2,21 @@ import { useState } from "react";
 import { Link, NavLink, useNavigate } from "react-router-dom";
 import { useAuth } from "../context/AuthContext";
 import { Menu, X } from "lucide-react";
+import ezFormatLogo from "../assets/ezformat-logo.jpg";
 
 const Logo = () => (
   <Link to="/" className="flex items-center gap-2.5 group">
-    <div className="relative w-9 h-9 transition-transform group-hover:scale-105">
-      <div className="absolute inset-0 bg-gradient-to-br from-red-600 to-red-500 rounded-lg rotate-6 shadow-sm" />
-      <div className="absolute inset-0 bg-gradient-to-br from-primary-600 to-cyan-500 rounded-lg -rotate-6 opacity-90" />
-      <span className="absolute inset-0 flex items-center justify-center text-white font-black text-[10px] tracking-tight">
-        EZ
-      </span>
-    </div>
-    <span className="font-bold text-gray-900 text-lg tracking-tight">EzFormat</span>
+    <img
+      src={ezFormatLogo}
+      alt="EzFormat logo"
+      className="w-9 h-9 object-contain transition-transform group-hover:scale-105"
+    />
+    <span className="text-xl font-extrabold tracking-tight text-gray-950">EzFormat</span>
   </Link>
 );
 
 const navLinkClass = ({ isActive }) =>
-  `text-sm font-medium transition-colors px-1 py-0.5 border-b-2 ${
+  `text-base font-semibold transition-colors px-1.5 py-1 border-b-2 ${
     isActive
       ? "text-primary-600 border-primary-600"
       : "text-gray-600 border-transparent hover:text-gray-900 hover:border-gray-200"
@@ -62,13 +61,13 @@ const Navbar = () => {
                     Dashboard
                   </NavLink>
                 )}
-                <span className="text-sm text-gray-500 max-w-[120px] truncate">
+                <span className="max-w-[120px] truncate text-base font-medium text-gray-600">
                   {user.name}
                 </span>
                 <button
                   type="button"
                   onClick={handleLogout}
-                  className="btn-secondary py-2"
+                  className="btn-secondary py-2 text-base font-semibold"
                 >
                   Đăng xuất
                 </button>
@@ -77,7 +76,7 @@ const Navbar = () => {
               <>
                 <Link
                   to="/login"
-                  className="text-sm font-medium text-gray-600 hover:text-gray-900 px-3 py-2 transition-colors"
+                  className="px-3 py-2 text-base font-semibold text-gray-600 transition-colors hover:text-gray-900"
                 >
                   Đăng nhập
                 </Link>
@@ -121,7 +120,7 @@ const Navbar = () => {
               <button
                 type="button"
                 onClick={handleLogout}
-                className="block w-full text-left text-sm font-medium text-gray-600 py-2"
+                className="block w-full py-2 text-left text-base font-semibold text-gray-600"
               >
                 Đăng xuất
               </button>

@@ -6,6 +6,7 @@ import Navbar from "../components/Navbar";
 import Footer from "../components/Footer";
 import Alert from "../components/ui/Alert";
 import { getApiErrorMessage } from "../utils/apiError";
+import ezFormatLogo from "../assets/ezformat-logo.jpg";
 
 const LoginPage = () => {
   const navigate = useNavigate();
@@ -46,14 +47,12 @@ const LoginPage = () => {
         <div className="w-full max-w-sm bg-white rounded-2xl shadow-sm border border-gray-100 p-8">
           {/* Logo */}
           <div className="flex flex-col items-center mb-6">
-            <div className="relative w-16 h-16 mb-3">
-              <div className="absolute inset-0 bg-blue-600 rounded-xl transform rotate-6" />
-              <div className="absolute inset-0 bg-green-500 rounded-xl transform -rotate-6 opacity-80" />
-              <div className="absolute inset-0 flex items-center justify-center">
-                <span className="text-white font-black text-xl">EZ</span>
-              </div>
-            </div>
-            <p className="text-sm text-gray-500 text-center">
+            <img
+              src={ezFormatLogo}
+              alt="EzFormat logo"
+              className="w-16 h-16 object-contain mb-3"
+            />
+            <p className="text-base font-medium leading-relaxed text-gray-700 text-center">
               Chào mừng trở lại, hãy đăng nhập vào <br />
               tài khoản của bạn
             </p>

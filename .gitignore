@@ -2,8 +2,15 @@ node_modules/
 dist/
 .env
 .env.local
+.env.*
+!.env.example
 *.log
 .DS_Store
+.artifacts/
+.serena/
+.pytest_cache/
+__pycache__/
+*.py[cod]
 
 backend/.env
 frontend/.env
@@ -13,3 +20,18 @@ converter/.tmp/
 converter/__pycache__/
 converter/.pytest_cache/
 converter/.artifacts/
+converter/data/
+*.sqlite
+*.sqlite3
+*.db
+
+# Local AI/runtime secrets and launch artifacts
+.artifacts/local-ai/
+*.lnk
+
+# Local/manual business data. Keep committed fixtures under converter/fixtures explicit.
+test-data/
+uploads/
+downloads/
+*Import misa*.xls
+*Import misa*.xlsx

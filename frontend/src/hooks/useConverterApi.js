@@ -11,6 +11,9 @@ export function formatApiError(payload, fallback) {
   if (Array.isArray(payload.detail)) {
     return payload.detail.map((d) => d.msg || String(d)).join("; ");
   }
+  if (Array.isArray(payload.issues) && payload.issues.length) {
+    return payload.issues.map((i) => i.message || String(i)).join("; ");
+  }
   const issues = payload.errors || payload.report?.errors;
   if (Array.isArray(issues) && issues.length) {
     return issues.map((i) => i.message).join("; ");
@@ -18,18 +21,23 @@ export function formatApiError(payload, fallback) {
   return fallback;
 }
 
-function buildUploadFormData(file, conversionType, options) {
+function buildUploadFormData(file, targetTemplateId) {
   const formData = new FormData();
   formData.append("file", file);
-  formData.append("conversion_type", conversionType);
-  if (options && Object.keys(options).length > 0) {
-    formData.append("options", JSON.stringify(options));
-  }
+  if (targetTemplateId) formData.append("target_template_id", targetTemplateId);
   return formData;
 }
 
+async function readJsonResponse(response, fallback) {
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(formatApiError(data, fallback));
+  }
+  return data;
+}
+
 export function useConverterApi() {
-  const [conversionTypes, setConversionTypes] = useState([]);
+  const [templates, setTemplates] = useState([]);
   const [serviceOnline, setServiceOnline] = useState(null);
 
   useEffect(() => {
@@ -37,22 +45,19 @@ export function useConverterApi() {
 
     Promise.all([
       fetch(`${pythonBaseURL}/healthz`).then((r) => r.ok),
-      fetch(`${pythonBaseURL}/api/v1/conversion-types`).then((r) =>
-        r.ok ? r.json() : Promise.reject(),
+      fetch(`${pythonBaseURL}/api/v1/templates`).then((r) =>
+        r.ok ? r.json() : Promise.reject(new Error("templates unavailable")),
       ),
     ])
       .then(([online, data]) => {
         if (cancelled) return;
         setServiceOnline(online);
-        setConversionTypes(data.items || []);
+        setTemplates(data.items || []);
       })
       .catch(() => {
         if (cancelled) return;
         setServiceOnline(false);
-        setConversionTypes([
-          { id: "bsn_sales", label: "BSN - Form import bán hàng" },
-          { id: "bsn_purchase", label: "BSN - Form import mua hàng" },
-        ]);
+        setTemplates([]);
       });
 
     return () => {
@@ -60,70 +65,56 @@ export function useConverterApi() {
     };
   }, []);
 
-  const validateAndPreview = useCallback(async (file, conversionType, options) => {
-    const validateRes = await fetch(`${pythonBaseURL}/api/v1/conversions/validate`, {
+  const analyzeFile = useCallback(async (file, targetTemplateId) => {
+    const response = await fetch(`${pythonBaseURL}/api/v1/uploads/analyze`, {
       method: "POST",
-      body: buildUploadFormData(file, conversionType, options),
+      body: buildUploadFormData(file, targetTemplateId),
     });
-    const validateData = await validateRes.json().catch(() => ({}));
-    if (!validateRes.ok || !validateData.ok) {
-      throw new Error(
-        formatApiError(validateData, "Dữ liệu không hợp lệ để chuyển đổi."),
-      );
-    }
-
-    const previewOptions =
-      options ||
-      (validateData.warnings?.length
-        ? { allow_calculation_warnings: true }
-        : undefined);
-
-    const previewRes = await fetch(`${pythonBaseURL}/api/v1/conversions/preview`, {
-      method: "POST",
-      body: buildUploadFormData(file, conversionType, previewOptions),
-    });
-    const previewData = await previewRes.json().catch(() => ({}));
-    if (!previewRes.ok) {
-      throw new Error(
-        formatApiError(previewData, `Không thể xem trước (HTTP ${previewRes.status})`),
-      );
-    }
-
-    return {
-      headers: previewData.headers || [],
-      rows: previewData.rows || [],
-      warnings: validateData.warnings || [],
-    };
+    return readJsonResponse(response, "Không thể phân tích file Excel.");
   }, []);
 
-  const exportRows = useCallback(async (conversionType, rows, options) => {
+  const previewMapping = useCallback(async (payload) => {
+    const response = await fetch(`${pythonBaseURL}/api/v1/mappings/preview`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    return readJsonResponse(response, "Không thể xem trước mapping MISA.");
+  }, []);
+
+  const confirmMapping = useCallback(async (payload) => {
+    const response = await fetch(`${pythonBaseURL}/api/v1/mappings/confirm`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    return readJsonResponse(response, "Không thể lưu setting mapping.");
+  }, []);
+
+  const exportConfirmed = useCallback(async (uploadId, profileId) => {
     const response = await fetch(`${pythonBaseURL}/api/v1/conversions/export`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        conversion_type: conversionType,
-        rows,
-        options: options || undefined,
-      }),
+      body: JSON.stringify({ upload_id: uploadId, profile_id: profileId }),
     });
 
     if (!response.ok) {
       const errData = await response.json().catch(() => ({}));
-      throw new Error(
-        formatApiError(errData, `Không thể tải file (HTTP ${response.status})`),
-      );
+      throw new Error(formatApiError(errData, "Không thể tải file MISA."));
     }
 
     const blob = await response.blob();
     const disposition = response.headers.get("Content-Disposition") || "";
     const match = disposition.match(/filename="?([^";\n]+)"?/i);
-    return { blob, filename: match ? match[1] : "MISA_Import.xls" };
+    return { blob, filename: match ? match[1] : "Import misa.xls" };
   }, []);
 
   return {
-    conversionTypes,
+    templates,
     serviceOnline,
-    validateAndPreview,
-    exportRows,
+    analyzeFile,
+    previewMapping,
+    confirmMapping,
+    exportConfirmed,
   };
 }

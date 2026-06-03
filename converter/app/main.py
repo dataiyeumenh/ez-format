@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Annotated
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi.encoders import jsonable_encoder
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 
@@ -15,6 +16,14 @@ from app.calculation_rules import allow_calculation_warnings, has_calculation_wa
 from app.conversion_types import BACKEND_ROOT, CONVERSION_TYPES
 from app.converter import convert_file, export_rows, preview_file, validate_file
 from app.error_check import check_file_for_errors
+from app.misa_workflow import (
+    EXPORT_MEDIA_TYPE,
+    analyze_upload,
+    confirm_mapping,
+    export_confirmed_profile,
+    preview_mapping,
+    templates_payload,
+)
 from app.models import ExportRowsRequest, PreviewResponse, ValidationReport
 
 
@@ -41,6 +50,11 @@ def healthz() -> dict[str, str]:
     return {"status": "ok"}
 
 
+@app.get("/api/v1/templates")
+def templates() -> JSONResponse:
+    return JSONResponse(jsonable_encoder(templates_payload()))
+
+
 @app.get("/api/v1/conversion-types")
 def conversion_types() -> dict[str, list[dict[str, str]]]:
     return {
@@ -49,6 +63,57 @@ def conversion_types() -> dict[str, list[dict[str, str]]]:
             for definition in CONVERSION_TYPES.values()
         ]
     }
+
+
+@app.post("/api/v1/uploads/analyze")
+async def analyze_raw_upload(
+    file: Annotated[UploadFile, File()],
+    target_template_id: Annotated[str | None, Form()] = None,
+) -> JSONResponse:
+    try:
+        payload = analyze_upload(
+            filename=file.filename or "upload.xlsx",
+            content=await file.read(),
+            requested_target_template_id=target_template_id,
+        )
+        return JSONResponse(jsonable_encoder(payload))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/v1/mappings/preview")
+async def preview_misa_mapping(body: dict) -> JSONResponse:
+    try:
+        payload = preview_mapping(
+            upload_id=str(body["upload_id"]),
+            target_template_id=str(body["target_template_id"]),
+            mapping=body.get("mapping") or {},
+            defaults=body.get("defaults") or {},
+            formulas=body.get("formulas") or {},
+        )
+        return JSONResponse(jsonable_encoder(payload))
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/v1/mappings/confirm")
+async def confirm_misa_mapping(body: dict) -> JSONResponse:
+    try:
+        payload = confirm_mapping(
+            upload_id=str(body["upload_id"]),
+            target_template_id=str(body["target_template_id"]),
+            mapping=body.get("mapping") or {},
+            defaults=body.get("defaults") or {},
+            formulas=body.get("formulas") or {},
+            profile_name=body.get("profile_name"),
+        )
+        return JSONResponse(jsonable_encoder(payload))
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.post("/api/v1/conversions/validate")
@@ -91,22 +156,39 @@ async def preview_conversion(
 
 
 @app.post("/api/v1/conversions/export", response_model=None)
-async def export_conversion_rows(body: ExportRowsRequest) -> Response:
+async def export_conversion_rows(body: dict) -> Response:
+    if "upload_id" in body and "profile_id" in body:
+        try:
+            content, filename = export_confirmed_profile(
+                upload_id=str(body["upload_id"]),
+                profile_id=str(body["profile_id"]),
+            )
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return Response(
+            content=content,
+            media_type=EXPORT_MEDIA_TYPE,
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+
+    legacy_body = ExportRowsRequest.model_validate(body)
     workdir = _create_workdir()
     try:
-        output_path = workdir / f"{body.conversion_type}_import.xls"
+        output_path = workdir / f"{legacy_body.conversion_type}_import.xls"
         export_rows(
-            body.conversion_type,
-            body.rows,
+            legacy_body.conversion_type,
+            legacy_body.rows,
             output_path,
-            body.options,
+            legacy_body.options,
         )
         content = output_path.read_bytes()
         return Response(
             content=content,
             media_type=EXCEL_MEDIA_TYPE,
             headers={
-                "Content-Disposition": f'attachment; filename="{body.conversion_type}_import.xls"'
+                "Content-Disposition": f'attachment; filename="{legacy_body.conversion_type}_import.xls"'
             },
         )
     except ValueError as exc:

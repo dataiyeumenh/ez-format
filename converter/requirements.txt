@@ -4,6 +4,7 @@ python-multipart
 openpyxl
 xlrd
 xlwt
+xlutils
 pdfplumber
 fpdf2
 pytest

@@ -6,6 +6,8 @@
     "desktop": "concurrently -k -n backend,converter,frontend \"npm --prefix backend run dev\" \"npm --prefix converter run dev\" \"npm --prefix frontend run dev\"",
     "backend": "npm --prefix backend run dev",
     "converter": "npm --prefix converter run dev",
+    "ai:gateway": "pwsh -File scripts/start-local-ai-gateway.ps1 -Restart",
+    "converter:ai": "pwsh -File scripts/start-converter-ai.ps1",
     "frontend": "npm --prefix frontend run dev",
     "setup:fixtures": "pwsh -File scripts/setup-fixtures.ps1",
     "qa": "pwsh -File scripts/qa-qc.ps1",

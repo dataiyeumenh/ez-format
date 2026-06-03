@@ -1,0 +1,313 @@
+import io
+import json
+import os
+import sqlite3
+from pathlib import Path
+
+import xlrd
+from fastapi.testclient import TestClient
+
+from app.main import app
+
+
+ROOT = Path(__file__).resolve().parents[1]
+SAMPLES = ROOT / "fixtures" / "samples"
+
+
+client = TestClient(app)
+
+
+def test_templates_endpoint_reads_real_misa_headers():
+    response = client.get("/api/v1/templates")
+
+    assert response.status_code == 200
+    items = response.json()["items"]
+    bsn_sales = next(item for item in items if item["id"] == "bsn_sales")
+    assert bsn_sales["header_row"] == 8
+    assert bsn_sales["data_start_row"] == 9
+    assert bsn_sales["headers"][:8] == [
+        "Hình thức bán hàng",
+        "Phương thức thanh toán",
+        "Kiêm phiếu xuất kho",
+        "Lập kèm hóa đơn",
+        "Đã lập hóa đơn",
+        "Ngày hạch toán (*)",
+        "Ngày chứng từ (*)",
+        "Số chứng từ (*)",
+    ]
+
+
+def test_analyze_preview_confirm_export_learns_profile(tmp_path, monkeypatch):
+    monkeypatch.setenv("MAPPING_DB_PATH", str(tmp_path / "profiles.sqlite"))
+    monkeypatch.setenv("AI_PROVIDER", "disabled")
+
+    with (SAMPLES / "raw_sales_sample.xlsx").open("rb") as handle:
+        analyze = client.post(
+            "/api/v1/uploads/analyze",
+            data={"target_template_id": "bsn_sales"},
+            files={
+                "file": (
+                    "raw_sales_sample.xlsx",
+                    handle,
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                )
+            },
+        )
+
+    assert analyze.status_code == 200
+    analyze_payload = analyze.json()
+    assert analyze_payload["target_template_id"] == "bsn_sales"
+    assert "Số chứng từ (*)" in analyze_payload["target_headers"]
+    assert "Mã hàng (*)" in analyze_payload["target_headers"]
+    assert analyze_payload["detected"]["header_row"] == 1
+    assert analyze_payload["detected"]["row_count"] == 1930
+    suggestion = analyze_payload["mapping_suggestion"]
+    assert suggestion["mapping"]["Mã hóa đơn"] == "Số chứng từ (*)"
+    assert suggestion["mapping"]["Thời gian"] == [
+        "Ngày hạch toán (*)",
+        "Ngày chứng từ (*)",
+    ]
+    assert suggestion["mapping"]["Column1"] == "Tiền chiết khấu"
+    assert "Địa chỉ (Khách hàng)" not in suggestion["mapping"]
+    assert suggestion["defaults"]["Mã khách hàng"] == "KH_LE"
+    assert suggestion["formulas"]["Số phiếu xuất"] == "XK_${Số chứng từ (*)}"
+
+    preview = client.post(
+        "/api/v1/mappings/preview",
+        json={
+            "upload_id": analyze_payload["upload_id"],
+            "target_template_id": "bsn_sales",
+            "mapping": suggestion["mapping"],
+            "defaults": suggestion["defaults"],
+            "formulas": suggestion["formulas"],
+        },
+    )
+    assert preview.status_code == 200
+    preview_payload = preview.json()
+    assert preview_payload["stats"] == {"source_rows": 1930, "output_rows": 1930}
+    first = preview_payload["rows"][0]
+    assert first["Số chứng từ (*)"] == "HD046178"
+    assert first["Số phiếu xuất"] == "XK_HD046178"
+    assert first["Mã hàng (*)"] == "SP094030"
+    assert first["Số lượng"] == 1
+    assert first["Đơn giá"] == 700000
+    assert first["Thành tiền"] == 700000
+    assert first["Tiền chiết khấu"] == 315000
+    assert first["Số lô"] == "01072029"
+    assert first["Hạn sử dụng"] == "2029-07-01T00:00:00"
+    assert preview_payload["rows"][35]["ĐVT"] == "Hộp"
+    assert preview_payload["rows"][113]["Mã khách hàng"] == "KH_LE"
+    assert preview_payload["rows"][1870]["Số chứng từ (*)"] == "HDO1764925151999"
+    assert preview_payload["rows"][1870]["Số phiếu xuất"] == "XK_HDO1764925151999"
+
+    confirm = client.post(
+        "/api/v1/mappings/confirm",
+        json={
+            "upload_id": analyze_payload["upload_id"],
+            "target_template_id": "bsn_sales",
+            "mapping": suggestion["mapping"],
+            "defaults": suggestion["defaults"],
+            "formulas": suggestion["formulas"],
+            "profile_name": "KiotViet bán hàng chi tiết",
+        },
+    )
+    assert confirm.status_code == 200
+    profile_id = confirm.json()["profile_id"]
+    db = tmp_path / "profiles.sqlite"
+    with sqlite3.connect(db) as connection:
+        stored = connection.execute(
+            "select mapping_json from mapping_profiles where id = ?", (profile_id,)
+        ).fetchone()[0]
+        stored_mapping = json.loads(stored)
+        stored_mapping["Địa chỉ (Khách hàng)"] = "Địa chỉ"
+        connection.execute(
+            "update mapping_profiles set mapping_json = ? where id = ?",
+            (json.dumps(stored_mapping, ensure_ascii=False), profile_id),
+        )
+
+    export = client.post(
+        "/api/v1/conversions/export",
+        json={"upload_id": analyze_payload["upload_id"], "profile_id": profile_id},
+    )
+    assert export.status_code == 200
+    assert export.headers["content-type"].startswith("application/vnd.ms-excel")
+    assert "Import misa" in export.headers["content-disposition"]
+
+    workbook = xlrd.open_workbook(file_contents=export.content)
+    sheet = workbook.sheet_by_index(0)
+    assert sheet.row_values(7)[:8] == preview_payload["headers"][:8]
+    headers = preview_payload["headers"]
+    assert sheet.cell_value(6, headers.index("TK thuế GTGT")) == ""
+    assert sheet.cell_value(6, headers.index("Mã kho")) == "Chi tiết giá vốn"
+    assert sheet.cell_value(8, headers.index("Số chứng từ (*)")) == "HD046178"
+    assert sheet.cell_value(8, headers.index("Địa chỉ")) == ""
+    assert sheet.cell_value(8, headers.index("Hạn sử dụng")) == 47300
+    assert sheet.cell_value(8, headers.index("Ngày hạch toán (*)")) == 46016.724817905095
+    assert sheet.cell_value(9, headers.index("Mã hàng (*)")) == "SP094013"
+    assert sheet.cell_value(9, headers.index("ĐVT")) == "Hộp"
+    assert sheet.cell_value(43, headers.index("ĐVT")) == "Hộp"
+    assert sheet.cell_value(121, headers.index("Mã khách hàng")) == "KH_LE"
+    assert sheet.cell_value(1878, headers.index("Số chứng từ (*)")) == "HDO1764925151999"
+    assert sheet.cell_value(1878, headers.index("Số phiếu xuất")) == "XK_HDO1764925151999"
+
+    with (SAMPLES / "raw_sales_sample.xlsx").open("rb") as handle:
+        reanalyze = client.post(
+            "/api/v1/uploads/analyze",
+            data={"target_template_id": "bsn_sales"},
+            files={
+                "file": (
+                    "raw_sales_sample.xlsx",
+                    handle,
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                )
+            },
+        )
+
+    assert reanalyze.status_code == 200
+    assert reanalyze.json()["mapping_suggestion"]["source"] == "profile"
+    assert reanalyze.json()["mapping_suggestion"]["profile_id"] == profile_id
+
+
+def test_analyze_falls_back_when_remote_ai_times_out(tmp_path, monkeypatch):
+    monkeypatch.setenv("MAPPING_DB_PATH", str(tmp_path / "profiles.sqlite"))
+    monkeypatch.setenv("AI_PROVIDER", "remote_http")
+    monkeypatch.setenv("AI_BASE_URL", "http://127.0.0.1:9/v1/misa/suggest-mapping")
+    monkeypatch.setenv("AI_TOKEN", "secret")
+    monkeypatch.setenv("AI_TIMEOUT_SECONDS", "0.01")
+    monkeypatch.setenv("AI_REQUIRED", "false")
+
+    with (SAMPLES / "raw_sales_sample.xlsx").open("rb") as handle:
+        response = client.post(
+            "/api/v1/uploads/analyze",
+            data={"target_template_id": "bsn_sales"},
+            files={
+                "file": (
+                    "raw_sales_sample.xlsx",
+                    handle,
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                )
+            },
+        )
+
+    assert response.status_code == 200
+    suggestion = response.json()["mapping_suggestion"]
+    assert suggestion["source"] == "heuristic"
+    assert any("AI" in warning for warning in suggestion["warnings"])
+
+
+def test_ai_gateway_requires_bearer_token(monkeypatch):
+    monkeypatch.setenv("AI_GATEWAY_TOKEN", "secret")
+    from app.ai_gateway import app as gateway_app
+
+    gateway_client = TestClient(gateway_app)
+    response = gateway_client.post(
+        "/v1/misa/suggest-mapping",
+        json={
+            "target_template": {"id": "bsn_sales", "headers": []},
+            "source": {"sheet_name": "Sheet1", "headers": [], "sample_rows": []},
+            "nearby_profiles": [],
+        },
+    )
+
+    assert response.status_code == 401
+
+
+def test_ai_gateway_normalizes_reversed_mapping_and_percent_confidence():
+    from app.ai_gateway import _normalize_gateway_response
+
+    normalized = _normalize_gateway_response(
+        {
+            "target_template_id": "bsn_sales",
+            "mapping": {
+                "Số chứng từ (*)": "Mã hóa đơn",
+                "Ngày hạch toán (*)": "Thời gian",
+                "Ngày chứng từ (*)": "Thời gian",
+            },
+            "confidence": 75,
+        },
+        {
+            "target_template": {
+                "headers": ["Số chứng từ (*)", "Ngày hạch toán (*)", "Ngày chứng từ (*)"]
+            },
+            "source": {"headers": ["Mã hóa đơn", "Thời gian"]},
+        },
+    )
+
+    assert normalized["mapping"] == {
+        "Mã hóa đơn": "Số chứng từ (*)",
+        "Thời gian": ["Ngày hạch toán (*)", "Ngày chứng từ (*)"],
+    }
+    assert normalized["confidence"] == 0.75
+
+
+def test_ai_gateway_rejects_non_mapping_report_shape():
+    from app.ai_gateway import _normalize_gateway_response
+
+    normalized = _normalize_gateway_response(
+        {
+            "report_type": "Sales Report",
+            "confidence": 90,
+            "summary": "Not a mapping response",
+        },
+        {
+            "target_template": {"id": "bsn_sales", "headers": ["Số chứng từ (*)"]},
+            "source": {"headers": ["Mã hóa đơn"]},
+        },
+    )
+
+    assert normalized == {
+        "target_template_id": "bsn_sales",
+        "mapping": {},
+        "defaults": {},
+        "formulas": {},
+        "confidence": 0.0,
+        "notes": [],
+    }
+
+
+def test_ai_suggestion_merges_with_heuristic_fallback():
+    from app.misa_mapping import MappingSuggestion, normalize_ai_suggestion
+
+    fallback = MappingSuggestion(
+        source="heuristic",
+        confidence=0.8,
+        mapping={
+            "Mã hóa đơn": "Số chứng từ (*)",
+            "Thời gian": ["Ngày hạch toán (*)", "Ngày chứng từ (*)"],
+            "Mã hàng": "Mã hàng (*)",
+            "Column1": "Tiền chiết khấu",
+        },
+        defaults={"TK Doanh thu/Có (*)": "5111"},
+        formulas={},
+        warnings=[],
+    )
+    suggestion = normalize_ai_suggestion(
+        {
+            "mapping": {
+                "Thời gian": "Ngày hạch toán (*)",
+                "Tên khách hàng": "Tên khách hàng",
+            },
+            "confidence": 0.6,
+        },
+        fallback,
+        target_template_id="bsn_sales",
+        target_headers=[
+            "Số chứng từ (*)",
+            "Ngày hạch toán (*)",
+            "Ngày chứng từ (*)",
+            "Tên khách hàng",
+            "Mã hàng (*)",
+            "Tiền chiết khấu",
+            "TK Doanh thu/Có (*)",
+        ],
+    )
+
+    assert suggestion.source == "mixed"
+    assert suggestion.mapping == {
+        "Mã hóa đơn": "Số chứng từ (*)",
+        "Thời gian": ["Ngày hạch toán (*)", "Ngày chứng từ (*)"],
+        "Tên khách hàng": "Tên khách hàng",
+        "Mã hàng": "Mã hàng (*)",
+        "Column1": "Tiền chiết khấu",
+    }
+    assert suggestion.confidence == 0.8
