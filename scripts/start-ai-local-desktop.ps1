@@ -111,33 +111,48 @@ function Ensure-OllamaTrayApp {
     return $true
 }
 
-function Get-ListeningProcess {
+function Get-ListeningProcesses {
     param([int]$Port)
 
-    $listener = netstat -ano | Select-String ":$Port\s" | Select-String "LISTENING" | Select-Object -First 1
-    if (-not $listener) {
-        return $null
+    $listeners = @(netstat -ano | Select-String ":$Port\s" | Select-String "LISTENING")
+    if (-not $listeners) {
+        return @()
     }
-    $processIdText = ($listener.ToString().Trim() -split "\s+")[-1]
-    return Get-CimInstance Win32_Process -Filter "ProcessId = $processIdText" -ErrorAction SilentlyContinue
+    $processIds = @(
+        $listeners |
+            ForEach-Object { ($_.ToString().Trim() -split "\s+")[-1] } |
+            Sort-Object -Unique
+    )
+    foreach ($processIdText in $processIds) {
+        Get-CimInstance Win32_Process -Filter "ProcessId = $processIdText" -ErrorAction SilentlyContinue
+    }
 }
 
 function Stop-ManagedListener {
     param(
         [int]$Port,
-        [string]$CommandLinePattern,
+        [string[]]$CommandLinePatterns,
         [string]$ServiceName
     )
 
-    $process = Get-ListeningProcess -Port $Port
-    if (-not $process) {
+    $processes = @(Get-ListeningProcesses -Port $Port)
+    if (-not $processes) {
         return
     }
-    if ($process.CommandLine -notlike $CommandLinePattern) {
-        throw "Port $Port đang được dùng bởi process khác ($($process.ProcessId)): $($process.CommandLine)"
+    foreach ($process in $processes) {
+        $isManaged = $false
+        foreach ($pattern in $CommandLinePatterns) {
+            if ($process.CommandLine -like $pattern) {
+                $isManaged = $true
+                break
+            }
+        }
+        if (-not $isManaged) {
+            throw "Port $Port đang được dùng bởi process khác ($($process.ProcessId)): $($process.CommandLine)"
+        }
+        "[$(Get-Date -Format o)] Restarting $ServiceName PID $($process.ProcessId)" | Add-Content -LiteralPath $script:LauncherLog -Encoding UTF8
+        Stop-Process -Id ([int]$process.ProcessId) -Force
     }
-    "[$(Get-Date -Format o)] Restarting $ServiceName PID $($process.ProcessId)" | Add-Content -LiteralPath $script:LauncherLog -Encoding UTF8
-    Stop-Process -Id ([int]$process.ProcessId) -Force
     Start-Sleep -Seconds 1
 }
 
@@ -206,7 +221,7 @@ try {
 
     Stop-ManagedListener `
         -Port $ConverterPort `
-        -CommandLinePattern "*uvicorn*app.main:app*" `
+        -CommandLinePatterns @("*uvicorn*app.main:app*", "*node.exe*server/server.js*", "*node.exe*server\server.js*") `
         -ServiceName "Converter AI"
 
     $env:MISA_TEMPLATE_DIR = $MisaTemplateDir
