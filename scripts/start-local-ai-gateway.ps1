@@ -19,7 +19,9 @@ New-Item -ItemType Directory -Force -Path $artifactDir | Out-Null
 
 if (-not (Test-Path -LiteralPath $TokenPath)) {
     $bytes = New-Object byte[] 36
-    [System.Security.Cryptography.RandomNumberGenerator]::Fill($bytes)
+    $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+    $rng.GetBytes($bytes)
+    $rng.Dispose()
     $token = [Convert]::ToBase64String($bytes).TrimEnd("=").Replace("+", "-").Replace("/", "_")
     Set-Content -LiteralPath $TokenPath -Value $token -NoNewline
 }

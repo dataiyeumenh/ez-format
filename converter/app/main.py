@@ -1,10 +1,17 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import uuid
 from pathlib import Path
 from typing import Annotated
+
+try:
+    from dotenv import load_dotenv
+    load_dotenv(Path(__file__).parent.parent / ".env")
+except ImportError:
+    pass  # python-dotenv not installed, rely on system env vars
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.encoders import jsonable_encoder
@@ -29,12 +36,23 @@ from app.models import ExportRowsRequest, PreviewResponse, ValidationReport
 
 app = FastAPI(title="EzFormat Converter API")
 
+
+def _get_cors_origins() -> list[str]:
+    """Read allowed origins from CORS_ORIGINS env var (comma-separated).
+    Use CORS_ORIGINS=* to allow all origins (e.g. when tunnelling via ngrok).
+    """
+    extra = os.getenv("CORS_ORIGINS", "").strip()
+    if extra == "*":
+        return ["*"]
+    origins = ["http://localhost:5173", "http://127.0.0.1:5173"]
+    if extra:
+        origins += [o.strip() for o in extra.split(",") if o.strip()]
+    return origins
+
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
-    ],
+    allow_origins=_get_cors_origins(),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -47,7 +65,34 @@ EXCEL_MEDIA_TYPE = "application/vnd.ms-excel"
 
 @app.get("/healthz")
 def healthz() -> dict[str, str]:
-    return {"status": "ok"}
+    import os
+    import urllib.request
+
+    ai_status = "disabled"
+    ai_provider = os.getenv("AI_PROVIDER", "disabled").lower()
+    if ai_provider == "remote_http":
+        base_url = os.getenv("AI_BASE_URL", "").strip()
+        if base_url:
+            # Derive gateway root from the full endpoint URL
+            from urllib.parse import urlparse
+            parsed = urlparse(base_url)
+            gateway_root = f"{parsed.scheme}://{parsed.netloc}/docs"
+            try:
+                urllib.request.urlopen(gateway_root, timeout=2)
+                ai_status = "online"
+            except Exception:
+                ai_status = "offline"
+        else:
+            ai_status = "offline"
+    elif ai_provider == "ollama":
+        ollama_url = os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434").rstrip("/")
+        try:
+            urllib.request.urlopen(f"{ollama_url}/api/tags", timeout=2)
+            ai_status = "online"
+        except Exception:
+            ai_status = "offline"
+
+    return {"status": "ok", "ai": ai_status}
 
 
 @app.get("/api/v1/templates")

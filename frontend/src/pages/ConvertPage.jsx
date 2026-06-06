@@ -80,6 +80,7 @@ const ConvertPage = () => {
   const {
     templates,
     serviceOnline,
+    aiOnline,
     analyzeFile,
     previewMapping,
     confirmMapping,
@@ -133,7 +134,9 @@ const ConvertPage = () => {
       (header) => ({
         header,
         value:
-          firstRow[header] !== undefined && firstRow[header] !== null && firstRow[header] !== ""
+          firstRow[header] !== undefined &&
+          firstRow[header] !== null &&
+          firstRow[header] !== ""
             ? String(firstRow[header])
             : "—",
       }),
@@ -141,22 +144,28 @@ const ConvertPage = () => {
   }, [previewHeaders, previewRows]);
   const keyMappingValues = useMemo(
     () =>
-      KEY_PREVIEW_HEADERS.filter((header) => targetHeaders.includes(header)).map((header) => {
-        const rawHeader = targetMapping[header];
-        const formula = formulas[header];
-        const defaultValue = defaults[header];
-        return {
-          header,
-          value: rawHeader
-            ? rawHeader
-            : formula
-              ? `Formula: ${formula}`
-              : defaultValue !== undefined && defaultValue !== ""
-                ? `Default: ${defaultValue}`
-                : "Chưa map",
-          ok: Boolean(rawHeader || formula || (defaultValue !== undefined && defaultValue !== "")),
-        };
-      }),
+      KEY_PREVIEW_HEADERS.filter((header) => targetHeaders.includes(header)).map(
+        (header) => {
+          const rawHeader = targetMapping[header];
+          const formula = formulas[header];
+          const defaultValue = defaults[header];
+          return {
+            header,
+            value: rawHeader
+              ? rawHeader
+              : formula
+                ? `Formula: ${formula}`
+                : defaultValue !== undefined && defaultValue !== ""
+                  ? `Default: ${defaultValue}`
+                  : "Chưa map",
+            ok: Boolean(
+              rawHeader ||
+              formula ||
+              (defaultValue !== undefined && defaultValue !== ""),
+            ),
+          };
+        },
+      ),
     [defaults, formulas, targetHeaders, targetMapping],
   );
   const keyMappingOkCount = keyMappingValues.filter((item) => item.ok).length;
@@ -294,6 +303,8 @@ const ConvertPage = () => {
 
   const handlePreview = async () => {
     if (!analyzePayload?.upload_id) return;
+    window.scrollBy({ top: 800, behavior: "smooth" });
+
     setConvStatus(STATUS.ANALYZING);
     setErrorMsg("");
     try {
@@ -402,23 +413,41 @@ const ConvertPage = () => {
                 Chuyển đổi Excel thô → MISA
               </h1>
               <p className="text-sm sm:text-base text-gray-500 mt-2 max-w-2xl mx-auto">
-                Backend đọc template MISA chuẩn, gợi ý mapping bằng profile/AI
-                optional, cho bạn sửa trước khi lưu setting và tải file.
+                Backend đọc template MISA chuẩn, gợi ý mapping bằng profile/AI optional,
+                cho bạn sửa trước khi lưu setting và tải file.
               </p>
             </div>
 
             {serviceOnline === false && (
-              <Alert variant="warning" title="Backend converter chưa sẵn sàng" className="mb-5">
-                Chạy converter FastAPI trước khi phân tích file. Nếu AI Gateway
-                offline, backend vẫn cho sửa mapping thủ công.
+              <Alert
+                variant="warning"
+                title="Backend converter chưa sẵn sàng"
+                className="mb-5"
+              >
+                Chạy converter FastAPI trước khi phân tích file. Nếu AI Gateway offline,
+                backend vẫn cho sửa mapping thủ công.
               </Alert>
             )}
 
             {serviceOnline === true && (
-              <p className="flex items-center justify-center gap-1.5 text-xs text-emerald-700 mb-4">
-                <Server size={14} />
-                Backend converter đang hoạt động
-              </p>
+              <div className="flex items-center justify-center gap-4 mb-4 flex-wrap">
+                <p className="flex items-center gap-1.5 text-xs text-emerald-700">
+                  <Server size={14} />
+                  Backend converter đang hoạt động
+                </p>
+                {aiOnline === true && (
+                  <p className="flex items-center gap-1.5 text-xs text-violet-700">
+                    <span className="inline-block w-2 h-2 rounded-full bg-violet-500 animate-pulse" />
+                    AI Gateway đang hoạt động
+                  </p>
+                )}
+                {aiOnline === false && (
+                  <p className="flex items-center gap-1.5 text-xs text-amber-600">
+                    <span className="inline-block w-2 h-2 rounded-full bg-amber-400" />
+                    AI Gateway offline — mapping thủ công
+                  </p>
+                )}
+              </div>
             )}
 
             <div className="grid gap-5 lg:grid-cols-[minmax(0,420px)_1fr]">
@@ -510,7 +539,12 @@ const ConvertPage = () => {
                     >
                       {(templates.length
                         ? templates
-                        : [{ id: DEFAULT_TEMPLATE_ID, label: "BSN - Form import bán hàng" }]
+                        : [
+                            {
+                              id: DEFAULT_TEMPLATE_ID,
+                              label: "BSN - Form import bán hàng",
+                            },
+                          ]
                       ).map((template) => (
                         <option key={template.id} value={template.id}>
                           {template.label}
@@ -523,7 +557,11 @@ const ConvertPage = () => {
                     type="button"
                     className="btn-primary w-full py-3"
                     onClick={handleAnalyze}
-                    disabled={!selectedFile || serviceOnline === false || convStatus === STATUS.ANALYZING}
+                    disabled={
+                      !selectedFile ||
+                      serviceOnline === false ||
+                      convStatus === STATUS.ANALYZING
+                    }
                   >
                     {convStatus === STATUS.ANALYZING && !analyzePayload ? (
                       <Loader2 size={18} className="animate-spin" />
@@ -551,7 +589,9 @@ const ConvertPage = () => {
                         Mapping:{" "}
                         <span className="font-medium">
                           {mappingSource || "—"}{" "}
-                          {confidence !== undefined ? `(${Math.round(confidence * 100)}%)` : ""}
+                          {confidence !== undefined
+                            ? `(${Math.round(confidence * 100)}%)`
+                            : ""}
                         </span>
                       </p>
                     </div>
@@ -573,7 +613,11 @@ const ConvertPage = () => {
                 )}
 
                 {warnings.length > 0 && (
-                  <Alert variant="warning" title="Cảnh báo mapping" className="text-left">
+                  <Alert
+                    variant="warning"
+                    title="Cảnh báo mapping"
+                    className="text-left"
+                  >
                     <ul className="list-disc pl-4 space-y-0.5">
                       {warnings.slice(0, 6).map((warning, index) => (
                         <li key={`${warning}-${index}`}>{warning}</li>
@@ -583,7 +627,11 @@ const ConvertPage = () => {
                 )}
 
                 {issues.length > 0 && (
-                  <Alert variant="warning" title="Vấn đề cần kiểm tra" className="text-left">
+                  <Alert
+                    variant="warning"
+                    title="Vấn đề cần kiểm tra"
+                    className="text-left"
+                  >
                     <ul className="list-disc pl-4 space-y-0.5">
                       {issues.slice(0, 6).map((issue, index) => (
                         <li key={`${issue.code || "issue"}-${index}`}>
@@ -601,7 +649,8 @@ const ConvertPage = () => {
                       Chưa có mapping
                     </h2>
                     <p className="text-sm text-gray-500 mt-1">
-                      Upload file rồi bấm phân tích để backend đọc schema và gợi ý mapping.
+                      Upload file rồi bấm phân tích để backend đọc schema và gợi ý
+                      mapping.
                     </p>
                   </div>
                 )}
@@ -644,7 +693,8 @@ const ConvertPage = () => {
                           className="btn-primary justify-center px-5"
                           onClick={handleDownload}
                           disabled={
-                            convStatus === STATUS.DOWNLOADING || convStatus === STATUS.ANALYZING
+                            convStatus === STATUS.DOWNLOADING ||
+                            convStatus === STATUS.ANALYZING
                           }
                         >
                           {convStatus === STATUS.DOWNLOADING ? (
@@ -723,7 +773,9 @@ const ConvertPage = () => {
                                 <select
                                   className="w-full rounded-lg border border-gray-200 bg-white px-2 py-1.5 text-xs"
                                   value={targetMapping[target] || ""}
-                                  onChange={(e) => updateTargetMapping(target, e.target.value)}
+                                  onChange={(e) =>
+                                    updateTargetMapping(target, e.target.value)
+                                  }
                                 >
                                   <option value="">— Không map —</option>
                                   {rawHeaders.map((raw) => (
@@ -738,7 +790,9 @@ const ConvertPage = () => {
                                   type="text"
                                   className="w-full rounded-lg border border-gray-200 px-2 py-1.5 text-xs"
                                   value={defaults[target] ?? ""}
-                                  onChange={(e) => updateDefault(target, e.target.value)}
+                                  onChange={(e) =>
+                                    updateDefault(target, e.target.value)
+                                  }
                                   placeholder="Giá trị mặc định"
                                 />
                               </td>
@@ -747,8 +801,10 @@ const ConvertPage = () => {
                                   type="text"
                                   className="w-full rounded-lg border border-gray-200 px-2 py-1.5 text-xs"
                                   value={formulas[target] ?? ""}
-                                  onChange={(e) => updateFormula(target, e.target.value)}
-                                  placeholder='VD: XK_${Số chứng từ (*)}'
+                                  onChange={(e) =>
+                                    updateFormula(target, e.target.value)
+                                  }
+                                  placeholder="VD: XK_${Số chứng từ (*)}"
                                 />
                               </td>
                             </tr>
@@ -766,8 +822,8 @@ const ConvertPage = () => {
                       <div>
                         <p className="font-semibold">Preview MISA đã tạo</p>
                         <p className="text-xs">
-                          {previewStats?.output_rows || previewRows.length} dòng output từ{" "}
-                          {previewStats?.source_rows || "?"} dòng raw.
+                          {previewStats?.output_rows || previewRows.length} dòng output
+                          từ {previewStats?.source_rows || "?"} dòng raw.
                         </p>
                       </div>
                     </div>
@@ -811,7 +867,11 @@ const ConvertPage = () => {
                 )}
 
                 {convStatus === STATUS.SUCCESS && (
-                  <Alert variant="success" title="Đã xuất file MISA" className="text-left">
+                  <Alert
+                    variant="success"
+                    title="Đã xuất file MISA"
+                    className="text-left"
+                  >
                     Setting mapping đã được lưu. Lần sau upload file cùng schema,
                     backend sẽ ưu tiên dùng profile này.
                   </Alert>

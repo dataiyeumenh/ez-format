@@ -3,10 +3,12 @@
   "private": true,
   "version": "1.0.0",
   "scripts": {
-    "desktop": "concurrently -k -n backend,converter,frontend \"npm --prefix backend run dev\" \"npm --prefix converter run dev\" \"npm --prefix frontend run dev\"",
-    "backend": "npm --prefix backend run dev",
+    "dev": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/dev.ps1",
+    "desktop": "concurrently -k -n backend,converter,frontend \"npm --prefix backend run dev:only\" \"npm --prefix converter run dev\" \"npm --prefix frontend run dev\"",
+    "backend": "npm --prefix backend run dev:only",
     "converter": "npm --prefix converter run dev",
     "ai:gateway": "pwsh -File scripts/start-local-ai-gateway.ps1 -Restart",
+    "ai:ngrok": "pwsh -File scripts/start-ngrok-ai.ps1",
     "converter:ai": "pwsh -File scripts/start-converter-ai.ps1",
     "frontend": "npm --prefix frontend run dev",
     "setup:fixtures": "pwsh -File scripts/setup-fixtures.ps1",
@@ -32,6 +34,6 @@
     "test:autopilot:until": "pwsh -File scripts/backend-test-autopilot.ps1 -UntilPass"
   },
   "devDependencies": {
-    "concurrently": "^9.1.2"
+    "concurrently": "^9.2.1"
   }
 }

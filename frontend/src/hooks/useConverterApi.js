@@ -39,24 +39,30 @@ async function readJsonResponse(response, fallback) {
 export function useConverterApi() {
   const [templates, setTemplates] = useState([]);
   const [serviceOnline, setServiceOnline] = useState(null);
+  const [aiOnline, setAiOnline] = useState(null); // null=loading, true=online, false=offline, "disabled"=không cấu hình
 
   useEffect(() => {
     let cancelled = false;
 
     Promise.all([
-      fetch(`${pythonBaseURL}/healthz`).then((r) => r.ok),
+      fetch(`${pythonBaseURL}/healthz`).then((r) =>
+        r.ok ? r.json() : Promise.reject(),
+      ),
       fetch(`${pythonBaseURL}/api/v1/templates`).then((r) =>
         r.ok ? r.json() : Promise.reject(new Error("templates unavailable")),
       ),
     ])
-      .then(([online, data]) => {
+      .then(([health, data]) => {
         if (cancelled) return;
-        setServiceOnline(online);
+        setServiceOnline(true);
+        const ai = health?.ai;
+        setAiOnline(ai === "online" ? true : ai === "offline" ? false : "disabled");
         setTemplates(data.items || []);
       })
       .catch(() => {
         if (cancelled) return;
         setServiceOnline(false);
+        setAiOnline(false);
         setTemplates([]);
       });
 
@@ -112,6 +118,7 @@ export function useConverterApi() {
   return {
     templates,
     serviceOnline,
+    aiOnline,
     analyzeFile,
     previewMapping,
     confirmMapping,
