@@ -86,9 +86,7 @@ const PaymentPage = () => {
                               </span>
                             </div>
                           )}
-                          {m.id === "banking" && (
-                            <span className="text-lg">🏦</span>
-                          )}
+                          {m.id === "banking" && <span className="text-lg">🏦</span>}
                           <span
                             className={`text-sm font-semibold ${selected === m.id && m.highlight ? "text-white" : "text-gray-800"}`}
                           >
@@ -103,9 +101,7 @@ const PaymentPage = () => {
                       </div>
                     ) : (
                       <div className="flex items-center justify-center gap-2 py-3.5 px-4">
-                        <span className="flex-shrink-0 text-gray-800">
-                          {m.icon}
-                        </span>
+                        <span className="flex-shrink-0 text-gray-800">{m.icon}</span>
                         <span className="text-sm font-semibold text-gray-700">
                           {m.label}
                         </span>
@@ -141,10 +137,7 @@ const PaymentPage = () => {
                     },
                     { label: "Thuế", value: "0 VND" },
                   ].map((row) => (
-                    <div
-                      key={row.label}
-                      className="flex justify-between text-sm"
-                    >
+                    <div key={row.label} className="flex justify-between text-sm">
                       <span className="text-gray-500">{row.label}</span>
                       <span
                         className={`font-medium ${row.valueColor || "text-gray-700"}`}
@@ -157,12 +150,8 @@ const PaymentPage = () => {
 
                 <div className="border-t border-dashed border-gray-200 mt-4 pt-4 flex items-center justify-between">
                   <div>
-                    <p className="text-xs text-gray-400 mb-0.5">
-                      Tổng giá tiền
-                    </p>
-                    <p className="text-xl font-black text-gray-900">
-                      {planPrice}
-                    </p>
+                    <p className="text-xs text-gray-400 mb-0.5">Tổng giá tiền</p>
+                    <p className="text-xl font-black text-gray-900">{planPrice}</p>
                   </div>
                   <div className="w-12 h-12 bg-blue-50 rounded-xl flex items-center justify-center">
                     <FileText size={22} className="text-blue-600" />

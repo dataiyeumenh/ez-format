@@ -1,0 +1,39 @@
+{
+  "failed": [],
+  "timestamp": "2026-05-30 00:16:44",
+  "steps": [
+    {
+      "seconds": 0.0081837,
+      "name": "Prerequisites",
+      "status": "ok"
+    },
+    {
+      "seconds": 0.0046629,
+      "name": "Fixtures templates",
+      "status": "ok"
+    },
+    {
+      "seconds": 0.2512298,
+      "name": "Backend syntax",
+      "status": "ok"
+    },
+    {
+      "seconds": 2.9624765,
+      "name": "Frontend build",
+      "status": "ok"
+    },
+    {
+      "seconds": 1.0532791,
+      "name": "Converter API smoke",
+      "status": "ok"
+    }
+  ],
+  "ok": true,
+  "passed": [
+    "Prerequisites",
+    "Fixtures templates",
+    "Backend syntax",
+    "Frontend build",
+    "Converter API smoke"
+  ]
+}

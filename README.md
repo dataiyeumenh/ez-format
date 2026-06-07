@@ -7,8 +7,9 @@ Dự án chuyển đổi file kế toán sử dụng **MERN Stack** (MongoDB, Ex
 ## Cấu trúc dự án
 
 ```
-EXE101/
-├── backend/      ← Node.js + Express + MongoDB
+ez-format/
+├── backend/      ← Node.js + Express + MongoDB (auth, admin)
+├── converter/    ← Python FastAPI (Excel → MISA convert, validate, AI)
 └── frontend/     ← React + Vite + Tailwind CSS
 ```
 
@@ -23,29 +24,80 @@ EXE101/
 
 ## Cài đặt & Chạy
 
-### 1. Backend
+### Cả stack (khuyến nghị)
+
+```bash
+npm install
+npm run setup:fixtures
+cd backend && npm install && cd ..
+cd frontend && npm install && cd ..
+cd converter && python -m pip install -r requirements.txt && cd ..
+
+# Terminal 1 — hoặc một lệnh:
+npm run desktop
+```
+
+| Service   | URL                      |
+| --------- | ------------------------ |
+| Frontend  | http://localhost:5173    |
+| Node API  | http://localhost:5000    |
+| Converter | http://localhost:8000    |
+
+Frontend proxy: `/api` → Node, `/python-api` → Converter.
+
+### QA/QC tự động
+
+```powershell
+npm run qa              # kiểm tra đầy đủ (build + 43 test)
+npm run qa:fast         # nhanh (~15s)
+npm run qa:autopilot    # chạy QA, retry 3 lần, wake agent nếu fail
+npm run qa:watch        # lặp QA mỗi 60 phút (terminal nền)
+```
+
+Chi tiết: [docs/QA_AUTOMATION.md](docs/QA_AUTOMATION.md)
+
+### Cải tiến UI (sau QA)
+
+```powershell
+npm run ui:improve     # lint + prettier + build
+npm run pipeline       # qa:fast rồi ui:improve
+npm run ui:watch       # lặp cải tiến UI (3h)
+```
+
+Extensions: Tailwind IntelliSense, Prettier, ESLint, Color Highlight, Live Server — xem [docs/UI_AUTOMATION.md](docs/UI_AUTOMATION.md).
+
+### Cải tiến UX liên tục
+
+```powershell
+npm run improve:loop    # lặp mỗi 2h (terminal Cursor + monitored output)
+```
+
+Chi tiết: [docs/IMPROVEMENT_LOOP.md](docs/IMPROVEMENT_LOOP.md)
+
+### 1. Node backend (auth / admin)
 
 ```bash
 cd backend
 npm install
-
-# Cấu hình môi trường
-cp .env.example .env
-# Chạy development
+cp .env.example .env   # nếu có
 npm run dev
 ```
 
-Backend chạy tại: `http://localhost:5000`
+### 2. Python converter
 
-### 2. Frontend
+```powershell
+cd converter
+python -m pip install -r requirements.txt
+npm run dev
+```
+
+### 3. Frontend
 
 ```bash
 cd frontend
 npm install
 npm run dev
 ```
-
-Frontend chạy tại: `http://localhost:5173`
 
 ---
 

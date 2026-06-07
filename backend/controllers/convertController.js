@@ -2,15 +2,21 @@
  * convertController.js
  * Orchestrates the full Excel → MISA conversion pipeline.
  *
- * Two endpoints:
+ * Legacy endpoints:
  *  POST /api/convert         – Upload Excel, returns JSON preview data
  *  POST /api/convert/export  – Accepts edited JSON rows, returns Excel download
+ *
+ * v1 endpoints for the external backend flow:
+ *  GET  /api/v1/conversion-types
+ *  POST /api/v1/conversions/validate
+ *  POST /api/v1/conversions
  */
 
 const { readExcelBuffer } = require("../utils/excelReader");
 const { detectColumns } = require("../utils/columnDetector");
 const { mapToMisa } = require("../utils/misaMapper");
 const { buildMisaExcel, MISA_HEADERS } = require("../utils/misaWriter");
+const { getConversionTypes, getConversionType, buildValidationReport } = require("../services/conversionService");
 
 /**
  * POST /api/convert

@@ -4,6 +4,8 @@ import { Mail, Lock, Eye, EyeOff, User } from "lucide-react";
 import { useAuth } from "../context/AuthContext";
 import Navbar from "../components/Navbar";
 import Footer from "../components/Footer";
+import Alert from "../components/ui/Alert";
+import { getApiErrorMessage } from "../utils/apiError";
 
 const RegisterPage = () => {
   const navigate = useNavigate();
@@ -35,14 +37,14 @@ const RegisterPage = () => {
       await register(formData.name, formData.email, formData.password);
       navigate("/");
     } catch (err) {
-      setError(err.response?.data?.message || "Đăng ký thất bại");
+      setError(getApiErrorMessage(err, "Đăng ký thất bại"));
     } finally {
       setLoading(false);
     }
   };
 
   return (
-    <div className="min-h-screen flex flex-col bg-gray-50">
+    <div className="min-h-screen flex flex-col bg-mesh">
       <Navbar />
       <main className="flex-1 flex items-center justify-center px-4 py-12">
         <div className="w-full max-w-sm bg-white rounded-2xl shadow-sm border border-gray-100 p-8">
@@ -55,9 +57,7 @@ const RegisterPage = () => {
                 <span className="text-white font-black text-xl">EZ</span>
               </div>
             </div>
-            <h2 className="text-lg font-bold text-gray-900">
-              Tạo tài khoản mới
-            </h2>
+            <h2 className="text-lg font-bold text-gray-900">Tạo tài khoản mới</h2>
             <p className="text-sm text-gray-500 text-center mt-1">
               Tham gia EzFormat và chuẩn hoá dữ liệu kế toán của bạn
             </p>
@@ -65,9 +65,9 @@ const RegisterPage = () => {
 
           {/* Error */}
           {error && (
-            <div className="bg-red-50 border border-red-200 text-red-600 text-sm px-4 py-3 rounded-lg mb-4">
+            <Alert variant="error" className="mb-4">
               {error}
-            </div>
+            </Alert>
           )}
 
           <form onSubmit={handleSubmit} className="space-y-4">
@@ -168,11 +168,7 @@ const RegisterPage = () => {
                   onClick={() => setShowConfirmPassword(!showConfirmPassword)}
                   className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600"
                 >
-                  {showConfirmPassword ? (
-                    <EyeOff size={16} />
-                  ) : (
-                    <Eye size={16} />
-                  )}
+                  {showConfirmPassword ? <EyeOff size={16} /> : <Eye size={16} />}
                 </button>
               </div>
             </div>
@@ -190,9 +186,7 @@ const RegisterPage = () => {
           {/* Divider */}
           <div className="flex items-center gap-3 my-5">
             <div className="flex-1 h-px bg-gray-200" />
-            <span className="text-xs text-gray-400 uppercase">
-              HOẶC TIẾP TỤC VỚI
-            </span>
+            <span className="text-xs text-gray-400 uppercase">HOẶC TIẾP TỤC VỚI</span>
             <div className="flex-1 h-px bg-gray-200" />
           </div>
 
@@ -222,10 +216,7 @@ const RegisterPage = () => {
           {/* Login link */}
           <p className="text-center text-sm text-gray-500 mt-5">
             Đã có tài khoản?{" "}
-            <Link
-              to="/login"
-              className="text-blue-600 hover:text-blue-700 font-medium"
-            >
+            <Link to="/login" className="text-blue-600 hover:text-blue-700 font-medium">
               Đăng nhập
             </Link>
           </p>

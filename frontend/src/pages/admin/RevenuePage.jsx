@@ -154,9 +154,7 @@ const RevenuePage = () => {
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
           <div className="bg-white rounded-xl p-5 border border-gray-100 col-span-2">
             <div className="flex items-center justify-between mb-4">
-              <h3 className="text-sm font-semibold text-gray-900">
-                Revenue Over Time
-              </h3>
+              <h3 className="text-sm font-semibold text-gray-900">Revenue Over Time</h3>
               <div className="flex items-center gap-3 text-xs text-gray-500">
                 <span className="flex items-center gap-1.5">
                   <span className="w-3 h-3 rounded-full bg-blue-600 inline-block" />
@@ -221,9 +219,7 @@ const RevenuePage = () => {
               <div className="pt-2 border-t border-gray-100">
                 <div className="flex justify-between text-sm">
                   <span className="text-gray-500">Hiệu quả nhất</span>
-                  <span className="font-semibold text-blue-600">
-                    Personal Plan
-                  </span>
+                  <span className="font-semibold text-blue-600">Personal Plan</span>
                 </div>
               </div>
             </div>
@@ -233,9 +229,7 @@ const RevenuePage = () => {
         {/* Transactions */}
         <div className="bg-white rounded-xl border border-gray-100">
           <div className="flex items-center justify-between px-5 py-4 border-b border-gray-100">
-            <h3 className="text-sm font-semibold text-gray-900">
-              Giao dịch gần đây
-            </h3>
+            <h3 className="text-sm font-semibold text-gray-900">Giao dịch gần đây</h3>
             <button className="text-sm text-blue-600 hover:text-blue-700 font-medium">
               View All Transactions
             </button>
@@ -244,16 +238,14 @@ const RevenuePage = () => {
             <table className="w-full">
               <thead>
                 <tr className="border-b border-gray-50">
-                  {["DATE", "USER", "PLAN", "AMOUNT", "STATUS", "ACTION"].map(
-                    (h) => (
-                      <th
-                        key={h}
-                        className="text-left text-xs font-semibold text-gray-400 uppercase px-5 py-3"
-                      >
-                        {h}
-                      </th>
-                    ),
-                  )}
+                  {["DATE", "USER", "PLAN", "AMOUNT", "STATUS", "ACTION"].map((h) => (
+                    <th
+                      key={h}
+                      className="text-left text-xs font-semibold text-gray-400 uppercase px-5 py-3"
+                    >
+                      {h}
+                    </th>
+                  ))}
                 </tr>
               </thead>
               <tbody>

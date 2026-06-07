@@ -1,0 +1,39 @@
+{
+  "name": "ezformat-workspace",
+  "private": true,
+  "version": "1.0.0",
+  "scripts": {
+    "dev": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/dev.ps1",
+    "desktop": "concurrently -k -n backend,converter,frontend \"npm --prefix backend run dev:only\" \"npm --prefix converter run dev\" \"npm --prefix frontend run dev\"",
+    "backend": "npm --prefix backend run dev:only",
+    "converter": "npm --prefix converter run dev",
+    "ai:gateway": "pwsh -File scripts/start-local-ai-gateway.ps1 -Restart",
+    "ai:ngrok": "pwsh -File scripts/start-ngrok-ai.ps1",
+    "converter:ai": "pwsh -File scripts/start-converter-ai.ps1",
+    "frontend": "npm --prefix frontend run dev",
+    "setup:fixtures": "pwsh -File scripts/setup-fixtures.ps1",
+    "qa": "pwsh -File scripts/qa-qc.ps1",
+    "qa:fast": "pwsh -File scripts/qa-qc.ps1 -SkipSlowTests",
+    "qa:ci": "pwsh -File scripts/qa-qc.ps1 -SkipSlowTests",
+    "qa:autopilot": "pwsh -File scripts/qa-autopilot.ps1 -Fast",
+    "qa:autopilot:full": "pwsh -File scripts/qa-autopilot.ps1",
+    "qa:watch": "pwsh -File scripts/qa-autopilot.ps1 -Watch -WatchIntervalMinutes 60",
+    "hooks:install": "pwsh -File scripts/install-git-hooks.ps1",
+    "site:check": "npm run qa",
+    "improve:loop": "pwsh -File scripts/improve-loop.ps1",
+    "ui:improve": "pwsh -File scripts/ui-improve.ps1",
+    "ui:autopilot": "pwsh -File scripts/ui-improve-autopilot.ps1",
+    "ui:watch": "pwsh -File scripts/ui-improve-autopilot.ps1 -Watch -WatchIntervalMinutes 180",
+    "pipeline": "pwsh -File scripts/pipeline-autopilot.ps1",
+    "test:extreme": "pwsh -File scripts/extreme-test.ps1",
+    "test:stress": "pwsh -File scripts/stress-backend.ps1",
+    "test:specialized": "pwsh -File scripts/specialized-1000.ps1",
+    "test:gate": "pwsh -File scripts/backend-test-gate.ps1",
+    "test:gate:fast": "pwsh -File scripts/backend-test-gate.ps1 -SkipFullPytest",
+    "test:autopilot": "pwsh -File scripts/backend-test-autopilot.ps1",
+    "test:autopilot:until": "pwsh -File scripts/backend-test-autopilot.ps1 -UntilPass"
+  },
+  "devDependencies": {
+    "concurrently": "^9.2.1"
+  }
+}

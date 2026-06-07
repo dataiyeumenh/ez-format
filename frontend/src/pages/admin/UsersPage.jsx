@@ -96,9 +96,7 @@ const UsersPage = () => {
       setTotal(data.total);
       setTotalPages(data.totalPages);
     } catch (err) {
-      setError(
-        err.response?.data?.message || "Không thể tải danh sách người dùng",
-      );
+      setError(err.response?.data?.message || "Không thể tải danh sách người dùng");
     } finally {
       setLoading(false);
     }
@@ -167,12 +165,10 @@ const UsersPage = () => {
         {/* Page header */}
         <div className="flex items-center justify-between">
           <div>
-            <h1 className="text-2xl font-black text-gray-900">
-              Quản lý người dùng
-            </h1>
+            <h1 className="text-2xl font-black text-gray-900">Quản lý người dùng</h1>
             <p className="text-sm text-gray-500 mt-0.5">
-              Quản lý, xác thực và giám sát người dùng cùng các gói đăng ký trên
-              hệ thống.
+              Quản lý, xác thực và giám sát người dùng cùng các gói đăng ký trên hệ
+              thống.
             </p>
           </div>
           <div className="flex items-center gap-3">
@@ -230,9 +226,7 @@ const UsersPage = () => {
               <p className="text-xl font-black text-gray-900">
                 {loading ? "—" : s.value}
               </p>
-              <p className="text-xs text-gray-500 mt-0.5 uppercase">
-                {s.label}
-              </p>
+              <p className="text-xs text-gray-500 mt-0.5 uppercase">{s.label}</p>
             </div>
           ))}
         </div>
@@ -405,10 +399,7 @@ const UsersPage = () => {
               </button>
               {getPaginationPages().map((p, i) =>
                 p === "..." ? (
-                  <span
-                    key={`ellipsis-${i}`}
-                    className="px-2 text-gray-400 text-sm"
-                  >
+                  <span key={`ellipsis-${i}`} className="px-2 text-gray-400 text-sm">
                     ...
                   </span>
                 ) : (
@@ -422,9 +413,7 @@ const UsersPage = () => {
                 ),
               )}
               <button
-                onClick={() =>
-                  setCurrentPage(Math.min(totalPages, currentPage + 1))
-                }
+                onClick={() => setCurrentPage(Math.min(totalPages, currentPage + 1))}
                 disabled={currentPage === totalPages}
                 className="flex items-center gap-1 px-3 py-1.5 text-sm text-gray-600 border border-gray-200 rounded-lg hover:bg-gray-50 transition-colors disabled:opacity-40"
               >

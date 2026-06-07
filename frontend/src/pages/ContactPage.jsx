@@ -12,9 +12,7 @@ const ContactPage = () => {
       <main className="flex-1">
         {/* Header */}
         <section className="py-16 px-4 text-center bg-white border-b border-gray-100">
-          <h1 className="text-4xl font-black text-gray-900">
-            Liên hệ chúng tôi
-          </h1>
+          <h1 className="text-4xl font-black text-gray-900">Liên hệ chúng tôi</h1>
         </section>
 
         {/* Contact info */}
@@ -25,9 +23,9 @@ const ContactPage = () => {
                 Chúng tôi luôn sẵn sàng hỗ trợ bạn.
               </h2>
               <p className="text-gray-500 text-sm leading-relaxed">
-                Dù bạn có thắc mắc kỹ thuật hay cần giải pháp nhận dạng, chúng
-                tôi luôn sẵn sàng hỗ trợ để bạn nhanh chóng tập trung vào những
-                công việc quan trọng hơn.
+                Dù bạn có thắc mắc kỹ thuật hay cần giải pháp nhận dạng, chúng tôi luôn
+                sẵn sàng hỗ trợ để bạn nhanh chóng tập trung vào những công việc quan
+                trọng hơn.
               </p>
             </div>
 
@@ -37,9 +35,7 @@ const ContactPage = () => {
                   Địa chỉ Email
                 </p>
                 <p className="text-sm text-gray-500">—</p>
-                <p className="text-sm text-gray-700 font-medium">
-                  Ezformat@gmail.com
-                </p>
+                <p className="text-sm text-gray-700 font-medium">Ezformat@gmail.com</p>
               </div>
               <div>
                 <p className="text-sm font-semibold text-gray-700 mb-1">

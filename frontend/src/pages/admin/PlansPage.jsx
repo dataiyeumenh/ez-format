@@ -82,8 +82,7 @@ const features = [
 ];
 
 const renderCell = (val) => {
-  if (val === true)
-    return <Check size={16} className="text-green-500 mx-auto" />;
+  if (val === true) return <Check size={16} className="text-green-500 mx-auto" />;
   if (val === false) return <X size={16} className="text-gray-300 mx-auto" />;
   return <span className="text-sm text-gray-700">{val}</span>;
 };
@@ -95,9 +94,7 @@ const PlansPage = () => {
         {/* Header */}
         <div className="flex items-center justify-between">
           <div>
-            <h1 className="text-2xl font-black text-gray-900">
-              Quản lý gói dịch vụ
-            </h1>
+            <h1 className="text-2xl font-black text-gray-900">Quản lý gói dịch vụ</h1>
             <p className="text-sm text-gray-500 mt-0.5">
               Quản lý danh sách gói dịch vụ và điều chỉnh giá đăng ký hệ thống.
             </p>
@@ -129,9 +126,7 @@ const PlansPage = () => {
                 {p.name}
               </p>
               <div className="flex items-baseline gap-1 mb-1">
-                <span className="text-xl font-black text-gray-900">
-                  {p.price}
-                </span>
+                <span className="text-xl font-black text-gray-900">{p.price}</span>
                 <span className="text-xs text-gray-400">{p.period}</span>
               </div>
               <p className="text-xs text-gray-500 mb-4">
@@ -192,18 +187,12 @@ const PlansPage = () => {
                     <td className="px-5 py-3.5 text-sm font-medium text-gray-800">
                       {f.name}
                     </td>
-                    <td className="px-5 py-3.5 text-center">
-                      {renderCell(f.free)}
-                    </td>
-                    <td className="px-5 py-3.5 text-center">
-                      {renderCell(f.student)}
-                    </td>
+                    <td className="px-5 py-3.5 text-center">{renderCell(f.free)}</td>
+                    <td className="px-5 py-3.5 text-center">{renderCell(f.student)}</td>
                     <td className="px-5 py-3.5 text-center">
                       {renderCell(f.personal)}
                     </td>
-                    <td className="px-5 py-3.5 text-center">
-                      {renderCell(f.class)}
-                    </td>
+                    <td className="px-5 py-3.5 text-center">{renderCell(f.class)}</td>
                   </tr>
                 ))}
               </tbody>

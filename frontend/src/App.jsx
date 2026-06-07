@@ -1,32 +1,39 @@
-import {
-  BrowserRouter as Router,
-  Routes,
-  Route,
-  Navigate,
-} from "react-router-dom";
+import { lazy, Suspense } from "react";
+import { BrowserRouter as Router, Routes, Route, Navigate } from "react-router-dom";
+import { Loader2 } from "lucide-react";
 import { AuthProvider } from "./context/AuthContext";
-import ProtectedRoute from "./components/ProtectedRoute";
 import AdminRoute from "./components/AdminRoute";
 
-import HomePage from "./pages/HomePage";
+import LandingPage from "./pages/LandingPage";
+import ConvertPage from "./pages/ConvertPage";
 import LoginPage from "./pages/LoginPage";
 import RegisterPage from "./pages/RegisterPage";
 import PricingPage from "./pages/PricingPage";
 import ContactPage from "./pages/ContactPage";
 import PaymentPage from "./pages/PaymentPage";
-import AdminDashboard from "./pages/admin/DashboardPage";
-import UsersPage from "./pages/admin/UsersPage";
-import FilesPage from "./pages/admin/FilesPage";
-import PlansPage from "./pages/admin/PlansPage";
-import RevenuePage from "./pages/admin/RevenuePage";
-import LogsPage from "./pages/admin/LogsPage";
+
+const AdminDashboard = lazy(() => import("./pages/admin/DashboardPage"));
+const UsersPage = lazy(() => import("./pages/admin/UsersPage"));
+const FilesPage = lazy(() => import("./pages/admin/FilesPage"));
+const PlansPage = lazy(() => import("./pages/admin/PlansPage"));
+const RevenuePage = lazy(() => import("./pages/admin/RevenuePage"));
+const LogsPage = lazy(() => import("./pages/admin/LogsPage"));
+
+function PageLoader() {
+  return (
+    <div className="min-h-[40vh] flex items-center justify-center">
+      <Loader2 className="animate-spin text-primary-500" size={32} />
+    </div>
+  );
+}
 
 function App() {
   return (
     <AuthProvider>
       <Router>
         <Routes>
-          <Route path="/" element={<HomePage />} />
+          <Route path="/" element={<LandingPage />} />
+          <Route path="/convert" element={<ConvertPage />} />
           <Route path="/login" element={<LoginPage />} />
           <Route path="/register" element={<RegisterPage />} />
           <Route path="/pricing" element={<PricingPage />} />
@@ -38,7 +45,9 @@ function App() {
             path="/admin"
             element={
               <AdminRoute>
-                <AdminDashboard />
+                <Suspense fallback={<PageLoader />}>
+                  <AdminDashboard />
+                </Suspense>
               </AdminRoute>
             }
           />
@@ -46,7 +55,9 @@ function App() {
             path="/admin/dashboard"
             element={
               <AdminRoute>
-                <AdminDashboard />
+                <Suspense fallback={<PageLoader />}>
+                  <AdminDashboard />
+                </Suspense>
               </AdminRoute>
             }
           />
@@ -54,7 +65,9 @@ function App() {
             path="/admin/users"
             element={
               <AdminRoute>
-                <UsersPage />
+                <Suspense fallback={<PageLoader />}>
+                  <UsersPage />
+                </Suspense>
               </AdminRoute>
             }
           />
@@ -62,7 +75,9 @@ function App() {
             path="/admin/files"
             element={
               <AdminRoute>
-                <FilesPage />
+                <Suspense fallback={<PageLoader />}>
+                  <FilesPage />
+                </Suspense>
               </AdminRoute>
             }
           />
@@ -70,7 +85,9 @@ function App() {
             path="/admin/plans"
             element={
               <AdminRoute>
-                <PlansPage />
+                <Suspense fallback={<PageLoader />}>
+                  <PlansPage />
+                </Suspense>
               </AdminRoute>
             }
           />
@@ -78,7 +95,9 @@ function App() {
             path="/admin/revenue"
             element={
               <AdminRoute>
-                <RevenuePage />
+                <Suspense fallback={<PageLoader />}>
+                  <RevenuePage />
+                </Suspense>
               </AdminRoute>
             }
           />
@@ -86,7 +105,9 @@ function App() {
             path="/admin/logs"
             element={
               <AdminRoute>
-                <LogsPage />
+                <Suspense fallback={<PageLoader />}>
+                  <LogsPage />
+                </Suspense>
               </AdminRoute>
             }
           />

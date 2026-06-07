@@ -1,7 +1,7 @@
 /**
  * convert.js (route)
- * Defines the POST /api/convert endpoint.
- * Uses multer for in-memory file upload (no disk writes).
+ * Legacy Node conversion — superseded by converter/ (Python) for preview/export.
+ * Kept for backward compatibility; HomePage uses /python-api/api/v1/*.
  */
 
 const express = require("express");

@@ -1,6 +1,9 @@
 const express = require("express");
 const router = express.Router();
 const { protect, adminOnly } = require("../middleware/auth");
+const requireDb = require("../middleware/requireDb");
+
+router.use(requireDb);
 const {
   getUsers,
   updateUser,

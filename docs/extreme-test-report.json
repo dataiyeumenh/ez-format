@@ -1,0 +1,31 @@
+{
+  "failed": [],
+  "timestamp": "2026-05-30 00:16:43",
+  "steps": {
+    "QA fast gate": {
+      "status": "pass",
+      "seconds": 4.3218729
+    },
+    "UI lint gate": {
+      "status": "pass",
+      "seconds": 4.5316498
+    },
+    "E2E extreme pytest": {
+      "status": "pass",
+      "seconds": 51.7960127
+    },
+    "Messy 1000 records": {
+      "status": "pass",
+      "seconds": 39.521465
+    },
+    "Full converter pytest (43+)": {
+      "status": "pass",
+      "seconds": 125.564063
+    },
+    "Live HTTP converter": {
+      "status": "pass",
+      "seconds": 13.3713444
+    }
+  },
+  "ok": true
+}

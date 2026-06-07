@@ -1,11 +1,5 @@
 import { useState } from "react";
-import {
-  Download,
-  Pencil,
-  Trash2,
-  ChevronLeft,
-  ChevronRight,
-} from "lucide-react";
+import { Download, Pencil, Trash2, ChevronLeft, ChevronRight } from "lucide-react";
 import AdminLayout from "../../components/admin/AdminLayout";
 
 const mockFiles = [
@@ -82,8 +76,7 @@ const FilesPage = () => {
               Lịch sử chuyển đổi file
             </h1>
             <p className="text-sm text-gray-500 mt-0.5">
-              Real-time overview of all conversion tasks processing in the
-              cloud.
+              Real-time overview of all conversion tasks processing in the cloud.
             </p>
           </div>
           <button className="flex items-center gap-2 bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium px-4 py-2.5 rounded-lg transition-colors">
@@ -210,9 +203,7 @@ const FilesPage = () => {
                         {f.format}
                       </span>
                     </td>
-                    <td className="px-5 py-4 text-sm text-gray-500">
-                      {f.size}
-                    </td>
+                    <td className="px-5 py-4 text-sm text-gray-500">{f.size}</td>
                     <td className="px-5 py-4">
                       <span
                         className={`text-xs font-semibold px-2.5 py-1 rounded-full flex items-center gap-1.5 w-fit ${statusStyle[f.status]}`}
@@ -221,9 +212,7 @@ const FilesPage = () => {
                         {f.status}
                       </span>
                     </td>
-                    <td className="px-5 py-4 text-sm text-gray-500">
-                      {f.date}
-                    </td>
+                    <td className="px-5 py-4 text-sm text-gray-500">{f.date}</td>
                     <td className="px-5 py-4">
                       <div className="flex items-center gap-2">
                         <button className="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-blue-50 text-gray-400 hover:text-blue-600 transition-colors">
@@ -265,9 +254,7 @@ const FilesPage = () => {
               {TOTAL_PAGES}
             </button>
             <button
-              onClick={() =>
-                setCurrentPage(Math.min(TOTAL_PAGES, currentPage + 1))
-              }
+              onClick={() => setCurrentPage(Math.min(TOTAL_PAGES, currentPage + 1))}
               className="flex items-center gap-1 px-3 py-1.5 text-sm text-gray-600 border border-gray-200 rounded-lg hover:bg-gray-50 transition-colors"
             >
               Sau <ChevronRight size={14} />

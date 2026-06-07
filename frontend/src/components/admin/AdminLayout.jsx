@@ -25,7 +25,7 @@ const navItems = [
   { icon: Activity, label: "Nhật ký hoạt động", path: "/admin/logs" },
 ];
 
-const AdminLayout = ({ children, title }) => {
+const AdminLayout = ({ children, title: _title }) => {
   const { user, logout } = useAuth();
   const navigate = useNavigate();
   const location = useLocation();
@@ -50,10 +50,7 @@ const AdminLayout = ({ children, title }) => {
 
   const isActive = (path) => {
     if (path === "/admin")
-      return (
-        location.pathname === "/admin" ||
-        location.pathname === "/admin/dashboard"
-      );
+      return location.pathname === "/admin" || location.pathname === "/admin/dashboard";
     return location.pathname.startsWith(path);
   };
 
@@ -170,12 +167,8 @@ const AdminLayout = ({ children, title }) => {
               {avatarOpen && (
                 <div className="absolute right-0 top-full mt-2 w-52 bg-white rounded-xl shadow-lg border border-gray-100 py-1.5 z-50">
                   <div className="px-4 py-2.5 border-b border-gray-100 mb-1">
-                    <p className="text-sm font-semibold text-gray-900">
-                      {user?.name}
-                    </p>
-                    <p className="text-xs text-gray-400 truncate">
-                      {user?.email}
-                    </p>
+                    <p className="text-sm font-semibold text-gray-900">{user?.name}</p>
+                    <p className="text-xs text-gray-400 truncate">{user?.email}</p>
                   </div>
                   <Link
                     to="/admin/profile"

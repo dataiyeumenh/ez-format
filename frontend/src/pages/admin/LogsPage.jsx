@@ -106,12 +106,9 @@ const LogsPage = () => {
         {/* Header */}
         <div className="flex items-center justify-between">
           <div>
-            <h1 className="text-2xl font-black text-gray-900">
-              Nhật ký hoạt động
-            </h1>
+            <h1 className="text-2xl font-black text-gray-900">Nhật ký hoạt động</h1>
             <p className="text-sm text-gray-500 mt-0.5">
-              Theo dõi toàn bộ hoạt động của người dùng và hệ thống theo thời
-              gian thực.
+              Theo dõi toàn bộ hoạt động của người dùng và hệ thống theo thời gian thực.
             </p>
           </div>
           <button className="flex items-center gap-2 border border-gray-200 text-gray-600 text-sm font-medium px-4 py-2.5 rounded-lg hover:bg-gray-50 transition-colors">
@@ -169,26 +166,21 @@ const LogsPage = () => {
           <div className="flex items-center gap-3 px-5 py-4 border-b border-gray-100 flex-wrap">
             <Filter size={15} className="text-gray-400" />
             <span className="text-sm text-gray-500 font-medium">Loại:</span>
-            {[
-              "Tất cả",
-              "Auth",
-              "Conversion",
-              "Admin",
-              "Payment",
-              "Security",
-            ].map((t) => (
-              <button
-                key={t}
-                onClick={() => setTypeFilter(t)}
-                className={`text-sm px-3 py-1.5 rounded-lg font-medium transition-colors ${
-                  typeFilter === t
-                    ? "bg-blue-600 text-white"
-                    : "border border-gray-200 text-gray-600 hover:bg-gray-50"
-                }`}
-              >
-                {t}
-              </button>
-            ))}
+            {["Tất cả", "Auth", "Conversion", "Admin", "Payment", "Security"].map(
+              (t) => (
+                <button
+                  key={t}
+                  onClick={() => setTypeFilter(t)}
+                  className={`text-sm px-3 py-1.5 rounded-lg font-medium transition-colors ${
+                    typeFilter === t
+                      ? "bg-blue-600 text-white"
+                      : "border border-gray-200 text-gray-600 hover:bg-gray-50"
+                  }`}
+                >
+                  {t}
+                </button>
+              ),
+            )}
             <div className="ml-auto flex items-center gap-2 border border-gray-200 rounded-lg px-3 py-1.5 text-sm text-gray-600">
               📅 Hôm nay
             </div>
@@ -287,9 +279,7 @@ const LogsPage = () => {
               {TOTAL_PAGES}
             </button>
             <button
-              onClick={() =>
-                setCurrentPage(Math.min(TOTAL_PAGES, currentPage + 1))
-              }
+              onClick={() => setCurrentPage(Math.min(TOTAL_PAGES, currentPage + 1))}
               className="flex items-center gap-1 px-3 py-1.5 text-sm text-gray-600 border border-gray-200 rounded-lg hover:bg-gray-50 transition-colors"
             >
               Sau <ChevronRight size={14} />

@@ -3,6 +3,9 @@ const router = express.Router();
 const { body } = require("express-validator");
 const { register, login, getMe } = require("../controllers/authController");
 const { protect } = require("../middleware/auth");
+const requireDb = require("../middleware/requireDb");
+
+router.use(requireDb);
 
 // @route POST /api/auth/register
 router.post(
