@@ -1,147 +1,204 @@
-<#
-.SYNOPSIS
-    Khởi động Python Converter + ngrok tunnel để expose AI ra internet.
-
-.DESCRIPTION
-    Script này sẽ:
-      1. Kiểm tra ngrok đã cài chưa
-      2. Copy converter/.env.example → converter/.env nếu chưa có
-      3. Khởi động uvicorn (Converter API) trên port 8000
-      4. Mở ngrok tunnel đến port 8000
-      5. In ra public URL để cấu hình trên Vercel
-
-.EXAMPLE
-    pwsh -File scripts/start-ngrok-ai.ps1
-#>
+param(
+    [string]$RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path,
+    [int]$GatewayPort = 8010,
+    [string]$Model = "qwen2.5:7b",
+    [string]$OllamaBaseUrl = "http://127.0.0.1:11434",
+    [string]$NgrokDomain = "",
+    [string]$NgrokAuthtoken = "",
+    [switch]$ExposeOllamaDirect
+)
 
 $ErrorActionPreference = "Stop"
-$Root = Split-Path $PSScriptRoot -Parent
-$ConverterDir = Join-Path $Root "converter"
-$EnvFile = Join-Path $ConverterDir ".env"
-$EnvExample = Join-Path $ConverterDir ".env.example"
+
+function Test-HttpOk {
+    param(
+        [string]$Uri,
+        [int]$TimeoutSec = 3
+    )
+    try {
+        $response = Invoke-WebRequest -Uri $Uri -UseBasicParsing -TimeoutSec $TimeoutSec
+        return $response.StatusCode -ge 200 -and $response.StatusCode -lt 500
+    } catch {
+        return $false
+    }
+}
+
+function Wait-HttpOk {
+    param(
+        [string]$Uri,
+        [int]$TimeoutSeconds = 30
+    )
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    while ((Get-Date) -lt $deadline) {
+        if (Test-HttpOk -Uri $Uri -TimeoutSec 2) {
+            return $true
+        }
+        Start-Sleep -Milliseconds 750
+    }
+    return $false
+}
+
+function Resolve-NgrokExe {
+    $command = Get-Command "ngrok" -ErrorAction SilentlyContinue
+    if ($command) {
+        return $command.Source
+    }
+
+    $roots = @(
+        (Join-Path $env:LOCALAPPDATA "Microsoft\WinGet\Packages"),
+        (Join-Path $env:LOCALAPPDATA "Microsoft\WinGet\Links"),
+        $env:LOCALAPPDATA,
+        $env:ProgramFiles
+    ) | Where-Object { $_ -and (Test-Path -LiteralPath $_) }
+
+    foreach ($root in $roots) {
+        $candidate = Get-ChildItem -LiteralPath $root -Recurse -Filter "ngrok.exe" -File -ErrorAction SilentlyContinue |
+            Select-Object -First 1
+        if ($candidate) {
+            return $candidate.FullName
+        }
+    }
+
+    throw "Không tìm thấy ngrok.exe. Cài bằng: winget install -e --id Ngrok.Ngrok"
+}
+
+function Stop-NgrokProcesses {
+    Get-CimInstance Win32_Process |
+        Where-Object { $_.Name -ieq "ngrok.exe" } |
+        ForEach-Object {
+            Write-Host "[ngrok] Stopping stale PID $($_.ProcessId)" -ForegroundColor Yellow
+            Stop-Process -Id ([int]$_.ProcessId) -Force -ErrorAction SilentlyContinue
+        }
+}
+
+function Get-NgrokPublicUrl {
+    for ($i = 0; $i -lt 20; $i++) {
+        try {
+            $response = Invoke-RestMethod "http://127.0.0.1:4040/api/tunnels" -TimeoutSec 3
+            $https = $response.tunnels | Where-Object { $_.proto -eq "https" } | Select-Object -First 1
+            if ($https -and $https.public_url) {
+                return [string]$https.public_url
+            }
+        } catch {
+        }
+        Start-Sleep -Seconds 1
+    }
+    return ""
+}
+
+$resolvedRepo = (Resolve-Path -LiteralPath $RepoRoot).Path
+$artifactDir = Join-Path $resolvedRepo ".artifacts\ngrok-ai"
+$localAiDir = Join-Path $resolvedRepo ".artifacts\local-ai"
+$tokenPath = Join-Path $localAiDir "AI_GATEWAY_TOKEN.txt"
+$ngrokOutLog = Join-Path $artifactDir "ngrok-ai.out.log"
+$ngrokErrLog = Join-Path $artifactDir "ngrok-ai.err.log"
+$envFile = Join-Path $artifactDir "vps-ai.env"
+New-Item -ItemType Directory -Force -Path $artifactDir | Out-Null
 
 Write-Host ""
 Write-Host "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" -ForegroundColor Cyan
-Write-Host "  EzFormat — Converter + ngrok AI tunnel" -ForegroundColor Cyan
+Write-Host "  EzFormat — Local AI Gateway via ngrok" -ForegroundColor Cyan
 Write-Host "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" -ForegroundColor Cyan
 Write-Host ""
 
-# ── 1. Kiểm tra ngrok ────────────────────────────────────────────────────────
-if (-not (Get-Command ngrok -ErrorAction SilentlyContinue)) {
-    Write-Host "[ERROR] ngrok chưa được cài." -ForegroundColor Red
-    Write-Host ""
-    Write-Host "Cài ngrok tại: https://ngrok.com/download" -ForegroundColor Yellow
-    Write-Host "Sau đó chạy:   ngrok config add-authtoken <YOUR_TOKEN>" -ForegroundColor Yellow
-    Write-Host "(Đăng ký miễn phí tại https://dashboard.ngrok.com)" -ForegroundColor Yellow
+$ngrokExe = Resolve-NgrokExe
+Write-Host "[ngrok] $ngrokExe" -ForegroundColor Green
+& $ngrokExe version
+
+if ($NgrokAuthtoken) {
+    Write-Host "[ngrok] Configuring authtoken" -ForegroundColor Yellow
+    & $ngrokExe config add-authtoken $NgrokAuthtoken | Out-Host
+}
+
+$ollamaTagsUrl = "$($OllamaBaseUrl.TrimEnd('/'))/api/tags"
+if (-not (Test-HttpOk -Uri $ollamaTagsUrl -TimeoutSec 3)) {
+    throw "Ollama chưa sẵn sàng tại $ollamaTagsUrl. Bật Ollama hoặc chạy Desktop shortcut AI Local trước."
+}
+Write-Host "[ollama] Ready: $OllamaBaseUrl" -ForegroundColor Green
+
+if ($ExposeOllamaDirect) {
+    Write-Host "[WARN] Đang expose trực tiếp Ollama 11434. Endpoint này KHÔNG có auth mặc định." -ForegroundColor Red
+    $targetPort = 11434
+    $targetUrl = "http://127.0.0.1:11434"
+} else {
+    $gatewayScript = Join-Path $resolvedRepo "scripts\start-local-ai-gateway.ps1"
+    Write-Host "[gateway] Starting local AI Gateway on port $GatewayPort..." -ForegroundColor Yellow
+    & $gatewayScript `
+        -RepoRoot $resolvedRepo `
+        -Port $GatewayPort `
+        -Model $Model `
+        -OllamaBaseUrl $OllamaBaseUrl `
+        -TokenPath $tokenPath `
+        -Restart | Out-Host
+
+    if (-not (Wait-HttpOk -Uri "http://127.0.0.1:$GatewayPort/docs" -TimeoutSeconds 30)) {
+        throw "AI Gateway chưa sẵn sàng tại http://127.0.0.1:$GatewayPort/docs"
+    }
+    $targetPort = $GatewayPort
+    $targetUrl = "http://127.0.0.1:$GatewayPort"
+}
+
+Stop-NgrokProcesses
+Remove-Item -LiteralPath $ngrokOutLog, $ngrokErrLog -Force -ErrorAction SilentlyContinue
+
+$ngrokArgs = @("http", "http://127.0.0.1:$targetPort", "--log=stdout")
+if ($NgrokDomain) {
+    $ngrokArgs += "--domain=$NgrokDomain"
+}
+
+Write-Host "[ngrok] Starting tunnel to $targetUrl..." -ForegroundColor Yellow
+Start-Process `
+    -FilePath $ngrokExe `
+    -ArgumentList $ngrokArgs `
+    -RedirectStandardOutput $ngrokOutLog `
+    -RedirectStandardError $ngrokErrLog `
+    -WindowStyle Hidden | Out-Null
+
+$publicUrl = Get-NgrokPublicUrl
+if (-not $publicUrl) {
+    Write-Host "[ERROR] Không lấy được ngrok URL từ http://127.0.0.1:4040/api/tunnels" -ForegroundColor Red
+    Write-Host "Xem log: $ngrokOutLog ; $ngrokErrLog" -ForegroundColor Yellow
     exit 1
 }
 
-# ── 2. Tạo converter/.env nếu chưa có ───────────────────────────────────────
-if (-not (Test-Path $EnvFile)) {
-    Write-Host "[INFO] Chưa có converter/.env — copy từ .env.example" -ForegroundColor Yellow
-    Copy-Item $EnvExample $EnvFile
-    Write-Host "[INFO] Đã tạo converter/.env. Kiểm tra lại AI_MODEL nếu cần." -ForegroundColor Green
-}
-
-# ── 3. Khởi động uvicorn ─────────────────────────────────────────────────────
-Write-Host "[1/3] Khởi động Python Converter (port 8000)..." -ForegroundColor Cyan
-
-# Load .env để uvicorn nhận được biến môi trường
-$EnvVars = @{}
-Get-Content $EnvFile | Where-Object { $_ -match '^\s*[^#]' -and $_ -match '=' } | ForEach-Object {
-    $parts = $_ -split '=', 2
-    $key = $parts[0].Trim()
-    $val = $parts[1].Trim().Trim('"').Trim("'")
-    $EnvVars[$key] = $val
-    [System.Environment]::SetEnvironmentVariable($key, $val, "Process")
-}
-
-$uvicornJob = Start-Job -ScriptBlock {
-    param($dir, $envVars)
-    Set-Location $dir
-    foreach ($kv in $envVars.GetEnumerator()) {
-        [System.Environment]::SetEnvironmentVariable($kv.Key, $kv.Value, "Process")
-    }
-    & python -m uvicorn app.main:app --host 127.0.0.1 --port 8000 2>&1
-} -ArgumentList $ConverterDir, $EnvVars
-
-Write-Host "[INFO] Đợi Converter khởi động..." -ForegroundColor Gray
-Start-Sleep -Seconds 4
-
-# Kiểm tra converter có chạy không
-try {
-    $health = Invoke-RestMethod "http://127.0.0.1:8000/healthz" -TimeoutSec 5
-    Write-Host "[OK]  Converter chạy thành công. AI status: $($health.ai_status)" -ForegroundColor Green
-} catch {
-    Write-Host "[WARN] Converter chưa phản hồi (có thể đang khởi động chậm)." -ForegroundColor Yellow
-}
-
-# ── 4. Mở ngrok tunnel ───────────────────────────────────────────────────────
-Write-Host ""
-Write-Host "[2/3] Mở ngrok tunnel đến port 8000..." -ForegroundColor Cyan
-
-$ngrokJob = Start-Job -ScriptBlock {
-    & ngrok http 8000 --log=stdout 2>&1
-}
-
-Write-Host "[INFO] Đợi ngrok kết nối..." -ForegroundColor Gray
-Start-Sleep -Seconds 5
-
-# ── 5. Lấy public URL từ ngrok API ──────────────────────────────────────────
-Write-Host ""
-Write-Host "[3/3] Lấy public URL..." -ForegroundColor Cyan
-
-$ngrokUrl = $null
-for ($i = 0; $i -lt 10; $i++) {
-    try {
-        $tunnels = Invoke-RestMethod "http://127.0.0.1:4040/api/tunnels" -TimeoutSec 3
-        $https = $tunnels.tunnels | Where-Object { $_.proto -eq "https" } | Select-Object -First 1
-        if ($https) {
-            $ngrokUrl = $https.public_url
-            break
-        }
-    } catch {
-        Start-Sleep -Seconds 2
-    }
-}
-
-if (-not $ngrokUrl) {
-    Write-Host "[ERROR] Không lấy được URL từ ngrok. Kiểm tra ngrok dashboard tại http://127.0.0.1:4040" -ForegroundColor Red
+if ($ExposeOllamaDirect) {
+    $aiBaseUrl = "$publicUrl/api/generate"
+    $envContent = @"
+# WARNING: direct Ollama exposure has no Bearer auth by default.
+OLLAMA_BASE_URL=$publicUrl
+"@
 } else {
-    Write-Host ""
-    Write-Host "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" -ForegroundColor Green
-    Write-Host "  ✅  PUBLIC URL:" -ForegroundColor Green
-    Write-Host "      $ngrokUrl" -ForegroundColor White
-    Write-Host "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" -ForegroundColor Green
-    Write-Host ""
-    Write-Host "  Làm theo các bước sau để Vercel nhận được URL này:" -ForegroundColor Yellow
-    Write-Host ""
-    Write-Host "  1. Vào Vercel Dashboard → Project Settings → Environment Variables"
-    Write-Host "  2. Thêm biến:"
-    Write-Host "       VITE_PYTHON_API_URL = $ngrokUrl" -ForegroundColor Cyan
-    Write-Host "  3. Redeploy frontend trên Vercel"
-    Write-Host ""
-    Write-Host "  [LƯU Ý] URL ngrok thay đổi mỗi lần khởi động (gói miễn phí)." -ForegroundColor Yellow
-    Write-Host "  Dùng Static Domain (miễn phí 1 domain) để URL cố định:" -ForegroundColor Yellow
-    Write-Host "  → https://dashboard.ngrok.com/domains" -ForegroundColor Gray
-    Write-Host "  → Sau đó chạy: ngrok http 8000 --domain=your-name.ngrok-free.app" -ForegroundColor Gray
-    Write-Host ""
-    Write-Host "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" -ForegroundColor Cyan
-    Write-Host "  Nhấn Ctrl+C để dừng tất cả dịch vụ" -ForegroundColor Cyan
-    Write-Host "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" -ForegroundColor Cyan
+    $token = (Get-Content -LiteralPath $tokenPath -Raw).Trim()
+    $aiBaseUrl = "$publicUrl/v1/misa/suggest-mapping"
+    $envContent = @"
+AI_PROVIDER=remote_http
+AI_BASE_URL=$aiBaseUrl
+AI_TOKEN=$token
+AI_TIMEOUT_SECONDS=120
+AI_REQUIRED=false
+"@
 }
 
-# Giữ script chạy, stream output từ jobs
-try {
-    while ($true) {
-        Receive-Job $uvicornJob | Write-Host -ForegroundColor Gray
-        Receive-Job $ngrokJob  | Write-Host -ForegroundColor DarkGray
-        Start-Sleep -Seconds 2
-    }
-} finally {
+$envContent | Set-Content -LiteralPath $envFile -Encoding UTF8
+
+Write-Host ""
+Write-Host "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" -ForegroundColor Green
+Write-Host "  ✅ Ngrok AI tunnel ready" -ForegroundColor Green
+Write-Host "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" -ForegroundColor Green
+Write-Host "Public URL: $publicUrl" -ForegroundColor White
+Write-Host "Target:     $targetUrl" -ForegroundColor White
+if (-not $ExposeOllamaDirect) {
     Write-Host ""
-    Write-Host "[INFO] Đang dừng Converter và ngrok..." -ForegroundColor Yellow
-    Stop-Job $uvicornJob, $ngrokJob -ErrorAction SilentlyContinue
-    Remove-Job $uvicornJob, $ngrokJob -ErrorAction SilentlyContinue
-    Write-Host "[INFO] Đã dừng." -ForegroundColor Green
+    Write-Host "Cấu hình VPS/converter dùng:" -ForegroundColor Yellow
+    Write-Host "AI_PROVIDER=remote_http"
+    Write-Host "AI_BASE_URL=$aiBaseUrl"
+    Write-Host "AI_TOKEN=<redacted from $tokenPath>"
+    Write-Host "AI_TIMEOUT_SECONDS=120"
+    Write-Host "AI_REQUIRED=false"
 }
+Write-Host ""
+Write-Host "Đã ghi file env local: $envFile" -ForegroundColor Cyan
+Write-Host "Ngrok dashboard: http://127.0.0.1:4040" -ForegroundColor Cyan
+Write-Host "Logs: $ngrokOutLog ; $ngrokErrLog" -ForegroundColor Cyan
+Write-Host "PC này phải bật và ngrok process phải sống thì VPS mới gọi được." -ForegroundColor Yellow
+Write-Host "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" -ForegroundColor Green

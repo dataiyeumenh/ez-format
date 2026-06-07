@@ -221,7 +221,7 @@ try {
 
     Stop-ManagedListener `
         -Port $ConverterPort `
-        -CommandLinePatterns @("*uvicorn*app.main:app*", "*node.exe*server/server.js*", "*node.exe*server\server.js*") `
+        -CommandLinePatterns @("*uvicorn*app.main:app*", "*node*server/server.js*", "*node*server\server.js*") `
         -ServiceName "Converter AI"
 
     $env:MISA_TEMPLATE_DIR = $MisaTemplateDir

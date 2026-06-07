@@ -6,6 +6,7 @@
   "scripts": {
     "start": "node server.js",
     "dev": "cd .. && powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/dev.ps1",
+    "dev:all": "cd .. && powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/dev.ps1",
     "dev:only": "nodemon server.js",
     "seed": "node seed.js"
   },

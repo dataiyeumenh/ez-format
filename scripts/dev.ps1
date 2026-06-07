@@ -31,8 +31,50 @@ function Wait-HttpOk([string]$Uri, [int]$TimeoutSeconds = 30) {
     return $false
 }
 
+function Get-ListeningProcesses([int]$Port) {
+    $listeners = @(Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue)
+    if (-not $listeners) { return @() }
+    foreach ($processId in @($listeners | Select-Object -ExpandProperty OwningProcess -Unique)) {
+        Get-CimInstance Win32_Process -Filter "ProcessId = $processId" -ErrorAction SilentlyContinue
+    }
+}
+
+function Test-ManagedProcess($Process, [string[]]$Patterns) {
+    if (-not $Process) { return $false }
+    foreach ($pattern in $Patterns) {
+        if ($Process.CommandLine -like $pattern) { return $true }
+    }
+    return $false
+}
+
+function Stop-ManagedPort([int]$Port, [string]$ServiceName, [string[]]$Patterns) {
+    $processes = @(Get-ListeningProcesses -Port $Port)
+    if (-not $processes) { return }
+
+    foreach ($process in $processes) {
+        $parent = Get-CimInstance Win32_Process -Filter "ProcessId = $($process.ParentProcessId)" -ErrorAction SilentlyContinue
+        $isManaged = (Test-ManagedProcess -Process $process -Patterns $Patterns) -or
+            (Test-ManagedProcess -Process $parent -Patterns $Patterns)
+
+        if (-not $isManaged) {
+            throw "Port $Port is used by a non-EzFormat process ($($process.ProcessId)): $($process.CommandLine)"
+        }
+
+        $idsToStop = @([int]$process.ProcessId)
+        if (Test-ManagedProcess -Process $parent -Patterns $Patterns) {
+            $idsToStop += [int]$parent.ProcessId
+        }
+
+        foreach ($id in ($idsToStop | Sort-Object -Unique)) {
+            Write-Host "[$ServiceName] Stopping stale PID $id on port $Port" -ForegroundColor Yellow
+            Stop-Process -Id $id -Force -ErrorAction SilentlyContinue
+        }
+    }
+    Start-Sleep -Seconds 1
+}
+
 Write-Host ""
-Write-Host "=== EzFormat Dev (AI + Backend + Frontend) ===" -ForegroundColor Cyan
+Write-Host "=== EzFormat Dev (AI + Backend) ===" -ForegroundColor Cyan
 Write-Host ""
 
 # --- 1. Ollama ---
@@ -81,7 +123,18 @@ if ($ollamaOnline -and (Test-Path -LiteralPath $tokenPath)) {
 }
 $env:MISA_TEMPLATE_DIR = $misaDir
 
-# --- 4. Start all services via concurrently ---
+# --- 4. Free stale local dev ports ---
+Stop-ManagedPort `
+    -Port $BackendPort `
+    -ServiceName "backend" `
+    -Patterns @("*node*server.js*", "*nodemon*server.js*")
+
+Stop-ManagedPort `
+    -Port $ConverterPort `
+    -ServiceName "converter" `
+    -Patterns @("*uvicorn*app.main:app*", "*node*server/server.js*", "*node*server\server.js*")
+
+# --- 5. Start all services via concurrently ---
 Write-Host ""
 Write-Host "Starting services with concurrently..." -ForegroundColor Cyan
 Write-Host "  backend   -> http://localhost:$BackendPort" -ForegroundColor Blue
