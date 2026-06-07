@@ -1,8 +1,13 @@
 import { useCallback, useEffect, useState } from "react";
 
-const pythonBaseURL = import.meta.env.VITE_PYTHON_API_URL
-  ? `${import.meta.env.VITE_PYTHON_API_URL}`
+const viteEnv = import.meta.env || {};
+const pythonBaseURL = viteEnv.VITE_PYTHON_API_URL
+  ? `${viteEnv.VITE_PYTHON_API_URL}`
   : "/python-api";
+
+const HEALTH_URL = `${pythonBaseURL}/healthz`;
+const TEMPLATES_URL = `${pythonBaseURL}/api/v1/templates`;
+const STATUS_REFRESH_MS = 15000;
 
 export function formatApiError(payload, fallback) {
   if (!payload || typeof payload !== "object") return fallback;
@@ -36,6 +41,41 @@ async function readJsonResponse(response, fallback) {
   return data;
 }
 
+function aiStatusFromHealth(health) {
+  const ai = health?.ai;
+  if (ai === "online") return true;
+  if (ai === "offline") return false;
+  return "disabled";
+}
+
+async function fetchJson(fetchImpl, url) {
+  const response = await fetchImpl(url, { cache: "no-store" });
+  if (!response.ok) {
+    throw new Error(`Request failed: ${response.status}`);
+  }
+  return response.json();
+}
+
+export async function fetchConverterStatus(fetchImpl = fetch) {
+  const [healthResult, templatesResult] = await Promise.allSettled([
+    fetchJson(fetchImpl, HEALTH_URL),
+    fetchJson(fetchImpl, TEMPLATES_URL),
+  ]);
+
+  const health =
+    healthResult.status === "fulfilled" ? healthResult.value : null;
+  const templatesData =
+    templatesResult.status === "fulfilled" ? templatesResult.value : null;
+
+  const serviceOnline = Boolean(health || templatesData);
+
+  return {
+    serviceOnline,
+    aiOnline: health ? aiStatusFromHealth(health) : null,
+    templates: templatesData?.items || [],
+  };
+}
+
 export function useConverterApi() {
   const [templates, setTemplates] = useState([]);
   const [serviceOnline, setServiceOnline] = useState(null);
@@ -44,30 +84,28 @@ export function useConverterApi() {
   useEffect(() => {
     let cancelled = false;
 
-    Promise.all([
-      fetch(`${pythonBaseURL}/healthz`).then((r) =>
-        r.ok ? r.json() : Promise.reject(),
-      ),
-      fetch(`${pythonBaseURL}/api/v1/templates`).then((r) =>
-        r.ok ? r.json() : Promise.reject(new Error("templates unavailable")),
-      ),
-    ])
-      .then(([health, data]) => {
-        if (cancelled) return;
-        setServiceOnline(true);
-        const ai = health?.ai;
-        setAiOnline(ai === "online" ? true : ai === "offline" ? false : "disabled");
-        setTemplates(data.items || []);
-      })
-      .catch(() => {
-        if (cancelled) return;
-        setServiceOnline(false);
-        setAiOnline(false);
-        setTemplates([]);
-      });
+    const refreshStatus = () => {
+      fetchConverterStatus()
+        .then(({ serviceOnline, aiOnline, templates }) => {
+          if (cancelled) return;
+          setServiceOnline(serviceOnline);
+          setAiOnline(aiOnline);
+          setTemplates(templates);
+        })
+        .catch(() => {
+          if (cancelled) return;
+          setServiceOnline(false);
+          setAiOnline(false);
+          setTemplates([]);
+        });
+    };
+
+    refreshStatus();
+    const refreshTimer = window.setInterval(refreshStatus, STATUS_REFRESH_MS);
 
     return () => {
       cancelled = true;
+      window.clearInterval(refreshTimer);
     };
   }, []);
 
