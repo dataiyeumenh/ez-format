@@ -11,6 +11,7 @@ import RegisterPage from "./pages/RegisterPage";
 import PricingPage from "./pages/PricingPage";
 import ContactPage from "./pages/ContactPage";
 import PaymentPage from "./pages/PaymentPage";
+import PaymentResultPage from "./pages/PaymentResultPage";
 
 const AdminDashboard = lazy(() => import("./pages/admin/DashboardPage"));
 const UsersPage = lazy(() => import("./pages/admin/UsersPage"));
@@ -39,6 +40,8 @@ function App() {
           <Route path="/pricing" element={<PricingPage />} />
           <Route path="/contact" element={<ContactPage />} />
           <Route path="/payment" element={<PaymentPage />} />
+          <Route path="/payment/success" element={<PaymentResultPage status="success" />} />
+          <Route path="/payment/cancel" element={<PaymentResultPage status="cancel" />} />
 
           {/* Admin routes */}
           <Route

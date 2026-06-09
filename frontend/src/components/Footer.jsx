@@ -1,4 +1,5 @@
 import { Link } from "react-router-dom";
+import ezFormatLogo from "../assets/ezformat-main-logo.png";
 
 const Footer = () => {
   return (
@@ -7,13 +8,11 @@ const Footer = () => {
         <div className="grid grid-cols-1 md:grid-cols-4 gap-8">
           <div className="space-y-4">
             <Link to="/" className="flex items-center gap-2">
-              <div className="relative w-8 h-8">
-                <div className="absolute inset-0 bg-primary-500 rounded-sm rotate-3" />
-                <div className="absolute inset-0 bg-cyan-400 rounded-sm -rotate-3 opacity-80" />
-                <span className="absolute inset-0 flex items-center justify-center text-white font-black text-xs">
-                  EZ
-                </span>
-              </div>
+              <img
+                src={ezFormatLogo}
+                alt="EzFormat logo"
+                className="h-9 w-9 rounded-sm object-contain"
+              />
               <span className="font-bold text-white text-lg">EzFormat</span>
             </Link>
             <p className="text-sm text-gray-400 leading-relaxed">

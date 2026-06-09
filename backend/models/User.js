@@ -32,6 +32,15 @@ const userSchema = new mongoose.Schema(
       enum: ["Free", "Monthly", "Yearly", "PerFile"],
       default: "Free",
     },
+    planExpiresAt: {
+      type: Date,
+      default: null,
+    },
+    fileCredits: {
+      type: Number,
+      default: 0,
+      min: [0, "Số lượt file không được âm"],
+    },
     avatar: {
       type: String,
       default: "",

@@ -37,6 +37,7 @@ app.use(express.urlencoded({ extended: true, limit: "50mb" }));
 app.use("/api/auth", require("./routes/auth"));
 app.use("/api/admin", require("./routes/admin"));
 app.use("/api/convert", require("./routes/convert"));
+app.use("/api/payments", require("./routes/payments"));
 
 // Health check
 app.get("/api/health", (req, res) => {

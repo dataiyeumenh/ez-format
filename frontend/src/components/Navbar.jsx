@@ -2,7 +2,7 @@ import { useState } from "react";
 import { Link, NavLink, useNavigate } from "react-router-dom";
 import { useAuth } from "../context/AuthContext";
 import { Menu, X } from "lucide-react";
-import ezFormatLogo from "../assets/ezformat-logo.jpg";
+import ezFormatLogo from "../assets/ezformat-main-logo.png";
 
 const Logo = () => (
   <Link to="/" className="flex items-center gap-2.5 group">
@@ -42,6 +42,9 @@ const Navbar = () => {
           <Logo />
 
           <div className="hidden md:flex items-center gap-8">
+            <NavLink to="/" className={navLinkClass}>
+              Trang chủ
+            </NavLink>
             <NavLink to="/convert" className={navLinkClass}>
               Chuyển đổi
             </NavLink>
@@ -101,6 +104,9 @@ const Navbar = () => {
 
       {mobileOpen && (
         <div className="md:hidden border-t border-gray-100 bg-white px-4 py-4 space-y-1 animate-fade-in">
+          <NavLink to="/" className={navLinkClass} onClick={closeMobile}>
+            Trang chủ
+          </NavLink>
           <NavLink to="/convert" className={navLinkClass} onClick={closeMobile}>
             Chuyển đổi
           </NavLink>

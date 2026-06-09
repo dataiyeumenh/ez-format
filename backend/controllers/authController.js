@@ -40,6 +40,8 @@ const register = async (req, res) => {
         email: user.email,
         role: user.role,
         plan: user.plan,
+        planExpiresAt: user.planExpiresAt,
+        fileCredits: user.fileCredits,
       },
     });
   } catch (error) {
@@ -92,6 +94,8 @@ const login = async (req, res) => {
         email: user.email,
         role: user.role,
         plan: user.plan,
+        planExpiresAt: user.planExpiresAt,
+        fileCredits: user.fileCredits,
       },
     });
   } catch (error) {
@@ -115,6 +119,8 @@ const getMe = async (req, res) => {
         email: user.email,
         role: user.role,
         plan: user.plan,
+        planExpiresAt: user.planExpiresAt,
+        fileCredits: user.fileCredits,
         createdAt: user.createdAt,
       },
     });

@@ -1,8 +1,10 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
-import { FileText } from "lucide-react";
+import { FileText, Loader2 } from "lucide-react";
 import Navbar from "../components/Navbar";
 import Footer from "../components/Footer";
+import api from "../services/api";
+import { useAuth } from "../context/AuthContext";
 
 const AppleLogo = () => (
   <svg viewBox="0 0 814 1000" className="w-5 h-5" fill="currentColor">
@@ -37,13 +39,70 @@ const paymentMethods = [
   },
 ];
 
+const planSummaries = {
+  monthly: {
+    name: "GÓI THÁNG",
+    price: "149.000 VND",
+    description: "Gia hạn 30 ngày",
+  },
+  yearly: {
+    name: "GÓI NĂM",
+    price: "1.308.000 VND",
+    description: "Gia hạn 365 ngày",
+  },
+  perfile: {
+    name: "THEO LƯỢT",
+    price: "10.000 VND",
+    description: "Cộng 1 lượt chuyển đổi",
+  },
+};
+
 const PaymentPage = () => {
   const location = useLocation();
   const navigate = useNavigate();
+  const { user } = useAuth();
   const [selected, setSelected] = useState("banking");
+  const [loading, setLoading] = useState(false);
+  const [errorMsg, setErrorMsg] = useState("");
 
-  const planName = location.state?.planName;
-  const planPrice = location.state?.planPrice;
+  const planType = location.state?.planType;
+  const plan = useMemo(
+    () =>
+      planSummaries[planType] || {
+        name: location.state?.planName || "Gói EzFormat",
+        price: location.state?.planPrice || "",
+        description: "Thanh toán EzFormat",
+      },
+    [location.state?.planName, location.state?.planPrice, planType],
+  );
+
+  const handleCreatePayment = async () => {
+    if (!user) {
+      navigate("/login");
+      return;
+    }
+    if (!planType || !planSummaries[planType]) {
+      setErrorMsg("Vui lòng chọn lại gói thanh toán.");
+      return;
+    }
+
+    setLoading(true);
+    setErrorMsg("");
+    try {
+      const response = await api.post("/payments/create", { planType });
+      const checkoutUrl = response.data?.checkoutUrl;
+      if (!checkoutUrl) throw new Error("Backend không trả checkoutUrl.");
+      window.location.href = checkoutUrl;
+    } catch (error) {
+      setErrorMsg(
+        error.response?.data?.message ||
+          error.response?.data?.error ||
+          error.message ||
+          "Không thể tạo link thanh toán payOS.",
+      );
+      setLoading(false);
+    }
+  };
 
   return (
     <div className="min-h-screen flex flex-col bg-gray-50">
@@ -60,6 +119,11 @@ const PaymentPage = () => {
               <h2 className="text-sm font-semibold text-gray-700 mb-4">
                 Chọn 1 phương thức thanh toán
               </h2>
+              {errorMsg && (
+                <div className="mb-4 rounded-xl border border-red-100 bg-red-50 px-4 py-3 text-sm text-red-700">
+                  {errorMsg}
+                </div>
+              )}
               <div className="space-y-3">
                 {paymentMethods.map((m) => (
                   <button
@@ -112,10 +176,12 @@ const PaymentPage = () => {
               </div>
 
               <button
-                onClick={() => navigate("/")}
-                className="w-full mt-6 bg-orange-500 hover:bg-orange-600 text-white font-semibold py-3 rounded-xl transition-colors text-sm"
+                onClick={handleCreatePayment}
+                disabled={loading || selected !== "banking"}
+                className="w-full mt-6 bg-orange-500 hover:bg-orange-600 disabled:bg-orange-300 disabled:cursor-not-allowed text-white font-semibold py-3 rounded-xl transition-colors text-sm flex items-center justify-center gap-2"
               >
-                Thanh toán
+                {loading && <Loader2 size={16} className="animate-spin" />}
+                {loading ? "Đang tạo link payOS..." : "Thanh toán qua payOS"}
               </button>
             </div>
 
@@ -128,8 +194,9 @@ const PaymentPage = () => {
               <div className="bg-white rounded-xl border border-gray-100 p-4 flex-1">
                 <div className="space-y-3">
                   {[
-                    { label: planName, value: planPrice },
+                    { label: plan.name, value: plan.price },
                     { label: "Số lượng", value: "1" },
+                    { label: "Quyền lợi", value: plan.description },
                     {
                       label: "Áp dụng ưu đãi",
                       value: "-0 VND",
@@ -151,7 +218,7 @@ const PaymentPage = () => {
                 <div className="border-t border-dashed border-gray-200 mt-4 pt-4 flex items-center justify-between">
                   <div>
                     <p className="text-xs text-gray-400 mb-0.5">Tổng giá tiền</p>
-                    <p className="text-xl font-black text-gray-900">{planPrice}</p>
+                    <p className="text-xl font-black text-gray-900">{plan.price}</p>
                   </div>
                   <div className="w-12 h-12 bg-blue-50 rounded-xl flex items-center justify-center">
                     <FileText size={22} className="text-blue-600" />

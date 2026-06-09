@@ -1,9 +1,12 @@
 import axios from "axios";
 
 // In dev: Vite proxy forwards Node API /api → localhost:5000
-// In production: set VITE_NODE_API_URL to the Node backend URL
-const baseURL = import.meta.env.VITE_NODE_API_URL
-  ? `${import.meta.env.VITE_NODE_API_URL}/api`
+// In production: set VITE_NODE_API_URL to the Node backend URL.
+// VITE_API_URL is kept as a backwards-compatible alias for older Vercel envs.
+const configuredBaseURL =
+  import.meta.env.VITE_NODE_API_URL || import.meta.env.VITE_API_URL;
+const baseURL = configuredBaseURL
+  ? `${String(configuredBaseURL).replace(/\/+$/, "")}/api`
   : "/api";
 
 const api = axios.create({
