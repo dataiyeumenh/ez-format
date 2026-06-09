@@ -2,13 +2,14 @@ import { Link } from "react-router-dom";
 import {
   FileSpreadsheet,
   Shield,
-  Zap,
   ArrowRight,
   FileText,
+  Check,
   UploadCloud,
   Wand2,
   Eye,
   Download,
+  HelpCircle,
 } from "lucide-react";
 import Navbar from "../components/Navbar";
 import Footer from "../components/Footer";
@@ -39,21 +40,78 @@ const guideSteps = [
   },
 ];
 
-const features = [
+const pricingPlans = [
   {
-    icon: FileSpreadsheet,
-    title: "Excel → MISA",
-    text: "Sáu loại form nhập: bán hàng, mua hàng, BSN và dịch vụ.",
+    id: "free",
+    name: "GÓI MIỄN PHÍ",
+    price: "0đ",
+    period: "/mo",
+    description: "Phù hợp để tham khảo các chức năng cơ bản",
+    buttonText: "Bắt đầu",
+    buttonVariant: "outline",
+    features: ["Chức năng cơ bản", "Giới hạn 3 files", "Thu thập dữ liệu"],
+    popular: false,
   },
   {
-    icon: Shield,
-    title: "Kiểm tra trước khi tải",
-    text: "Nhận diện cột tự động, cảnh báo lỗi và xem trước từng dòng.",
+    id: "monthly",
+    name: "GÓI THÁNG",
+    price: "149k",
+    period: "/tháng",
+    description: "Phù hợp cho mọi loại tình huống, tăng hiệu suất công việc",
+    buttonText: "Xem gói tháng",
+    buttonVariant: "outline",
+    features: ["Chức năng bảng thống kê", "Không quảng cáo"],
+    popular: false,
   },
   {
-    icon: Zap,
-    title: "Chỉnh sửa trực tiếp",
-    text: "Sửa ô trên bảng xem trước rồi xuất file .xls chuẩn MISA.",
+    id: "yearly",
+    name: "GÓI NĂM",
+    price: "109k",
+    period: "/tháng",
+    description: "Lựa chọn tối ưu dành cho người dùng chuyên sâu và gói chuyên môn",
+    buttonText: "Xem gói năm",
+    buttonVariant: "primary",
+    features: ["Các chức năng của gói tháng", "Không giới hạn files", "Bảo mật cao"],
+    popular: true,
+  },
+  {
+    id: "perfile",
+    name: "THEO LƯỢT",
+    price: "10k",
+    period: "/ 1 file",
+    description: "Phù hợp cho mỗi lần sử dụng",
+    buttonText: "Xem theo lượt",
+    buttonVariant: "outline",
+    features: ["Các chức năng của gói miễn phí", "Không quảng cáo"],
+    popular: false,
+  },
+];
+
+const faqs = [
+  {
+    question: "EzFormat hỗ trợ loại file nào?",
+    answer:
+      "Hiện EzFormat hỗ trợ file Excel .xlsx và .xls. Nếu dữ liệu đang ở PDF, bạn cần xuất hoặc chuyển sang Excel trước khi upload.",
+  },
+  {
+    question: "Tôi có thể xem trước dữ liệu trước khi tải về không?",
+    answer:
+      "Có. Sau khi hệ thống map cột, bạn có thể xem trước dữ liệu, rà lại cảnh báo và chỉnh sửa trước khi xuất file Misa.",
+  },
+  {
+    question: "Dữ liệu kế toán của tôi có được bảo mật không?",
+    answer:
+      "EzFormat được thiết kế để chỉ dùng dữ liệu cho quy trình xử lý file của bạn và không chia sẻ dữ liệu cho bên thứ ba trong quá trình chuyển đổi.",
+  },
+  {
+    question: "Tôi nên chọn gói nào?",
+    answer:
+      "Nếu chỉ dùng thử, bạn có thể bắt đầu với gói miễn phí. Nếu chuyển đổi thường xuyên, gói tháng hoặc gói năm sẽ phù hợp hơn.",
+  },
+  {
+    question: "File xuất ra có dùng để nhập vào MISA không?",
+    answer:
+      "Có. Mục tiêu của EzFormat là chuẩn hóa dữ liệu Excel sang form nhập MISA để bạn kiểm tra, chỉnh sửa và tải về trong vài bước.",
   },
 ];
 
@@ -244,29 +302,209 @@ const LandingPage = () => {
           </div>
         </section>
 
-        <section className="py-12 sm:py-16 px-4 bg-white/60 border-y border-gray-100">
-          <div className="max-w-5xl mx-auto grid gap-6 sm:grid-cols-3">
-            {features.map(({ icon: Icon, title, text }) => (
-              <div
-                key={title}
-                className="rounded-2xl border border-gray-100 bg-white p-6 shadow-sm hover:shadow-card transition-shadow"
-              >
-                <div className="w-11 h-11 rounded-xl bg-primary-50 flex items-center justify-center mb-4">
-                  <Icon size={22} className="text-primary-600" />
+        <section className="py-14 sm:py-16 px-4 bg-gradient-to-b from-cyan-50/70 via-white to-gray-50/80">
+          <div className="max-w-6xl mx-auto">
+            <div className="grid gap-8 rounded-[2rem] border border-primary-100 bg-gradient-to-br from-primary-50 via-white to-cyan-50 p-6 shadow-card sm:p-8 lg:grid-cols-[0.9fr_1.1fr] lg:items-center">
+              <div>
+                <div className="mb-5 flex h-14 w-14 items-center justify-center rounded-2xl bg-primary-600 text-white shadow-glow">
+                  <Shield size={28} />
                 </div>
-                <h3 className="font-bold text-gray-900 mb-2">{title}</h3>
-                <p className="text-sm text-gray-500 leading-relaxed">{text}</p>
+                <p className="mb-2 text-sm font-semibold uppercase tracking-wide text-primary-600">
+                  An toàn dữ liệu
+                </p>
+                <h2 className="text-3xl font-black leading-tight text-gray-900 sm:text-4xl">
+                  Bảo mật dữ liệu tuyệt đối trong từng lần chuyển đổi
+                </h2>
+                <p className="mt-4 text-base leading-relaxed text-gray-600">
+                  EzFormat được thiết kế để người dùng yên tâm khi xử lý dữ liệu kế
+                  toán, hạn chế thao tác thủ công và giảm rủi ro lộ thông tin trong
+                  quá trình chuẩn hóa file.
+                </p>
               </div>
-            ))}
+
+              <div className="grid gap-4 sm:grid-cols-2">
+                {[
+                  "Không chia sẻ dữ liệu cho bên thứ ba khi chuyển đổi.",
+                  "Chỉ dùng dữ liệu cho đúng quy trình xử lý file của bạn.",
+                  "Giao diện xem trước giúp kiểm tra nội dung trước khi tải về.",
+                  "Quy trình rõ ràng, giảm gửi nhầm file và thao tác ngoài hệ thống.",
+                ].map((item) => (
+                  <div
+                    key={item}
+                    className="flex gap-3 rounded-2xl border border-white/80 bg-white/85 p-4 shadow-sm"
+                  >
+                    <div className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-emerald-50 text-emerald-600">
+                      <Check size={16} />
+                    </div>
+                    <p className="text-sm font-medium leading-relaxed text-gray-700">
+                      {item}
+                    </p>
+                  </div>
+                ))}
+              </div>
+            </div>
           </div>
         </section>
 
-        <section className="py-14 px-4 text-center">
-          <p className="text-gray-500 text-sm mb-4">Sẵn sàng thử với file của bạn?</p>
-          <Link to="/convert" className="btn-primary inline-flex">
-            <FileSpreadsheet size={18} />
-            Mở trang chuyển đổi
-          </Link>
+        <section className="py-12 sm:py-14 px-4 text-center bg-gradient-to-b from-primary-50/30 via-white to-white">
+          <div className="mx-auto flex max-w-6xl flex-col items-center justify-center gap-4">
+            <p className="text-sm text-gray-500">Sẵn sàng thử với file của bạn?</p>
+            <Link to="/convert" className="btn-primary inline-flex">
+              <FileSpreadsheet size={18} />
+              Mở trang chuyển đổi
+            </Link>
+          </div>
+        </section>
+
+        <section className="py-12 sm:py-14 px-4 bg-gradient-to-b from-white via-gray-50/70 to-primary-50/30">
+          <div className="max-w-6xl mx-auto">
+            <div className="text-center mb-10">
+              <p className="text-sm font-semibold uppercase tracking-wide text-primary-600 mb-2">
+                Tham khảo bảng giá
+              </p>
+              <h2 className="text-3xl sm:text-4xl font-black text-gray-900 mb-3">
+                <span className="block">Lựa chọn gói dịch vụ</span>
+                <span className="block">phù hợp với nhu cầu của bạn</span>
+              </h2>
+              <p className="text-gray-500 text-base max-w-lg mx-auto">
+                Dành cho cá nhân và doanh nghiệp cần chuyển đổi file nhanh, rõ ràng
+                và chính xác.
+              </p>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6">
+              {pricingPlans.map((plan) => (
+                <div
+                  key={plan.id}
+                  className={`group relative flex flex-col rounded-2xl p-6 transition-all duration-200 ${
+                    plan.popular
+                      ? "bg-gradient-to-br from-blue-50 via-white to-cyan-50 border-2 border-blue-500 shadow-xl shadow-blue-100/80 lg:-translate-y-3 lg:scale-[1.03]"
+                      : "bg-white border border-gray-200 hover:border-blue-500 hover:shadow-lg hover:shadow-blue-100"
+                  }`}
+                >
+                  {plan.popular && (
+                    <div className="absolute -top-3.5 left-0 right-0 flex justify-center">
+                      <span className="whitespace-nowrap rounded-full bg-blue-600 px-4 py-1 text-xs font-bold uppercase tracking-wider text-white shadow-lg shadow-blue-200">
+                        MOST POPULAR
+                      </span>
+                    </div>
+                  )}
+
+                  <div className="flex-1">
+                    <h3
+                      className={`mb-3 text-xs font-bold uppercase tracking-wider ${
+                        plan.popular ? "text-blue-700" : "text-gray-500"
+                      }`}
+                    >
+                      {plan.name}
+                    </h3>
+                    <div className="flex items-baseline gap-1 mb-2">
+                      <span
+                        className={`text-3xl font-black ${
+                          plan.popular ? "text-blue-700" : "text-gray-900"
+                        }`}
+                      >
+                        {plan.price}
+                      </span>
+                      <span
+                        className={`text-sm ${
+                          plan.popular ? "text-blue-500" : "text-gray-500"
+                        }`}
+                      >
+                        {plan.period}
+                      </span>
+                    </div>
+                    <p
+                      className={`mb-6 text-xs leading-relaxed ${
+                        plan.popular ? "text-gray-600" : "text-gray-500"
+                      }`}
+                    >
+                      {plan.description}
+                    </p>
+
+                    <Link
+                      to="/pricing"
+                      className={`block w-full text-center py-2.5 rounded-xl text-sm font-semibold transition-colors mb-6 ${
+                        plan.buttonVariant === "primary"
+                          ? "bg-blue-600 hover:bg-blue-700 text-white"
+                          : "border border-gray-300 hover:bg-gray-50 text-gray-700"
+                      }`}
+                    >
+                      {plan.buttonText}
+                    </Link>
+
+                    <ul className="space-y-2.5">
+                      {plan.features.map((feature, i) => (
+                        <li key={i} className="flex items-start gap-2">
+                          <Check
+                            size={15}
+                            className={`mt-0.5 flex-shrink-0 ${
+                              plan.popular ? "text-blue-700" : "text-blue-600"
+                            }`}
+                          />
+                          <span
+                            className={`text-xs ${
+                              plan.popular ? "font-medium text-gray-700" : "text-gray-600"
+                            }`}
+                          >
+                            {feature}
+                          </span>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </section>
+
+        <section className="relative overflow-hidden py-14 sm:py-16 px-4 bg-gradient-to-br from-white via-primary-50/40 to-cyan-50">
+          <div
+            className="absolute left-10 top-10 h-28 w-28 rounded-full bg-primary-200/30 blur-3xl"
+            aria-hidden="true"
+          />
+          <div
+            className="absolute right-10 bottom-10 h-32 w-32 rounded-full bg-cyan-200/40 blur-3xl"
+            aria-hidden="true"
+          />
+
+          <div className="relative max-w-4xl mx-auto">
+            <div className="text-center mb-10">
+              <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-2xl bg-primary-600 text-white shadow-glow">
+                <HelpCircle size={28} />
+              </div>
+              <p className="text-sm font-semibold uppercase tracking-wide text-primary-600 mb-2">
+                Giải đáp nhanh
+              </p>
+              <h2 className="text-3xl sm:text-4xl font-black text-gray-900">
+                Câu hỏi thường gặp
+              </h2>
+              <p className="mt-3 text-base text-gray-500">
+                Các thắc mắc phổ biến khi chuyển đổi Excel sang Misa bằng EzFormat.
+              </p>
+            </div>
+
+            <div className="space-y-3 rounded-[2rem] border border-white/80 bg-white/70 p-3 shadow-card backdrop-blur sm:p-4">
+              {faqs.map((faq, index) => (
+                <details
+                  key={faq.question}
+                  className="group rounded-2xl border border-gray-100 bg-white p-5 shadow-sm open:border-primary-100 open:shadow-card"
+                  open={index === 0}
+                >
+                  <summary className="flex cursor-pointer list-none items-center justify-between gap-4 text-left font-bold text-gray-900">
+                    <span>{faq.question}</span>
+                    <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-primary-50 text-primary-600 transition-transform group-open:rotate-45">
+                      +
+                    </span>
+                  </summary>
+                  <p className="mt-3 text-sm leading-relaxed text-gray-600">
+                    {faq.answer}
+                  </p>
+                </details>
+              ))}
+            </div>
+          </div>
         </section>
       </main>
 

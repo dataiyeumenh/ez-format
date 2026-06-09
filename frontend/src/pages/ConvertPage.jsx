@@ -1,11 +1,14 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import {
   AlertTriangle,
   CheckCircle,
   Download,
   FileSpreadsheet,
+  HelpCircle,
   Loader2,
   MessageCircle,
+  MoveRight,
   Send,
   Server,
   UploadCloud,
@@ -30,10 +33,63 @@ const STATUS = {
   ERROR: "error",
 };
 
-const STEPS = ["Tải file", "Map cột", "Xem trước", "Tải MISA"];
+const STEPS = ["Tải file", "Ghép cột", "Xem trước", "Tải MISA"];
 const DEFAULT_TEMPLATE_ID = "bsn_sales";
 const EXCEL_EXT = ["xlsx", "xls"];
 const PDF_EXT = ["pdf"];
+
+const ColumnHelp = ({ text }) => {
+  const iconRef = useRef(null);
+  const [open, setOpen] = useState(false);
+  const [position, setPosition] = useState({ top: 0, left: 0 });
+
+  const updatePosition = () => {
+    if (!iconRef.current) return;
+    const rect = iconRef.current.getBoundingClientRect();
+    setPosition({
+      top: rect.bottom + 8,
+      left: Math.min(Math.max(rect.left - 120, 12), window.innerWidth - 300),
+    });
+  };
+
+  useEffect(() => {
+    if (!open) return;
+    updatePosition();
+    window.addEventListener("scroll", updatePosition, true);
+    window.addEventListener("resize", updatePosition);
+    return () => {
+      window.removeEventListener("scroll", updatePosition, true);
+      window.removeEventListener("resize", updatePosition);
+    };
+  }, [open]);
+
+  return (
+    <>
+      <button
+        ref={iconRef}
+        type="button"
+        className="ml-1 inline-flex align-middle text-gray-400 transition-colors hover:text-primary-600"
+        aria-label={text}
+        onMouseEnter={() => setOpen(true)}
+        onMouseLeave={() => setOpen(false)}
+        onFocus={() => setOpen(true)}
+        onBlur={() => setOpen(false)}
+      >
+        <HelpCircle size={13} />
+      </button>
+      {open &&
+        createPortal(
+          <div
+            className="pointer-events-none fixed z-[80] w-72 max-w-[80vw] rounded-xl bg-gray-900 px-3 py-2 text-[11px] font-medium leading-relaxed text-white shadow-lg whitespace-pre-line"
+            style={{ top: position.top, left: position.left }}
+          >
+            {text}
+          </div>,
+          document.body,
+        )}
+    </>
+  );
+};
 const KEY_PREVIEW_HEADERS = [
   "Số chứng từ (*)",
   "Ngày hạch toán (*)",
@@ -102,6 +158,7 @@ const ConvertPage = () => {
   const [previewRows, setPreviewRows] = useState([]);
   const [previewStats, setPreviewStats] = useState(null);
   const [profileId, setProfileId] = useState(null);
+  const [focusedTarget, setFocusedTarget] = useState("");
 
   const [chatOpen, setChatOpen] = useState(false);
   const [chatInput, setChatInput] = useState("");
@@ -109,11 +166,18 @@ const ConvertPage = () => {
     { from: "bot", text: "Xin chào! Tôi có thể giúp gì cho bạn?" },
     {
       from: "bot",
-      text: "Hỏi về chuyển đổi Excel → MISA, mapping cột hoặc hỗ trợ kỹ thuật.",
+      text: "Hỏi về chuyển đổi Excel → MISA, ghép cột hoặc hỗ trợ kỹ thuật.",
     },
   ]);
 
   const inputRef = useRef(null);
+  const mappingTableRef = useRef(null);
+  const targetRowRefs = useRef({});
+  const targetFieldRefs = useRef({
+    raw: {},
+    default: {},
+    formula: {},
+  });
 
   const selectedTemplate = useMemo(
     () => templates.find((template) => template.id === targetTemplateId),
@@ -127,6 +191,29 @@ const ConvertPage = () => {
   }, [analyzePayload?.target_headers, previewHeaders, selectedTemplate?.headers]);
   const mappingSource = analyzePayload?.mapping_suggestion?.source;
   const confidence = analyzePayload?.mapping_suggestion?.confidence;
+  const extractTargetsFromText = (text) => {
+    if (!text) return [];
+    return [...targetHeaders]
+      .sort((a, b) => b.length - a.length)
+      .filter((header) => text.includes(header));
+  };
+  const inferFieldFromText = (text, target) => {
+    const lowerText = (text || "").toLowerCase();
+    if (lowerText.includes("công thức") || lowerText.includes("formula")) return "formula";
+    if (lowerText.includes("mặc định") || lowerText.includes("default")) return "default";
+    if (
+      lowerText.includes("excel") ||
+      lowerText.includes("mapping") ||
+      lowerText.includes("ghép cột") ||
+      lowerText.includes("map")
+    ) {
+      return "raw";
+    }
+
+    if (!targetMapping[target]) return "raw";
+    if (defaults[target] === undefined || defaults[target] === "") return "default";
+    return "formula";
+  };
   const keyPreviewValues = useMemo(() => {
     const firstRow = previewRows[0];
     if (!firstRow) return [];
@@ -154,10 +241,10 @@ const ConvertPage = () => {
             value: rawHeader
               ? rawHeader
               : formula
-                ? `Formula: ${formula}`
+                ? `Công thức tự động: ${formula}`
                 : defaultValue !== undefined && defaultValue !== ""
-                  ? `Default: ${defaultValue}`
-                  : "Chưa map",
+                  ? `Giá trị mặc định: ${defaultValue}`
+                  : "Chưa thiết lập",
             ok: Boolean(
               rawHeader ||
               formula ||
@@ -169,6 +256,7 @@ const ConvertPage = () => {
     [defaults, formulas, targetHeaders, targetMapping],
   );
   const keyMappingOkCount = keyMappingValues.filter((item) => item.ok).length;
+  const hasPreviewReady = previewRows.length > 0;
 
   const stepIndex =
     convStatus === STATUS.MAPPING
@@ -207,6 +295,24 @@ const ConvertPage = () => {
     if (convStatus === STATUS.PREVIEW || convStatus === STATUS.SUCCESS) {
       setConvStatus(STATUS.MAPPING);
     }
+  };
+
+  const focusTargetRow = (target, sourceText = "") => {
+    const row = targetRowRefs.current[target];
+    const container = mappingTableRef.current;
+    if (!row || !container) return;
+    container.scrollTo({
+      top: Math.max(row.offsetTop - 120, 0),
+      behavior: "smooth",
+    });
+    setFocusedTarget(target);
+    const field = inferFieldFromText(sourceText, target);
+    const fieldElement = targetFieldRefs.current[field]?.[target];
+    window.setTimeout(() => {
+      fieldElement?.focus?.();
+      fieldElement?.select?.();
+    }, 260);
+    window.setTimeout(() => setFocusedTarget(""), 1800);
   };
 
   const acceptFile = (file) => {
@@ -321,7 +427,7 @@ const ConvertPage = () => {
     if (profileId) return profileId;
     const result = await confirmMapping({
       ...buildMappingPayload(),
-      profile_name: selectedTemplate?.label || "MISA mapping profile",
+      profile_name: selectedTemplate?.label || "Thiết lập ghép cột MISA",
     });
     setProfileId(result.profile_id);
     return result.profile_id;
@@ -405,27 +511,28 @@ const ConvertPage = () => {
 
       <main className="flex-1 pb-20 sm:pb-0">
         <section className="py-8 sm:py-12 px-4">
-          <div className="max-w-6xl mx-auto">
+          <div className="max-w-[1440px] mx-auto">
             <StepProgress steps={STEPS} current={stepIndex} />
 
             <div className="text-center mb-6 sm:mb-8">
               <h1 className="text-2xl sm:text-3xl font-bold text-gray-900 tracking-tight">
-                Chuyển đổi Excel thô → MISA
+                Chuyển đổi Excel → MISA
               </h1>
               <p className="text-sm sm:text-base text-gray-500 mt-2 max-w-2xl mx-auto">
-                Backend đọc template MISA chuẩn, gợi ý mapping bằng profile/AI optional,
-                cho bạn sửa trước khi lưu setting và tải file.
+                Hệ thống đọc cấu trúc file nhập liệu chuẩn của MISA, nhận biết tên
+                cột cần có trong biểu mẫu và tự gợi ý ghép cột từ file Excel để bạn
+                kiểm tra, chỉnh sửa trước khi tải file.
               </p>
             </div>
 
             {serviceOnline === false && (
               <Alert
                 variant="warning"
-                title="Backend converter chưa sẵn sàng"
+                title="Bộ chuyển đổi chưa sẵn sàng"
                 className="mb-5"
               >
-                Chạy converter FastAPI trước khi phân tích file. Nếu AI Gateway offline,
-                backend vẫn cho sửa mapping thủ công.
+                Chạy bộ chuyển đổi trước khi phân tích file. Nếu AI tạm thời không
+                hoạt động, bạn vẫn có thể ghép cột thủ công.
               </Alert>
             )}
 
@@ -433,25 +540,25 @@ const ConvertPage = () => {
               <div className="flex items-center justify-center gap-4 mb-4 flex-wrap">
                 <p className="flex items-center gap-1.5 text-xs text-emerald-700">
                   <Server size={14} />
-                  Backend converter đang hoạt động
+                  Bộ chuyển đổi đang hoạt động
                 </p>
                 {aiOnline === true && (
                   <p className="flex items-center gap-1.5 text-xs text-violet-700">
                     <span className="inline-block w-2 h-2 rounded-full bg-violet-500 animate-pulse" />
-                    AI Gateway đang hoạt động
+                    AI đang hoạt động
                   </p>
                 )}
                 {aiOnline === false && (
                   <p className="flex items-center gap-1.5 text-xs text-amber-600">
                     <span className="inline-block w-2 h-2 rounded-full bg-amber-400" />
-                    AI Gateway offline — mapping thủ công
+                    AI tạm thời không hoạt động — ghép cột thủ công
                   </p>
                 )}
               </div>
             )}
 
-            <div className="grid gap-5 lg:grid-cols-[minmax(0,420px)_1fr]">
-              <div className="space-y-4">
+            <div className="grid gap-5 xl:grid-cols-[minmax(320px,380px)_minmax(0,1fr)]">
+              <div className="space-y-4 xl:sticky xl:top-24 xl:self-start">
                 <div
                   className={`rounded-3xl border-2 border-dashed p-6 sm:p-8 text-center transition-all ${
                     dragActive
@@ -568,13 +675,13 @@ const ConvertPage = () => {
                     ) : (
                       <Wand2 size={18} />
                     )}
-                    Phân tích & gợi ý mapping
+                    Phân tích & gợi ý ghép cột
                   </button>
 
                   {analyzePayload && (
                     <div className="rounded-xl bg-gray-50 p-3 text-xs text-gray-600 space-y-1">
                       <p>
-                        Sheet:{" "}
+                        Trang tính:{" "}
                         <span className="font-medium">
                           {analyzePayload.detected?.sheet_name}
                         </span>
@@ -586,7 +693,7 @@ const ConvertPage = () => {
                         </span>
                       </p>
                       <p>
-                        Mapping:{" "}
+                        Nguồn gợi ý:{" "}
                         <span className="font-medium">
                           {mappingSource || "—"}{" "}
                           {confidence !== undefined
@@ -595,6 +702,43 @@ const ConvertPage = () => {
                         </span>
                       </p>
                     </div>
+                  )}
+
+                  {analyzePayload && (
+                    <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-1">
+                      <button
+                        type="button"
+                        className="btn-secondary w-full justify-center py-3"
+                        onClick={handlePreview}
+                        disabled={convStatus === STATUS.DOWNLOADING}
+                      >
+                        <Wand2 size={16} />
+                        Xem trước
+                      </button>
+                      <button
+                        type="button"
+                        className="inline-flex w-full items-center justify-center gap-2 rounded-xl bg-emerald-600 px-5 py-3 text-sm font-semibold text-white shadow-sm transition-all duration-200 hover:bg-emerald-700 hover:shadow-md active:scale-[0.98] disabled:pointer-events-none disabled:opacity-50"
+                        onClick={handleDownload}
+                        disabled={
+                          convStatus === STATUS.DOWNLOADING ||
+                          convStatus === STATUS.ANALYZING ||
+                          !hasPreviewReady
+                        }
+                      >
+                        {convStatus === STATUS.DOWNLOADING ? (
+                          <Loader2 size={16} className="animate-spin" />
+                        ) : (
+                          <Download size={16} />
+                        )}
+                        Tải file MISA
+                      </button>
+                    </div>
+                  )}
+
+                  {analyzePayload && !hasPreviewReady && (
+                    <p className="text-center text-xs text-amber-700">
+                      Hoàn thành bước <strong>Xem trước</strong> để mở tải file MISA.
+                    </p>
                   )}
                 </div>
 
@@ -615,13 +759,35 @@ const ConvertPage = () => {
                 {warnings.length > 0 && (
                   <Alert
                     variant="warning"
-                    title="Cảnh báo mapping"
+                    title="Cảnh báo ghép cột"
                     className="text-left"
                   >
-                    <ul className="list-disc pl-4 space-y-0.5">
-                      {warnings.slice(0, 6).map((warning, index) => (
-                        <li key={`${warning}-${index}`}>{warning}</li>
-                      ))}
+                    <ul className="list-disc pl-4 space-y-2">
+                      {warnings.slice(0, 6).map((warning, index) => {
+                        const matchedTargets = extractTargetsFromText(warning);
+                        return (
+                          <li key={`${warning}-${index}`}>
+                            <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:gap-3">
+                              <div>{warning}</div>
+                              {matchedTargets.length > 0 && (
+                                <div className="flex shrink-0 flex-wrap gap-2">
+                                  {matchedTargets.map((target) => (
+                                    <button
+                                      key={`${warning}-${target}`}
+                                      type="button"
+                                      className="inline-flex items-center gap-2 rounded-full border border-amber-300 bg-white px-3.5 py-1.5 text-sm font-bold text-amber-800 shadow-sm hover:bg-amber-50"
+                                      onClick={() => focusTargetRow(target, warning)}
+                                    >
+                                      Đi tới
+                                      <MoveRight size={15} />
+                                    </button>
+                                  ))}
+                                </div>
+                              )}
+                            </div>
+                          </li>
+                        );
+                      })}
                     </ul>
                   </Alert>
                 )}
@@ -632,25 +798,72 @@ const ConvertPage = () => {
                     title="Vấn đề cần kiểm tra"
                     className="text-left"
                   >
-                    <ul className="list-disc pl-4 space-y-0.5">
-                      {issues.slice(0, 6).map((issue, index) => (
-                        <li key={`${issue.code || "issue"}-${index}`}>
-                          {issue.message || String(issue)}
-                        </li>
-                      ))}
+                    <ul className="list-disc pl-4 space-y-2">
+                      {issues.slice(0, 6).map((issue, index) => {
+                        const message = issue.message || String(issue);
+                        const matchedTargets = extractTargetsFromText(message);
+                        return (
+                          <li key={`${issue.code || "issue"}-${index}`}>
+                            <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:gap-3">
+                              <div>{message}</div>
+                              {matchedTargets.length > 0 && (
+                                <div className="flex shrink-0 flex-wrap gap-2">
+                                  {matchedTargets.map((target) => (
+                                    <button
+                                      key={`${message}-${target}`}
+                                      type="button"
+                                      className="inline-flex items-center gap-2 rounded-full border border-amber-300 bg-white px-3.5 py-1.5 text-sm font-bold text-amber-800 shadow-sm hover:bg-amber-50"
+                                      onClick={() => focusTargetRow(target, message)}
+                                    >
+                                      Đi tới
+                                      <MoveRight size={15} />
+                                    </button>
+                                  ))}
+                                </div>
+                              )}
+                            </div>
+                          </li>
+                        );
+                      })}
                     </ul>
                   </Alert>
                 )}
+
+                {analyzePayload &&
+                  convStatus !== STATUS.ANALYZING &&
+                  !hasPreviewReady && (
+                    <Alert
+                      variant="info"
+                      title="Bước tiếp theo: Xem trước"
+                      className="text-left"
+                    >
+                      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                        <p className="text-sm">
+                          Bạn cần bấm <strong>Xem trước</strong> để kiểm tra dữ liệu
+                          đầu ra và chuyển sang bước 3 trước khi tải file MISA.
+                        </p>
+                        <button
+                          type="button"
+                          className="btn-primary justify-center px-4 py-2"
+                          onClick={handlePreview}
+                          disabled={convStatus === STATUS.DOWNLOADING}
+                        >
+                          <Wand2 size={16} />
+                          Xem trước ngay
+                        </button>
+                      </div>
+                    </Alert>
+                  )}
 
                 {!analyzePayload && convStatus !== STATUS.ANALYZING && (
                   <div className="rounded-3xl border border-gray-200 bg-white p-8 sm:p-12 shadow-card text-center">
                     <AlertTriangle size={36} className="mx-auto text-gray-300 mb-3" />
                     <h2 className="text-base font-semibold text-gray-800">
-                      Chưa có mapping
+                      Chưa có gợi ý ghép cột
                     </h2>
                     <p className="text-sm text-gray-500 mt-1">
-                      Upload file rồi bấm phân tích để backend đọc schema và gợi ý
-                      mapping.
+                      Tải file lên rồi bấm phân tích để hệ thống đọc cấu trúc cột và
+                      gợi ý ghép cột.
                     </p>
                   </div>
                 )}
@@ -669,13 +882,19 @@ const ConvertPage = () => {
 
                 {analyzePayload && convStatus !== STATUS.ANALYZING && (
                   <div className="rounded-3xl border border-gray-200 bg-white shadow-card overflow-hidden">
-                    <div className="px-4 sm:px-5 py-4 border-b border-gray-100 flex flex-col lg:flex-row lg:items-start lg:justify-between gap-4">
+                    <div className="px-5 sm:px-6 py-5 border-b border-gray-100 flex flex-col lg:flex-row lg:items-start lg:justify-between gap-4">
                       <div className="min-w-0">
-                        <h2 className="text-lg font-bold text-gray-900">
-                          Mapping raw → MISA
+                        <h2 className="text-2xl font-black text-gray-900">
+                          Ghép cột Excel → MISA
                         </h2>
-                        <p className="text-xs text-gray-500">
-                          Chọn cột raw, default hoặc formula cho từng cột MISA.
+                        <p className="mt-1 text-sm leading-relaxed text-gray-600">
+                          Với <strong>mỗi dòng cột MISA</strong>, bạn chỉ chọn{" "}
+                          <strong>1 trong 3 ô</strong>: <strong>Cột từ file Excel</strong>,{" "}
+                          <strong>Giá trị mặc định</strong> hoặc{" "}
+                          <strong>Công thức tự động</strong>. Sau khi đã chọn 1 cách,
+                          bạn có thể <strong>để trống 2 ô còn lại</strong>. Ví dụ:
+                          nếu đã chọn cột từ Excel thì không cần nhập giá trị mặc định
+                          hay công thức cho cùng dòng đó.
                         </p>
                       </div>
                       <div className="flex w-full flex-col xs:flex-row gap-2 lg:w-auto lg:shrink-0">
@@ -686,15 +905,16 @@ const ConvertPage = () => {
                           disabled={convStatus === STATUS.DOWNLOADING}
                         >
                           <Wand2 size={16} />
-                          Preview
+                          Xem trước
                         </button>
                         <button
                           type="button"
-                          className="btn-primary justify-center px-5"
+                          className="inline-flex items-center justify-center gap-2 rounded-xl bg-emerald-600 px-5 py-2.5 text-sm font-semibold text-white shadow-sm transition-all duration-200 hover:bg-emerald-700 hover:shadow-md active:scale-[0.98] disabled:pointer-events-none disabled:opacity-50"
                           onClick={handleDownload}
                           disabled={
                             convStatus === STATUS.DOWNLOADING ||
-                            convStatus === STATUS.ANALYZING
+                            convStatus === STATUS.ANALYZING ||
+                            !hasPreviewReady
                           }
                         >
                           {convStatus === STATUS.DOWNLOADING ? (
@@ -702,25 +922,25 @@ const ConvertPage = () => {
                           ) : (
                             <Download size={16} />
                           )}
-                          Tải MISA
+                          Tải file MISA
                         </button>
                       </div>
                     </div>
 
                     {keyMappingValues.length > 0 && (
-                      <div className="border-b border-blue-100 bg-blue-50/60 p-4">
+                      <div className="border-b border-blue-100 bg-blue-50/60 px-5 py-4 sm:px-6">
                         <div className="mb-3 flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
                           <div>
-                            <p className="text-sm font-semibold text-blue-950">
-                              Auto mapping cột chính
+                            <p className="text-lg font-bold text-blue-950">
+                              Tự động ghép cột quan trọng
                             </p>
-                            <p className="text-xs text-blue-700">
+                            <p className="text-sm text-blue-700">
                               {keyMappingOkCount}/{keyMappingValues.length} trường quan
-                              trọng đã có raw/default/formula.
+                              trọng đã được thiết lập.
                             </p>
                           </div>
-                          <span className="inline-flex w-fit rounded-full bg-white px-3 py-1 text-xs font-semibold text-blue-700 ring-1 ring-blue-100">
-                            {mappingSource || "mapping"}{" "}
+                          <span className="inline-flex w-fit rounded-full bg-white px-3.5 py-1.5 text-sm font-semibold text-blue-700 ring-1 ring-blue-100">
+                            {mappingSource || "gợi ý"}{" "}
                             {confidence !== undefined
                               ? `${Math.round(confidence * 100)}%`
                               : ""}
@@ -753,31 +973,59 @@ const ConvertPage = () => {
                       </div>
                     )}
 
-                    <div className="overflow-auto max-h-[520px]">
-                      <table className="min-w-full text-sm">
+                    <div ref={mappingTableRef} className="overflow-auto max-h-[620px]">
+                      <table className="min-w-[1180px] text-sm">
                         <thead className="sticky top-0 z-10 bg-gray-50 text-xs text-gray-500 uppercase">
                           <tr>
-                            <th className="px-3 py-2 text-left w-[28%]">Cột MISA</th>
-                            <th className="px-3 py-2 text-left w-[28%]">Cột raw</th>
-                            <th className="px-3 py-2 text-left w-[22%]">Default</th>
-                            <th className="px-3 py-2 text-left w-[22%]">Formula</th>
+                            <th className="px-4 py-3 text-left w-[24%]">Cột MISA</th>
+                            <th className="px-4 py-3 text-left w-[24%]">
+                              Cột từ file Excel
+                              <ColumnHelp text="Cột lấy trực tiếp từ file Excel bạn upload." />
+                            </th>
+                            <th className="px-4 py-3 text-left w-[20%]">
+                              Giá trị mặc định
+                              <ColumnHelp text="Giá trị dùng sẵn khi cột này không lấy từ file Excel." />
+                            </th>
+                            <th className="px-4 py-3 text-left w-[32%]">
+                              Công thức tự động
+                              <ColumnHelp text={`Dùng để tự tạo giá trị theo mẫu.
+
+Bạn có thể gõ chữ thường và chèn dữ liệu bằng cú pháp \${Tên cột}.
+
+Ví dụ:
+- XK_\${Số chứng từ (*)}
+- \${Mã khách hàng}_\${Ngày chứng từ (*)}
+
+Nếu không cần công thức, bạn có thể để trống ô này.`} />
+                            </th>
                           </tr>
                         </thead>
                         <tbody>
                           {targetHeaders.map((target) => (
-                            <tr key={target} className="border-t border-gray-100">
-                              <td className="px-3 py-2 font-medium text-gray-800 whitespace-nowrap">
+                            <tr
+                              key={target}
+                              ref={(node) => {
+                                targetRowRefs.current[target] = node;
+                              }}
+                              className={`border-t border-gray-100 transition-colors ${
+                                focusedTarget === target ? "bg-amber-50" : ""
+                              }`}
+                            >
+                              <td className="px-4 py-2.5 font-medium text-gray-800 whitespace-nowrap">
                                 {target}
                               </td>
-                              <td className="px-3 py-2">
+                              <td className="px-4 py-2.5">
                                 <select
-                                  className="w-full rounded-lg border border-gray-200 bg-white px-2 py-1.5 text-xs"
+                                  ref={(node) => {
+                                    targetFieldRefs.current.raw[target] = node;
+                                  }}
+                                  className="w-full min-w-[190px] rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm"
                                   value={targetMapping[target] || ""}
                                   onChange={(e) =>
                                     updateTargetMapping(target, e.target.value)
                                   }
                                 >
-                                  <option value="">— Không map —</option>
+                                  <option value="">— Không lấy từ Excel —</option>
                                   {rawHeaders.map((raw) => (
                                     <option key={`${target}-${raw}`} value={raw}>
                                       {raw}
@@ -785,10 +1033,13 @@ const ConvertPage = () => {
                                   ))}
                                 </select>
                               </td>
-                              <td className="px-3 py-2">
+                              <td className="px-4 py-2.5">
                                 <input
                                   type="text"
-                                  className="w-full rounded-lg border border-gray-200 px-2 py-1.5 text-xs"
+                                  ref={(node) => {
+                                    targetFieldRefs.current.default[target] = node;
+                                  }}
+                                  className="w-full min-w-[160px] rounded-xl border border-gray-200 px-3 py-2 text-sm"
                                   value={defaults[target] ?? ""}
                                   onChange={(e) =>
                                     updateDefault(target, e.target.value)
@@ -796,10 +1047,13 @@ const ConvertPage = () => {
                                   placeholder="Giá trị mặc định"
                                 />
                               </td>
-                              <td className="px-3 py-2">
+                              <td className="px-4 py-2.5">
                                 <input
                                   type="text"
-                                  className="w-full rounded-lg border border-gray-200 px-2 py-1.5 text-xs"
+                                  ref={(node) => {
+                                    targetFieldRefs.current.formula[target] = node;
+                                  }}
+                                  className="w-full min-w-[320px] rounded-xl border border-gray-200 px-3 py-2 text-sm"
                                   value={formulas[target] ?? ""}
                                   onChange={(e) =>
                                     updateFormula(target, e.target.value)
@@ -820,10 +1074,10 @@ const ConvertPage = () => {
                     <div className="rounded-2xl border border-emerald-100 bg-emerald-50 px-4 py-3 text-sm text-emerald-800 flex items-start gap-2">
                       <CheckCircle size={18} className="mt-0.5 shrink-0" />
                       <div>
-                        <p className="font-semibold">Preview MISA đã tạo</p>
+                        <p className="font-semibold">Bản xem trước MISA đã tạo</p>
                         <p className="text-xs">
-                          {previewStats?.output_rows || previewRows.length} dòng output
-                          từ {previewStats?.source_rows || "?"} dòng raw.
+                          {previewStats?.output_rows || previewRows.length} dòng kết quả
+                          từ {previewStats?.source_rows || "?"} dòng dữ liệu nguồn.
                         </p>
                       </div>
                     </div>
@@ -872,9 +1126,38 @@ const ConvertPage = () => {
                     title="Đã xuất file MISA"
                     className="text-left"
                   >
-                    Setting mapping đã được lưu. Lần sau upload file cùng schema,
-                    backend sẽ ưu tiên dùng profile này.
+                    Thiết lập ghép cột đã được lưu. Lần sau tải file cùng cấu trúc,
+                    hệ thống sẽ ưu tiên dùng thiết lập này.
                   </Alert>
+                )}
+
+                {analyzePayload && convStatus !== STATUS.ANALYZING && (
+                  <div className="flex flex-col-reverse gap-3 sm:flex-row sm:justify-end">
+                    <button
+                      type="button"
+                      className="btn-secondary justify-center px-5 py-3"
+                      onClick={handleReset}
+                    >
+                      Chọn file khác
+                    </button>
+                    <button
+                      type="button"
+                      className="inline-flex items-center justify-center gap-2 rounded-xl bg-emerald-600 px-5 py-3 text-sm font-semibold text-white shadow-sm transition-all duration-200 hover:bg-emerald-700 hover:shadow-md active:scale-[0.98] disabled:pointer-events-none disabled:opacity-50"
+                      onClick={handleDownload}
+                      disabled={
+                        convStatus === STATUS.DOWNLOADING ||
+                        convStatus === STATUS.ANALYZING ||
+                        !hasPreviewReady
+                      }
+                    >
+                      {convStatus === STATUS.DOWNLOADING ? (
+                        <Loader2 size={16} className="animate-spin" />
+                      ) : (
+                        <Download size={16} />
+                      )}
+                      Tải file MISA
+                    </button>
+                  </div>
                 )}
               </div>
             </div>
