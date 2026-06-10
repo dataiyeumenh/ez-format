@@ -2,6 +2,9 @@ const express = require("express");
 const cors = require("cors");
 const dotenv = require("dotenv");
 const connectDB = require("./config/db");
+const { getRevenue } = require("./controllers/adminController");
+const { protect, adminOnly } = require("./middleware/auth");
+const requireDb = require("./middleware/requireDb");
 
 require("dotenv").config();
 
@@ -38,6 +41,10 @@ app.use("/api/auth", require("./routes/auth"));
 app.use("/api/admin", require("./routes/admin"));
 app.use("/api/convert", require("./routes/convert"));
 app.use("/api/payments", require("./routes/payments"));
+
+// Backward-compatible alias for older admin revenue bundles.
+app.get("/api/revenue", requireDb, protect, adminOnly, getRevenue);
+app.get("/admin/revenue", requireDb, protect, adminOnly, getRevenue);
 
 // Health check
 app.get("/api/health", (req, res) => {

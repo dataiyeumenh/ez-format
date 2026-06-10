@@ -3,6 +3,7 @@ import { useNavigate } from "react-router-dom";
 import Navbar from "../components/Navbar";
 import Footer from "../components/Footer";
 import { useAuth } from "../context/AuthContext";
+import UserPlanBadge from "../components/UserPlanBadge";
 
 const plans = [
   {
@@ -80,6 +81,11 @@ const PricingPage = () => {
               Dành cho sinh viên và các chuyên gia. Chuyển đổi mọi loại biểu mẫu một
               cách nhanh chóng và chính xác.
             </p>
+            {user && (
+              <div className="mt-5 max-w-md mx-auto text-left">
+                <UserPlanBadge user={user} />
+              </div>
+            )}
           </div>
 
           {/* Pricing cards */}

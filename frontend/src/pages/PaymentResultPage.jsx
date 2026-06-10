@@ -4,6 +4,7 @@ import { CheckCircle, Loader2, XCircle } from "lucide-react";
 import Navbar from "../components/Navbar";
 import Footer from "../components/Footer";
 import { useAuth } from "../context/AuthContext";
+import UserPlanBadge from "../components/UserPlanBadge";
 
 const copy = {
   success: {
@@ -21,7 +22,7 @@ const copy = {
 };
 
 const PaymentResultPage = ({ status = "success" }) => {
-  const { refreshUser } = useAuth();
+  const { user, refreshUser } = useAuth();
   const [searchParams] = useSearchParams();
   const [refreshing, setRefreshing] = useState(status === "success");
   const config = copy[status] || copy.success;
@@ -31,15 +32,30 @@ const PaymentResultPage = ({ status = "success" }) => {
   useEffect(() => {
     if (status !== "success") return;
     let cancelled = false;
-    const timer = window.setTimeout(async () => {
+    let attempts = 0;
+
+    const refreshUntilUpdated = async () => {
+      attempts += 1;
       try {
-        await refreshUser();
+        const updatedUser = await refreshUser();
+        const hasPaidBenefit =
+          updatedUser?.plan === "Monthly" ||
+          updatedUser?.plan === "Yearly" ||
+          Number(updatedUser?.fileCredits || 0) > 0;
+        if (hasPaidBenefit || attempts >= 6) {
+          if (!cancelled) setRefreshing(false);
+          return;
+        }
       } catch {
-        // Webhook may still be pending; user can refresh later.
-      } finally {
-        if (!cancelled) setRefreshing(false);
+        if (attempts >= 6 && !cancelled) setRefreshing(false);
       }
-    }, 2500);
+
+      if (!cancelled) {
+        window.setTimeout(refreshUntilUpdated, 2500);
+      }
+    };
+
+    const timer = window.setTimeout(refreshUntilUpdated, 1500);
 
     return () => {
       cancelled = true;
@@ -69,6 +85,14 @@ const PaymentResultPage = ({ status = "success" }) => {
               <Loader2 size={16} className="animate-spin" />
               Đang cập nhật thông tin tài khoản...
             </p>
+          )}
+          {status === "success" && user && (
+            <div className="mb-5 text-left">
+              <p className="mb-2 text-sm font-semibold text-gray-700">
+                Gói hiện tại của bạn
+              </p>
+              <UserPlanBadge user={user} />
+            </div>
           )}
           <div className="flex flex-col sm:flex-row gap-3">
             <Link

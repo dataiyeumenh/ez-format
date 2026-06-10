@@ -1,7 +1,12 @@
 const express = require("express");
 const router = express.Router();
 const { body } = require("express-validator");
-const { register, login, getMe } = require("../controllers/authController");
+const {
+  register,
+  login,
+  googleLogin,
+  getMe,
+} = require("../controllers/authController");
 const { protect } = require("../middleware/auth");
 const requireDb = require("../middleware/requireDb");
 
@@ -29,6 +34,9 @@ router.post(
   ],
   login,
 );
+
+// @route POST /api/auth/google
+router.post("/google", googleLogin);
 
 // @route GET /api/auth/me
 router.get("/me", protect, getMe);
