@@ -7,6 +7,10 @@ const {
   normalizePlanType,
 } = require("../services/paymentPlans");
 const { applyPaidPlanToUser } = require("../services/subscriptionService");
+const {
+  normalizePayOSStatus,
+  syncPaymentStatusFromPayOS,
+} = require("../services/paymentStatusSync");
 
 function getReturnUrl() {
   return (
@@ -122,7 +126,8 @@ async function getPayment(req, res) {
         .json({ success: false, message: "Không tìm thấy đơn thanh toán" });
     }
 
-    return res.json({ success: true, payment: serializePayment(payment) });
+    const syncedPayment = await syncPaymentStatusFromPayOS(payment).catch(() => payment);
+    return res.json({ success: true, payment: serializePayment(syncedPayment) });
   } catch (error) {
     return res.status(500).json({
       success: false,
@@ -132,11 +137,48 @@ async function getPayment(req, res) {
   }
 }
 
+async function syncPayment(req, res) {
+  try {
+    const payment = await Payment.findOne({
+      orderCode: Number(req.params.orderCode),
+    });
+
+    if (!payment) {
+      return res
+        .status(404)
+        .json({ success: false, message: "Không tìm thấy đơn thanh toán" });
+    }
+
+    const syncedPayment = await syncPaymentStatusFromPayOS(payment);
+    return res.json({
+      success: true,
+      payment: {
+        orderCode: syncedPayment.orderCode,
+        status: syncedPayment.status,
+        paidAt: syncedPayment.paidAt,
+        updatedAt: syncedPayment.updatedAt,
+      },
+    });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: "Không thể đồng bộ trạng thái thanh toán",
+      error: error.message,
+    });
+  }
+}
+
 async function handlePayOSWebhook(req, res) {
   try {
     const payOS = getPayOSClient();
     const webhookData = await payOS.webhooks.verify(req.body);
-    const isPaid = req.body?.success === true || webhookData?.code === "00";
+    const webhookStatus =
+      webhookData?.status || webhookData?.data?.status || req.body?.data?.status;
+    const webhookMappedStatus = normalizePayOSStatus(webhookStatus);
+    const isPaid =
+      req.body?.success === true ||
+      webhookData?.code === "00" ||
+      webhookMappedStatus === "paid";
 
     const payment = await Payment.findOne({ orderCode: webhookData.orderCode });
     if (!payment) {
@@ -168,7 +210,12 @@ async function handlePayOSWebhook(req, res) {
     }
 
     if (!isPaid) {
-      payment.status = "failed";
+      try {
+        await syncPaymentStatusFromPayOS(payment);
+      } catch {
+        payment.status = webhookMappedStatus === "pending" ? "failed" : webhookMappedStatus;
+        await payment.save();
+      }
       await payment.save();
       return res.status(200).json({ success: true });
     }
@@ -201,5 +248,6 @@ module.exports = {
   createPayment,
   getPayment,
   handlePayOSWebhook,
+  syncPayment,
   generateOrderCode,
 };

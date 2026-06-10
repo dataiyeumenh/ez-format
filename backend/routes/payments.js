@@ -3,6 +3,7 @@ const {
   createPayment,
   getPayment,
   handlePayOSWebhook,
+  syncPayment,
 } = require("../controllers/paymentController");
 const { protect } = require("../middleware/auth");
 const requireDb = require("../middleware/requireDb");
@@ -14,6 +15,7 @@ router.use(requireDb);
 router.post("/payos-webhook", handlePayOSWebhook);
 
 router.post("/create", protect, createPayment);
+router.post("/:orderCode/sync", syncPayment);
 router.get("/:orderCode", protect, getPayment);
 
 module.exports = router;
