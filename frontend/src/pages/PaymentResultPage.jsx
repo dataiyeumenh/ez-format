@@ -5,6 +5,7 @@ import Navbar from "../components/Navbar";
 import Footer from "../components/Footer";
 import { useAuth } from "../context/AuthContext";
 import UserPlanBadge from "../components/UserPlanBadge";
+import api from "../services/api";
 
 const copy = {
   success: {
@@ -27,7 +28,15 @@ const PaymentResultPage = ({ status = "success" }) => {
   const [refreshing, setRefreshing] = useState(status === "success");
   const config = copy[status] || copy.success;
   const Icon = config.icon;
-  const orderCode = searchParams.get("orderCode");
+  const orderCode =
+    searchParams.get("orderCode") ||
+    searchParams.get("order_code") ||
+    searchParams.get("ordercode");
+
+  useEffect(() => {
+    if (!orderCode) return;
+    api.post(`/payments/${orderCode}/sync`).catch(() => {});
+  }, [orderCode]);
 
   useEffect(() => {
     if (status !== "success") return;

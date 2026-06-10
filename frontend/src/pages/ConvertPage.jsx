@@ -544,6 +544,18 @@ const ConvertPage = () => {
     clearPreviewAfterMappingChange();
   };
 
+  const handlePreviewCellChange = (rowIndex, header, value) => {
+    setPreviewRows((prev) =>
+      prev.map((row, index) =>
+        index === rowIndex ? { ...row, [header]: value } : row,
+      ),
+    );
+  };
+
+  const handlePreviewRowDelete = (rowIndex) => {
+    setPreviewRows((prev) => prev.filter((_, index) => index !== rowIndex));
+  };
+
   return (
     <div className="min-h-screen flex flex-col bg-mesh">
       <Navbar />
@@ -1094,6 +1106,7 @@ const ConvertPage = () => {
                             headers={previewHeaders}
                             rows={previewRows}
                             onCellChange={handlePreviewCellChange}
+                            onDeleteRow={handlePreviewRowDelete}
                           />
                         </div>
                       </div>

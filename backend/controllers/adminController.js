@@ -1,5 +1,6 @@
 const User = require("../models/User");
 const Payment = require("../models/Payment");
+const { syncPaymentStatusFromPayOS } = require("../services/paymentStatusSync");
 
 // @desc    Get all users (admin only)
 // @route   GET /api/admin/users
@@ -176,6 +177,44 @@ function formatPayment(payment) {
   };
 }
 
+async function syncPendingPayments(payments, limit = 25) {
+  const uniquePendingPayments = Array.from(
+    new Map(
+      payments
+        .filter((payment) => payment.status === "pending")
+        .map((payment) => [String(payment._id), payment]),
+    ).values(),
+  )
+    .slice(0, limit);
+
+  const syncedPayments = await Promise.all(
+    uniquePendingPayments.map((payment) =>
+      syncPaymentStatusFromPayOS(payment).catch(() => payment),
+    ),
+  );
+  const syncedById = new Map(
+    syncedPayments.map((payment) => [
+      String(payment._id),
+      {
+        status: payment.status,
+        paidAt: payment.paidAt,
+        payosData: payment.payosData,
+        updatedAt: payment.updatedAt,
+      },
+    ]),
+  );
+
+  for (const payment of payments) {
+    const synced = syncedById.get(String(payment._id));
+    if (synced) {
+      payment.status = synced.status;
+      payment.paidAt = synced.paidAt;
+      payment.payosData = synced.payosData;
+      payment.updatedAt = synced.updatedAt;
+    }
+  }
+}
+
 // @desc    Revenue analytics from Payment collection
 // @route   GET /api/admin/revenue
 // @access  Private/Admin
@@ -202,6 +241,8 @@ const getRevenue = async (req, res) => {
         .sort({ createdAt: -1 })
         .limit(100),
     ]);
+
+    await syncPendingPayments([...recentPayments, ...currentPayments]);
 
     const paidCurrent = currentPayments.filter((payment) => payment.status === "paid");
     const paidPrevious = previousPayments.filter((payment) => payment.status === "paid");
