@@ -2,6 +2,7 @@ import { Check } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import Navbar from "../components/Navbar";
 import Footer from "../components/Footer";
+import ChatSupport from "../components/ChatSupport";
 import { useAuth } from "../context/AuthContext";
 import UserPlanBadge from "../components/UserPlanBadge";
 
@@ -67,13 +68,16 @@ const PricingPage = () => {
   };
 
   return (
-    <div className="min-h-screen flex flex-col bg-gray-50">
+    <div className="min-h-screen flex flex-col bg-white">
       <Navbar />
       <main className="flex-1 py-16 px-4">
         <div className="max-w-6xl mx-auto">
           {/* Header */}
-          <div className="text-center mb-12">
-            <h1 className="text-4xl sm:text-5xl font-black text-gray-900 mb-4">
+          <div
+            className="animate-fade-up-in text-center mb-12"
+            style={{ animationDelay: "120ms" }}
+          >
+            <h1 className="mb-4 text-4xl font-black leading-[1.22] text-gray-900 sm:text-5xl sm:leading-[1.18]">
               <span className="block">Lựa chọn gói dịch vụ</span>
               <span className="block">phù hợp với nhu cầu của bạn</span>
             </h1>
@@ -82,7 +86,10 @@ const PricingPage = () => {
               cách nhanh chóng và chính xác.
             </p>
             {user && (
-              <div className="mt-5 max-w-md mx-auto text-left">
+              <div
+                className="animate-fade-up-in mt-5 max-w-md mx-auto text-left"
+                style={{ animationDelay: "300ms" }}
+              >
                 <UserPlanBadge user={user} />
               </div>
             )}
@@ -90,14 +97,15 @@ const PricingPage = () => {
 
           {/* Pricing cards */}
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6 mt-4">
-            {plans.map((plan) => (
+            {plans.map((plan, index) => (
               <div
                 key={plan.id}
-                className={`group relative flex flex-col rounded-2xl p-6 transition-all duration-200 ${
+                className={`animate-fade-up-in group relative flex flex-col rounded-2xl p-6 transition-all duration-200 ${
                   plan.popular
                     ? "bg-gradient-to-br from-blue-50 via-white to-cyan-50 border-2 border-blue-500 shadow-xl shadow-blue-100/80 lg:-translate-y-3 lg:scale-[1.03]"
                     : "bg-white border border-gray-200 hover:border-blue-500 hover:shadow-lg hover:shadow-blue-100"
                 }`}
+                style={{ animationDelay: `${320 + index * 140}ms` }}
               >
                 {/* Popular badge */}
                 {plan.popular && (
@@ -177,6 +185,7 @@ const PricingPage = () => {
         </div>
       </main>
       <Footer />
+      <ChatSupport />
     </div>
   );
 };

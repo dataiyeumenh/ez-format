@@ -15,6 +15,7 @@ import {
   ChevronDown,
 } from "lucide-react";
 import { useAuth } from "../../context/AuthContext";
+import ezFormatMainLogo from "../../assets/ezformat-main-logo.png";
 
 const navItems = [
   { icon: LayoutDashboard, label: "Tổng quan", path: "/admin" },
@@ -60,13 +61,11 @@ const AdminLayout = ({ children, title: _title }) => {
       <aside className="w-56 bg-gray-900 flex flex-col flex-shrink-0">
         {/* Logo */}
         <div className="flex items-center gap-2 px-5 py-4 border-b border-gray-800">
-          <div className="relative w-7 h-7">
-            <div className="absolute inset-0 bg-blue-500 rounded transform rotate-6" />
-            <div className="absolute inset-0 bg-green-400 rounded transform -rotate-6 opacity-80" />
-            <span className="absolute inset-0 flex items-center justify-center text-white font-black text-xs">
-              EZ
-            </span>
-          </div>
+          <img
+            src={ezFormatMainLogo}
+            alt="EzFormat logo"
+            className="h-7 w-7 object-contain"
+          />
           <span className="font-bold text-white text-base">EzFormat</span>
         </div>
 

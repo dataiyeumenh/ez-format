@@ -7,17 +7,15 @@ import {
   FileSpreadsheet,
   HelpCircle,
   Loader2,
-  MessageCircle,
   MoveRight,
-  Send,
   Server,
   UploadCloud,
   Wand2,
-  X,
 } from "lucide-react";
 import { Link } from "react-router-dom";
 import Navbar from "../components/Navbar";
 import Footer from "../components/Footer";
+import ChatSupport from "../components/ChatSupport";
 import Alert from "../components/ui/Alert";
 import StepProgress from "../components/ui/StepProgress";
 import PreviewTable from "../components/PreviewTable";
@@ -33,7 +31,7 @@ const STATUS = {
   ERROR: "error",
 };
 
-const STEPS = ["Tải file", "Ghép cột", "Xem trước", "Tải MISA"];
+const STEPS = ["Tải file", "Ghép cột", "Xem trước", "Tải file MISA"];
 const DEFAULT_TEMPLATE_ID = "bsn_sales";
 const EXCEL_EXT = ["xlsx", "xls"];
 const PDF_EXT = ["pdf"];
@@ -160,16 +158,6 @@ const ConvertPage = () => {
   const [profileId, setProfileId] = useState(null);
   const [focusedTarget, setFocusedTarget] = useState("");
 
-  const [chatOpen, setChatOpen] = useState(false);
-  const [chatInput, setChatInput] = useState("");
-  const [messages, setMessages] = useState([
-    { from: "bot", text: "Xin chào! Tôi có thể giúp gì cho bạn?" },
-    {
-      from: "bot",
-      text: "Hỏi về chuyển đổi Excel → MISA, ghép cột hoặc hỗ trợ kỹ thuật.",
-    },
-  ]);
-
   const inputRef = useRef(null);
   const mappingTableRef = useRef(null);
   const targetRowRefs = useRef({});
@@ -257,6 +245,70 @@ const ConvertPage = () => {
   );
   const keyMappingOkCount = keyMappingValues.filter((item) => item.ok).length;
   const hasPreviewReady = previewRows.length > 0;
+  const liveMissingRequiredIssues = useMemo(
+    () =>
+      !analyzePayload
+        ? []
+        : targetHeaders
+        .filter((header) => header.includes("(*)"))
+        .filter((header) => {
+          const rawHeader = targetMapping[header];
+          const formula = formulas[header];
+          const defaultValue = defaults[header];
+          return !(
+            rawHeader ||
+            formula ||
+            (defaultValue !== undefined && defaultValue !== "")
+          );
+        })
+        .map((header) => ({
+          code: "missing_required_mapping_live",
+          message: `Thiếu thiết lập cho cột bắt buộc '${header}'.`,
+        })),
+    [analyzePayload, defaults, formulas, targetHeaders, targetMapping],
+  );
+  const nonRequiredIssues = useMemo(
+    () =>
+      issues.filter((issue) => {
+        const message = (issue?.message || String(issue)).toLowerCase();
+        return !(
+          message.includes("missing required misa mapping") ||
+          message.includes("thiếu mapping cho cột bắt buộc") ||
+          message.includes("thiếu thiết lập cho cột bắt buộc")
+        );
+      }),
+    [issues],
+  );
+  const effectiveIssues = [...liveMissingRequiredIssues, ...nonRequiredIssues];
+  const attentionItems = [
+    ...warnings.slice(0, 6).map((message, index) => ({
+      id: `warning-${index}`,
+      message,
+      targets: extractTargetsFromText(message),
+    })),
+    ...effectiveIssues.slice(0, 6).map((issue, index) => {
+      const message = issue.message || String(issue);
+      return {
+        id: `${issue.code || "issue"}-${index}`,
+        message,
+        targets: extractTargetsFromText(message),
+      };
+    }),
+  ];
+  const mappingSourceLabel =
+    mappingSource === "profile"
+      ? "Thiết lập đã lưu"
+      : mappingSource === "mixed"
+        ? "Gợi ý kết hợp"
+        : mappingSource === "ai"
+          ? "AI gợi ý"
+          : mappingSource === "manual"
+            ? "Thiết lập thủ công"
+            : mappingSource === "schema"
+              ? "Gợi ý theo mẫu"
+              : "Gợi ý hệ thống";
+  const mappingConfidenceLabel =
+    confidence !== undefined ? ` · Khớp ${Math.round(confidence * 100)}%` : "";
 
   const stepIndex =
     convStatus === STATUS.MAPPING
@@ -492,19 +544,6 @@ const ConvertPage = () => {
     clearPreviewAfterMappingChange();
   };
 
-  const sendChatMessage = () => {
-    if (!chatInput.trim()) return;
-    setMessages((prev) => [
-      ...prev,
-      { from: "user", text: chatInput.trim() },
-      {
-        from: "bot",
-        text: "Cảm ơn bạn! Đội ngũ hỗ trợ sẽ phản hồi sớm nhất có thể.",
-      },
-    ]);
-    setChatInput("");
-  };
-
   return (
     <div className="min-h-screen flex flex-col bg-mesh">
       <Navbar />
@@ -695,10 +734,8 @@ const ConvertPage = () => {
                       <p>
                         Nguồn gợi ý:{" "}
                         <span className="font-medium">
-                          {mappingSource || "—"}{" "}
-                          {confidence !== undefined
-                            ? `(${Math.round(confidence * 100)}%)`
-                            : ""}
+                          {mappingSourceLabel}
+                          {mappingConfidenceLabel}
                         </span>
                       </p>
                     </div>
@@ -756,104 +793,71 @@ const ConvertPage = () => {
                   </Alert>
                 )}
 
-                {warnings.length > 0 && (
+                {(attentionItems.length > 0 ||
+                  (analyzePayload &&
+                    convStatus !== STATUS.ANALYZING &&
+                    !hasPreviewReady)) && (
                   <Alert
-                    variant="warning"
-                    title="Cảnh báo ghép cột"
+                    variant={attentionItems.length > 0 ? "warning" : "info"}
+                    title={
+                      attentionItems.length > 0
+                        ? `Cần hoàn thành trước khi sang bước 3${attentionItems.length ? ` · ${attentionItems.length} mục cần kiểm tra` : ""}`
+                        : "Bước tiếp theo: Xem trước"
+                    }
                     className="text-left"
                   >
-                    <ul className="list-disc pl-4 space-y-2">
-                      {warnings.slice(0, 6).map((warning, index) => {
-                        const matchedTargets = extractTargetsFromText(warning);
-                        return (
-                          <li key={`${warning}-${index}`}>
-                            <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:gap-3">
-                              <div>{warning}</div>
-                              {matchedTargets.length > 0 && (
-                                <div className="flex shrink-0 flex-wrap gap-2">
-                                  {matchedTargets.map((target) => (
-                                    <button
-                                      key={`${warning}-${target}`}
-                                      type="button"
-                                      className="inline-flex items-center gap-2 rounded-full border border-amber-300 bg-white px-3.5 py-1.5 text-sm font-bold text-amber-800 shadow-sm hover:bg-amber-50"
-                                      onClick={() => focusTargetRow(target, warning)}
-                                    >
-                                      Đi tới
-                                      <MoveRight size={15} />
-                                    </button>
-                                  ))}
-                                </div>
-                              )}
-                            </div>
-                          </li>
-                        );
-                      })}
-                    </ul>
+                    <div className="space-y-3">
+                      {attentionItems.length > 0 && (
+                        <ul className="list-disc pl-4 space-y-2">
+                          {attentionItems.map((item) => (
+                            <li key={item.id}>
+                              <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:gap-3">
+                                <div>{item.message}</div>
+                                {item.targets.length > 0 && (
+                                  <div className="flex shrink-0 flex-wrap gap-2">
+                                    {item.targets.map((target) => (
+                                      <button
+                                        key={`${item.id}-${target}`}
+                                        type="button"
+                                        className="inline-flex items-center gap-2 rounded-full border border-amber-300 bg-white px-3.5 py-1.5 text-sm font-bold text-amber-800 shadow-sm hover:bg-amber-50"
+                                        onClick={() =>
+                                          focusTargetRow(target, item.message)
+                                        }
+                                      >
+                                        Đi tới
+                                        <MoveRight size={15} />
+                                      </button>
+                                    ))}
+                                  </div>
+                                )}
+                              </div>
+                            </li>
+                          ))}
+                        </ul>
+                      )}
+                      {analyzePayload &&
+                        convStatus !== STATUS.ANALYZING &&
+                        !hasPreviewReady && (
+                          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                            <p className="text-sm">
+                              Bạn cần bấm <strong>Xem trước</strong> để kiểm tra dữ
+                              liệu đầu ra và chuyển sang bước 3 trước khi tải file
+                              MISA.
+                            </p>
+                            <button
+                              type="button"
+                              className="btn-primary justify-center px-4 py-2"
+                              onClick={handlePreview}
+                              disabled={convStatus === STATUS.DOWNLOADING}
+                            >
+                              <Wand2 size={16} />
+                              Xem trước ngay
+                            </button>
+                          </div>
+                        )}
+                    </div>
                   </Alert>
                 )}
-
-                {issues.length > 0 && (
-                  <Alert
-                    variant="warning"
-                    title="Vấn đề cần kiểm tra"
-                    className="text-left"
-                  >
-                    <ul className="list-disc pl-4 space-y-2">
-                      {issues.slice(0, 6).map((issue, index) => {
-                        const message = issue.message || String(issue);
-                        const matchedTargets = extractTargetsFromText(message);
-                        return (
-                          <li key={`${issue.code || "issue"}-${index}`}>
-                            <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:gap-3">
-                              <div>{message}</div>
-                              {matchedTargets.length > 0 && (
-                                <div className="flex shrink-0 flex-wrap gap-2">
-                                  {matchedTargets.map((target) => (
-                                    <button
-                                      key={`${message}-${target}`}
-                                      type="button"
-                                      className="inline-flex items-center gap-2 rounded-full border border-amber-300 bg-white px-3.5 py-1.5 text-sm font-bold text-amber-800 shadow-sm hover:bg-amber-50"
-                                      onClick={() => focusTargetRow(target, message)}
-                                    >
-                                      Đi tới
-                                      <MoveRight size={15} />
-                                    </button>
-                                  ))}
-                                </div>
-                              )}
-                            </div>
-                          </li>
-                        );
-                      })}
-                    </ul>
-                  </Alert>
-                )}
-
-                {analyzePayload &&
-                  convStatus !== STATUS.ANALYZING &&
-                  !hasPreviewReady && (
-                    <Alert
-                      variant="info"
-                      title="Bước tiếp theo: Xem trước"
-                      className="text-left"
-                    >
-                      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-                        <p className="text-sm">
-                          Bạn cần bấm <strong>Xem trước</strong> để kiểm tra dữ liệu
-                          đầu ra và chuyển sang bước 3 trước khi tải file MISA.
-                        </p>
-                        <button
-                          type="button"
-                          className="btn-primary justify-center px-4 py-2"
-                          onClick={handlePreview}
-                          disabled={convStatus === STATUS.DOWNLOADING}
-                        >
-                          <Wand2 size={16} />
-                          Xem trước ngay
-                        </button>
-                      </div>
-                    </Alert>
-                  )}
 
                 {!analyzePayload && convStatus !== STATUS.ANALYZING && (
                   <div className="rounded-3xl border border-gray-200 bg-white p-8 sm:p-12 shadow-card text-center">
@@ -897,34 +901,6 @@ const ConvertPage = () => {
                           hay công thức cho cùng dòng đó.
                         </p>
                       </div>
-                      <div className="flex w-full flex-col xs:flex-row gap-2 lg:w-auto lg:shrink-0">
-                        <button
-                          type="button"
-                          className="btn-secondary justify-center px-5"
-                          onClick={handlePreview}
-                          disabled={convStatus === STATUS.DOWNLOADING}
-                        >
-                          <Wand2 size={16} />
-                          Xem trước
-                        </button>
-                        <button
-                          type="button"
-                          className="inline-flex items-center justify-center gap-2 rounded-xl bg-emerald-600 px-5 py-2.5 text-sm font-semibold text-white shadow-sm transition-all duration-200 hover:bg-emerald-700 hover:shadow-md active:scale-[0.98] disabled:pointer-events-none disabled:opacity-50"
-                          onClick={handleDownload}
-                          disabled={
-                            convStatus === STATUS.DOWNLOADING ||
-                            convStatus === STATUS.ANALYZING ||
-                            !hasPreviewReady
-                          }
-                        >
-                          {convStatus === STATUS.DOWNLOADING ? (
-                            <Loader2 size={16} className="animate-spin" />
-                          ) : (
-                            <Download size={16} />
-                          )}
-                          Tải file MISA
-                        </button>
-                      </div>
                     </div>
 
                     {keyMappingValues.length > 0 && (
@@ -940,10 +916,8 @@ const ConvertPage = () => {
                             </p>
                           </div>
                           <span className="inline-flex w-fit rounded-full bg-white px-3.5 py-1.5 text-sm font-semibold text-blue-700 ring-1 ring-blue-100">
-                            {mappingSource || "gợi ý"}{" "}
-                            {confidence !== undefined
-                              ? `${Math.round(confidence * 100)}%`
-                              : ""}
+                            {mappingSourceLabel}
+                            {mappingConfidenceLabel}
                           </span>
                         </div>
                         <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-2">
@@ -980,183 +954,161 @@ const ConvertPage = () => {
                             <th className="px-4 py-3 text-left w-[24%]">Cột MISA</th>
                             <th className="px-4 py-3 text-left w-[24%]">
                               Cột từ file Excel
-                              <ColumnHelp text="Cột lấy trực tiếp từ file Excel bạn upload." />
+                              <ColumnHelp text="Chọn cột dữ liệu tương ứng từ file Excel của bạn." />
                             </th>
                             <th className="px-4 py-3 text-left w-[20%]">
                               Giá trị mặc định
-                              <ColumnHelp text="Giá trị dùng sẵn khi cột này không lấy từ file Excel." />
+                              <ColumnHelp text="Dùng khi bạn muốn điền sẵn một giá trị cố định cho mọi dòng của cột này." />
                             </th>
                             <th className="px-4 py-3 text-left w-[32%]">
                               Công thức tự động
-                              <ColumnHelp text={`Dùng để tự tạo giá trị theo mẫu.
-
-Bạn có thể gõ chữ thường và chèn dữ liệu bằng cú pháp \${Tên cột}.
-
-Ví dụ:
-- XK_\${Số chứng từ (*)}
-- \${Mã khách hàng}_\${Ngày chứng từ (*)}
-
-Nếu không cần công thức, bạn có thể để trống ô này.`} />
+                              <ColumnHelp text={"Dùng để tự tạo giá trị theo mẫu.\nBạn có thể gõ chữ thường và chèn dữ liệu bằng cú pháp ${Tên cột}.\n\nVí dụ:\n- XK_${Số chứng từ (*)}\n- ${Mã khách hàng}_${Ngày chứng từ (*)}\n\nNếu không cần công thức, bạn có thể để trống ô này."} />
                             </th>
                           </tr>
                         </thead>
                         <tbody>
-                          {targetHeaders.map((target) => (
-                            <tr
-                              key={target}
-                              ref={(node) => {
-                                targetRowRefs.current[target] = node;
-                              }}
-                              className={`border-t border-gray-100 transition-colors ${
-                                focusedTarget === target ? "bg-amber-50" : ""
-                              }`}
-                            >
-                              <td className="px-4 py-2.5 font-medium text-gray-800 whitespace-nowrap">
-                                {target}
-                              </td>
-                              <td className="px-4 py-2.5">
-                                <select
-                                  ref={(node) => {
-                                    targetFieldRefs.current.raw[target] = node;
-                                  }}
-                                  className="w-full min-w-[190px] rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm"
-                                  value={targetMapping[target] || ""}
-                                  onChange={(e) =>
-                                    updateTargetMapping(target, e.target.value)
-                                  }
-                                >
-                                  <option value="">— Không lấy từ Excel —</option>
-                                  {rawHeaders.map((raw) => (
-                                    <option key={`${target}-${raw}`} value={raw}>
-                                      {raw}
-                                    </option>
-                                  ))}
-                                </select>
-                              </td>
-                              <td className="px-4 py-2.5">
-                                <input
-                                  type="text"
-                                  ref={(node) => {
-                                    targetFieldRefs.current.default[target] = node;
-                                  }}
-                                  className="w-full min-w-[160px] rounded-xl border border-gray-200 px-3 py-2 text-sm"
-                                  value={defaults[target] ?? ""}
-                                  onChange={(e) =>
-                                    updateDefault(target, e.target.value)
-                                  }
-                                  placeholder="Giá trị mặc định"
-                                />
-                              </td>
-                              <td className="px-4 py-2.5">
-                                <input
-                                  type="text"
-                                  ref={(node) => {
-                                    targetFieldRefs.current.formula[target] = node;
-                                  }}
-                                  className="w-full min-w-[320px] rounded-xl border border-gray-200 px-3 py-2 text-sm"
-                                  value={formulas[target] ?? ""}
-                                  onChange={(e) =>
-                                    updateFormula(target, e.target.value)
-                                  }
-                                  placeholder="VD: XK_${Số chứng từ (*)}"
-                                />
-                              </td>
-                            </tr>
-                          ))}
+                          {targetHeaders.map((target) => {
+                            const matchedRaw = targetMapping[target] || "";
+                            const isHighlighted = focusedTarget === target;
+                            return (
+                              <tr
+                                key={target}
+                                ref={(node) => {
+                                  if (node) targetRowRefs.current[target] = node;
+                                  else delete targetRowRefs.current[target];
+                                }}
+                                className={`border-t border-gray-100 align-top transition-colors ${
+                                  isHighlighted ? "bg-amber-50/80" : "bg-white"
+                                }`}
+                              >
+                                <td className="px-4 py-3 font-semibold text-gray-800">
+                                  {target}
+                                </td>
+                                <td className="px-4 py-3">
+                                  <select
+                                    ref={(node) => {
+                                      if (node) targetFieldRefs.current.raw[target] = node;
+                                      else delete targetFieldRefs.current.raw[target];
+                                    }}
+                                    className="w-full min-w-[190px] rounded-xl border border-gray-200 bg-white px-3 py-2.5 text-sm text-gray-800 shadow-sm focus:border-primary-500 focus:outline-none focus:ring-2 focus:ring-primary-500/20"
+                                    value={matchedRaw}
+                                    onChange={(e) =>
+                                      setTargetMapping((prev) => ({
+                                        ...prev,
+                                        [target]: e.target.value,
+                                      }))
+                                    }
+                                  >
+                                    <option value="">— Không lấy từ Excel —</option>
+                                    {rawHeaders.map((rawHeader) => (
+                                      <option key={rawHeader} value={rawHeader}>
+                                        {rawHeader}
+                                      </option>
+                                    ))}
+                                  </select>
+                                </td>
+                                <td className="px-4 py-3">
+                                  <input
+                                    ref={(node) => {
+                                      if (node)
+                                        targetFieldRefs.current.default[target] = node;
+                                      else delete targetFieldRefs.current.default[target];
+                                    }}
+                                    type="text"
+                                    className="w-full min-w-[160px] rounded-xl border border-gray-200 bg-white px-3 py-2.5 text-sm text-gray-800 shadow-sm focus:border-primary-500 focus:outline-none focus:ring-2 focus:ring-primary-500/20"
+                                    placeholder="Giá trị mặc định"
+                                    value={defaults[target] ?? ""}
+                                    onChange={(e) =>
+                                      setDefaults((prev) => ({
+                                        ...prev,
+                                        [target]: e.target.value,
+                                      }))
+                                    }
+                                  />
+                                </td>
+                                <td className="px-4 py-3">
+                                  <input
+                                    ref={(node) => {
+                                      if (node)
+                                        targetFieldRefs.current.formula[target] = node;
+                                      else delete targetFieldRefs.current.formula[target];
+                                    }}
+                                    type="text"
+                                    className="w-full min-w-[320px] rounded-xl border border-gray-200 bg-white px-3 py-2.5 text-sm text-gray-800 shadow-sm focus:border-primary-500 focus:outline-none focus:ring-2 focus:ring-primary-500/20"
+                                    placeholder="VD: XK_${Số chứng từ (*)}"
+                                    value={formulas[target] ?? ""}
+                                    onChange={(e) =>
+                                      setFormulas((prev) => ({
+                                        ...prev,
+                                        [target]: e.target.value,
+                                      }))
+                                    }
+                                  />
+                                </td>
+                              </tr>
+                            );
+                          })}
                         </tbody>
                       </table>
                     </div>
-                  </div>
-                )}
 
-                {previewRows.length > 0 && (
-                  <div className="space-y-3">
-                    <div className="rounded-2xl border border-emerald-100 bg-emerald-50 px-4 py-3 text-sm text-emerald-800 flex items-start gap-2">
-                      <CheckCircle size={18} className="mt-0.5 shrink-0" />
-                      <div>
-                        <p className="font-semibold">Bản xem trước MISA đã tạo</p>
-                        <p className="text-xs">
-                          {previewStats?.output_rows || previewRows.length} dòng kết quả
-                          từ {previewStats?.source_rows || "?"} dòng dữ liệu nguồn.
-                        </p>
-                      </div>
-                    </div>
-                    {keyPreviewValues.length > 0 && (
-                      <div className="rounded-2xl border border-blue-100 bg-blue-50/70 p-4">
-                        <div className="mb-3 flex items-center justify-between gap-3">
+                    {convStatus === STATUS.PREVIEW && previewRows.length > 0 && (
+                      <div className="border-t border-gray-100 bg-white px-5 py-4 sm:px-6">
+                        <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                           <div>
-                            <p className="text-sm font-semibold text-blue-950">
-                              Dòng đầu - cột chính
-                            </p>
-                            <p className="text-xs text-blue-700">
-                              Kiểm tra nhanh các trường MISA quan trọng trước khi tải.
+                            <h3 className="text-lg font-bold text-gray-900">
+                              Xem trước dữ liệu đầu ra
+                            </h3>
+                            <p className="text-sm text-gray-500">
+                              Bạn có thể chỉnh sửa trực tiếp trước khi tải file MISA.
                             </p>
                           </div>
-                        </div>
-                        <dl className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
-                          {keyPreviewValues.map((item) => (
-                            <div
-                              key={item.header}
-                              className="rounded-xl bg-white/80 border border-blue-100 px-3 py-2"
+                          <div className="flex flex-col xs:flex-row gap-2">
+                            <button
+                              type="button"
+                              className="btn-secondary justify-center"
+                              onClick={handlePreview}
+                              disabled={convStatus === STATUS.DOWNLOADING}
                             >
-                              <dt className="text-[11px] uppercase tracking-wide text-blue-500">
-                                {item.header}
-                              </dt>
-                              <dd className="mt-1 text-sm font-semibold text-gray-900 truncate">
-                                {item.value}
-                              </dd>
-                            </div>
-                          ))}
-                        </dl>
+                              <Wand2 size={16} />
+                              Làm mới xem trước
+                            </button>
+                            <button
+                              type="button"
+                              className="inline-flex items-center justify-center gap-2 rounded-xl bg-emerald-600 px-5 py-2.5 text-sm font-semibold text-white shadow-sm transition-all duration-200 hover:bg-emerald-700 hover:shadow-md active:scale-[0.98] disabled:pointer-events-none disabled:opacity-50"
+                              onClick={handleDownload}
+                              disabled={convStatus === STATUS.DOWNLOADING}
+                            >
+                              {convStatus === STATUS.DOWNLOADING ? (
+                                <Loader2 size={16} className="animate-spin" />
+                              ) : (
+                                <Download size={16} />
+                              )}
+                              Tải file MISA
+                            </button>
+                          </div>
+                        </div>
+
+                        <div className="rounded-2xl border border-gray-200 overflow-hidden shadow-sm">
+                          <PreviewTable
+                            headers={previewHeaders}
+                            rows={previewRows}
+                            onCellChange={handlePreviewCellChange}
+                          />
+                        </div>
                       </div>
                     )}
-                    <PreviewTable
-                      headers={previewHeaders}
-                      rows={previewRows}
-                      onCellChange={() => {}}
-                      onDeleteRow={() => {}}
-                      disabled
-                    />
-                  </div>
-                )}
 
-                {convStatus === STATUS.SUCCESS && (
-                  <Alert
-                    variant="success"
-                    title="Đã xuất file MISA"
-                    className="text-left"
-                  >
-                    Thiết lập ghép cột đã được lưu. Lần sau tải file cùng cấu trúc,
-                    hệ thống sẽ ưu tiên dùng thiết lập này.
-                  </Alert>
-                )}
-
-                {analyzePayload && convStatus !== STATUS.ANALYZING && (
-                  <div className="flex flex-col-reverse gap-3 sm:flex-row sm:justify-end">
-                    <button
-                      type="button"
-                      className="btn-secondary justify-center px-5 py-3"
-                      onClick={handleReset}
-                    >
-                      Chọn file khác
-                    </button>
-                    <button
-                      type="button"
-                      className="inline-flex items-center justify-center gap-2 rounded-xl bg-emerald-600 px-5 py-3 text-sm font-semibold text-white shadow-sm transition-all duration-200 hover:bg-emerald-700 hover:shadow-md active:scale-[0.98] disabled:pointer-events-none disabled:opacity-50"
-                      onClick={handleDownload}
-                      disabled={
-                        convStatus === STATUS.DOWNLOADING ||
-                        convStatus === STATUS.ANALYZING ||
-                        !hasPreviewReady
-                      }
-                    >
-                      {convStatus === STATUS.DOWNLOADING ? (
-                        <Loader2 size={16} className="animate-spin" />
-                      ) : (
-                        <Download size={16} />
-                      )}
-                      Tải file MISA
-                    </button>
+                    {convStatus === STATUS.SUCCESS && (
+                      <Alert
+                        variant="success"
+                        title="Đã xuất file MISA"
+                        className="rounded-none border-0 border-t border-emerald-100"
+                      >
+                        Thiết lập ghép cột đã được lưu. Lần sau tải file cùng cấu
+                        trúc, hệ thống sẽ ưu tiên dùng thiết lập này.
+                      </Alert>
+                    )}
                   </div>
                 )}
               </div>
@@ -1166,70 +1118,15 @@ Nếu không cần công thức, bạn có thể để trống ô này.`} />
       </main>
 
       <Footer />
-
-      <div className="fixed bottom-4 right-4 sm:bottom-6 sm:right-6 z-40 flex flex-col items-end gap-3">
-        {chatOpen && (
-          <div className="w-[calc(100vw-2rem)] sm:w-80 max-h-[70vh] bg-white rounded-3xl shadow-2xl border border-gray-100 overflow-hidden animate-fade-in">
-            <div className="px-4 py-3 bg-primary-600 text-white flex justify-between items-center">
-              <div>
-                <p className="text-sm font-semibold">EzFormat Support</p>
-                <p className="text-xs text-primary-100">Phản hồi trong vài phút</p>
-              </div>
-              <button
-                type="button"
-                onClick={() => setChatOpen(false)}
-                className="p-1 hover:bg-white/10 rounded-lg"
-                aria-label="Đóng chat"
-              >
-                <X size={16} />
-              </button>
-            </div>
-            <div className="h-52 sm:h-64 overflow-y-auto p-4 space-y-3 bg-gray-50/80 table-scroll">
-              {messages.map((msg, i) => (
-                <div
-                  key={i}
-                  className={`flex ${msg.from === "user" ? "justify-end" : "justify-start"}`}
-                >
-                  <div
-                    className={`max-w-[85%] px-3 py-2 rounded-2xl text-sm leading-relaxed ${
-                      msg.from === "user"
-                        ? "bg-primary-600 text-white rounded-br-md"
-                        : "bg-white text-gray-700 border border-gray-100 shadow-sm rounded-bl-md"
-                    }`}
-                  >
-                    {msg.text}
-                  </div>
-                </div>
-              ))}
-            </div>
-            <div className="px-3 py-3 bg-white border-t flex gap-2">
-              <input
-                type="text"
-                value={chatInput}
-                onChange={(e) => setChatInput(e.target.value)}
-                onKeyDown={(e) => e.key === "Enter" && sendChatMessage()}
-                placeholder="Nhập tin nhắn..."
-                className="flex-1 min-w-0 text-sm px-3 py-2 border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-primary-500/25"
-              />
-              <button
-                type="button"
-                onClick={sendChatMessage}
-                className="w-10 h-10 shrink-0 bg-primary-600 hover:bg-primary-700 rounded-xl flex items-center justify-center text-white"
-              >
-                <Send size={15} />
-              </button>
-            </div>
-          </div>
-        )}
-        <button
-          type="button"
-          onClick={() => setChatOpen(!chatOpen)}
-          className="w-12 h-12 sm:w-14 sm:h-14 bg-primary-600 hover:bg-primary-700 rounded-full shadow-lg shadow-primary-500/30 flex items-center justify-center text-white transition-transform hover:scale-105 active:scale-95"
-          aria-label={chatOpen ? "Đóng chat" : "Mở chat"}
-        >
-          {chatOpen ? <X size={20} /> : <MessageCircle size={20} />}
-        </button>
-      </div>
+      <ChatSupport
+        initialMessages={[
+          { from: "bot", text: "Xin chào! Tôi có thể giúp gì cho bạn?" },
+          {
+            from: "bot",
+            text: "Hỏi về chuyển đổi Excel → MISA, ghép cột hoặc hỗ trợ kỹ thuật.",
+          },
+        ]}
+      />
     </div>
   );
 };

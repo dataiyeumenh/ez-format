@@ -27,18 +27,12 @@
 
 @layer components {
   .bg-mesh {
-    background-color: #f8fafc;
-    background-image:
-      radial-gradient(at 0% 0%, rgba(37, 99, 235, 0.08) 0, transparent 50%),
-      radial-gradient(at 100% 0%, rgba(6, 182, 212, 0.06) 0, transparent 45%),
-      radial-gradient(at 50% 100%, rgba(37, 99, 235, 0.04) 0, transparent 50%);
+    background-color: #ffffff;
+    background-image: none;
   }
 
   .landing-hero-gradient {
-    background:
-      radial-gradient(circle at 15% 20%, rgba(37, 99, 235, 0.14) 0, transparent 36%),
-      radial-gradient(circle at 85% 12%, rgba(6, 182, 212, 0.16) 0, transparent 34%),
-      linear-gradient(135deg, #eef5ff 0%, #f4faff 48%, #e8fbff 100%);
+    background: #ffffff;
   }
 
   .btn-primary {
@@ -63,6 +57,24 @@
 }
 
 @layer utilities {
+  @keyframes fade-up-in {
+    from {
+      opacity: 0;
+      transform: translateY(40px) scale(0.96);
+      filter: blur(8px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0) scale(1);
+      filter: blur(0);
+    }
+  }
+
+  .animate-fade-up-in {
+    animation: fade-up-in 0.95s cubic-bezier(0.22, 1, 0.36, 1) both;
+    will-change: opacity, transform, filter;
+  }
+
   .scrollbar-hide {
     -ms-overflow-style: none;
     scrollbar-width: none;
@@ -78,6 +90,12 @@
   .table-scroll::-webkit-scrollbar {
     height: 8px;
     width: 8px;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .animate-fade-up-in {
+      animation: none;
+    }
   }
   .table-scroll::-webkit-scrollbar-thumb {
     background: #cbd5e1;

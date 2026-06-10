@@ -64,7 +64,7 @@ const PaymentResultPage = ({ status = "success" }) => {
   }, [refreshUser, status]);
 
   return (
-    <div className="min-h-screen flex flex-col bg-gray-50">
+    <div className="min-h-screen flex flex-col bg-white">
       <Navbar />
       <main className="flex-1 flex items-center justify-center px-4 py-16">
         <div className="max-w-lg w-full rounded-3xl border border-gray-100 bg-white p-8 text-center shadow-sm">

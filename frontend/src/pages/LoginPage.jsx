@@ -7,7 +7,7 @@ import Footer from "../components/Footer";
 import Alert from "../components/ui/Alert";
 import GoogleSignInButton from "../components/GoogleSignInButton";
 import { getApiErrorMessage } from "../utils/apiError";
-import ezFormatLogo from "../assets/ezformat-logo.jpg";
+import ezFormatMainLogo from "../assets/ezformat-main-logo.png";
 
 const LoginPage = () => {
   const navigate = useNavigate();
@@ -62,7 +62,7 @@ const LoginPage = () => {
           {/* Logo */}
           <div className="flex flex-col items-center mb-6">
             <img
-              src={ezFormatLogo}
+              src={ezFormatMainLogo}
               alt="EzFormat logo"
               className="w-16 h-16 object-contain mb-3"
             />

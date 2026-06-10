@@ -13,9 +13,10 @@ import {
 } from "lucide-react";
 import Navbar from "../components/Navbar";
 import Footer from "../components/Footer";
+import ChatSupport from "../components/ChatSupport";
 import StepProgress from "../components/ui/StepProgress";
 
-const processSteps = ["Tải file", "Map cột", "Xem trước", "Tải MISA"];
+const processSteps = ["Tải file", "Map cột", "Xem trước", "Tải file MISA"];
 
 const guideSteps = [
   {
@@ -302,7 +303,7 @@ const LandingPage = () => {
           </div>
         </section>
 
-        <section className="py-14 sm:py-16 px-4 bg-gradient-to-b from-cyan-50/70 via-white to-gray-50/80">
+        <section className="bg-white px-4 py-6 sm:py-8">
           <div className="max-w-6xl mx-auto">
             <div className="grid gap-8 rounded-[2rem] border border-primary-100 bg-gradient-to-br from-primary-50 via-white to-cyan-50 p-6 shadow-card sm:p-8 lg:grid-cols-[0.9fr_1.1fr] lg:items-center">
               <div>
@@ -346,23 +347,26 @@ const LandingPage = () => {
           </div>
         </section>
 
-        <section className="py-12 sm:py-14 px-4 text-center bg-gradient-to-b from-primary-50/30 via-white to-white">
+        <section className="bg-white px-4 py-8 text-center sm:py-10">
           <div className="mx-auto flex max-w-6xl flex-col items-center justify-center gap-4">
             <p className="text-sm text-gray-500">Sẵn sàng thử với file của bạn?</p>
-            <Link to="/convert" className="btn-primary inline-flex">
-              <FileSpreadsheet size={18} />
-              Mở trang chuyển đổi
+            <Link
+              to="/convert"
+              className="btn-primary w-full sm:w-auto py-3.5 px-8 text-base"
+            >
+              Bắt đầu chuyển đổi
+              <ArrowRight size={18} />
             </Link>
           </div>
         </section>
 
-        <section className="py-12 sm:py-14 px-4 bg-gradient-to-b from-white via-gray-50/70 to-primary-50/30">
+        <section className="bg-white px-4 py-10 sm:py-12">
           <div className="max-w-6xl mx-auto">
             <div className="text-center mb-10">
               <p className="text-sm font-semibold uppercase tracking-wide text-primary-600 mb-2">
                 Tham khảo bảng giá
               </p>
-              <h2 className="text-3xl sm:text-4xl font-black text-gray-900 mb-3">
+              <h2 className="mb-3 text-4xl font-black leading-[1.22] text-gray-900 sm:text-5xl sm:leading-[1.18]">
                 <span className="block">Lựa chọn gói dịch vụ</span>
                 <span className="block">phù hợp với nhu cầu của bạn</span>
               </h2>
@@ -459,16 +463,7 @@ const LandingPage = () => {
           </div>
         </section>
 
-        <section className="relative overflow-hidden py-14 sm:py-16 px-4 bg-gradient-to-br from-white via-primary-50/40 to-cyan-50">
-          <div
-            className="absolute left-10 top-10 h-28 w-28 rounded-full bg-primary-200/30 blur-3xl"
-            aria-hidden="true"
-          />
-          <div
-            className="absolute right-10 bottom-10 h-32 w-32 rounded-full bg-cyan-200/40 blur-3xl"
-            aria-hidden="true"
-          />
-
+        <section className="relative overflow-hidden bg-white px-4 py-14 sm:py-16">
           <div className="relative max-w-4xl mx-auto">
             <div className="text-center mb-10">
               <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-2xl bg-primary-600 text-white shadow-glow">
@@ -509,6 +504,7 @@ const LandingPage = () => {
       </main>
 
       <Footer />
+      <ChatSupport />
     </div>
   );
 };
