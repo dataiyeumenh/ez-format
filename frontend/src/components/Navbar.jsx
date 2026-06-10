@@ -3,6 +3,7 @@ import { Link, NavLink, useNavigate } from "react-router-dom";
 import { useAuth } from "../context/AuthContext";
 import { Menu, X } from "lucide-react";
 import ezFormatLogo from "../assets/ezformat-main-logo.png";
+import UserPlanBadge from "./UserPlanBadge";
 
 const Logo = () => (
   <Link to="/" className="flex items-center gap-2.5 group">
@@ -26,12 +27,15 @@ const Navbar = () => {
   const { user, logout, isAdmin } = useAuth();
   const navigate = useNavigate();
   const [mobileOpen, setMobileOpen] = useState(false);
+  const [userMenuOpen, setUserMenuOpen] = useState(false);
 
   const closeMobile = () => setMobileOpen(false);
+  const closeUserMenu = () => setUserMenuOpen(false);
 
   const handleLogout = () => {
     logout();
     closeMobile();
+    closeUserMenu();
     navigate("/");
   };
 
@@ -64,9 +68,31 @@ const Navbar = () => {
                     Dashboard
                   </NavLink>
                 )}
-                <span className="max-w-[120px] truncate text-base font-medium text-gray-600">
-                  {user.name}
-                </span>
+                <div className="relative">
+                  <button
+                    type="button"
+                    onClick={() => setUserMenuOpen((open) => !open)}
+                    className="max-w-[150px] truncate rounded-xl px-3 py-2 text-base font-medium text-gray-600 transition-colors hover:bg-gray-50 hover:text-gray-900"
+                    aria-expanded={userMenuOpen}
+                  >
+                    {user.name}
+                  </button>
+                  {userMenuOpen && (
+                    <div className="absolute right-0 top-full mt-3 w-72 rounded-2xl border border-gray-100 bg-white p-3 shadow-xl shadow-gray-200/70">
+                      <p className="mb-2 truncate px-1 text-sm font-semibold text-gray-800">
+                        {user.name}
+                      </p>
+                      <UserPlanBadge user={user} />
+                      <Link
+                        to="/pricing"
+                        onClick={closeUserMenu}
+                        className="mt-3 block rounded-xl px-3 py-2 text-sm font-semibold text-blue-700 hover:bg-blue-50"
+                      >
+                        Xem / nâng cấp gói
+                      </Link>
+                    </div>
+                  )}
+                </div>
                 <button
                   type="button"
                   onClick={handleLogout}
@@ -123,6 +149,31 @@ const Navbar = () => {
                   Dashboard
                 </NavLink>
               )}
+              <div className="py-2">
+                <button
+                  type="button"
+                  onClick={() => setUserMenuOpen((open) => !open)}
+                  className="mb-2 w-full rounded-xl px-3 py-2 text-left text-sm font-semibold text-gray-700 hover:bg-gray-50"
+                  aria-expanded={userMenuOpen}
+                >
+                  {user.name}
+                </button>
+                {userMenuOpen && (
+                  <div className="px-1">
+                    <UserPlanBadge user={user} />
+                    <Link
+                      to="/pricing"
+                      className="mt-2 block rounded-xl px-3 py-2 text-sm font-semibold text-blue-700 hover:bg-blue-50"
+                      onClick={() => {
+                        closeUserMenu();
+                        closeMobile();
+                      }}
+                    >
+                      Xem / nâng cấp gói
+                    </Link>
+                  </div>
+                )}
+              </div>
               <button
                 type="button"
                 onClick={handleLogout}

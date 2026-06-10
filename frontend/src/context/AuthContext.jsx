@@ -1,4 +1,4 @@
-import { createContext, useContext, useState, useEffect } from "react";
+import { createContext, useCallback, useContext, useState, useEffect } from "react";
 import api from "../services/api";
 
 const AuthContext = createContext(null);
@@ -26,7 +26,7 @@ export const AuthProvider = ({ children }) => {
     initAuth();
   }, []);
 
-  const login = async (email, password) => {
+  const login = useCallback(async (email, password) => {
     const response = await api.post("/auth/login", { email, password });
     const { token, user } = response.data;
     localStorage.setItem("token", token);
@@ -34,9 +34,9 @@ export const AuthProvider = ({ children }) => {
     setToken(token);
     setUser(user);
     return user;
-  };
+  }, []);
 
-  const register = async (name, email, password) => {
+  const register = useCallback(async (name, email, password) => {
     const response = await api.post("/auth/register", {
       name,
       email,
@@ -48,22 +48,32 @@ export const AuthProvider = ({ children }) => {
     setToken(token);
     setUser(user);
     return user;
-  };
+  }, []);
 
-  const refreshUser = async () => {
+  const loginWithGoogle = useCallback(async (credential) => {
+    const response = await api.post("/auth/google", { credential });
+    const { token, user } = response.data;
+    localStorage.setItem("token", token);
+    localStorage.setItem("user", JSON.stringify(user));
+    setToken(token);
+    setUser(user);
+    return user;
+  }, []);
+
+  const refreshUser = useCallback(async () => {
     const response = await api.get("/auth/me");
     const { user } = response.data;
     localStorage.setItem("user", JSON.stringify(user));
     setUser(user);
     return user;
-  };
+  }, []);
 
-  const logout = () => {
+  const logout = useCallback(() => {
     localStorage.removeItem("token");
     localStorage.removeItem("user");
     setToken(null);
     setUser(null);
-  };
+  }, []);
 
   const isAdmin = () => user?.role === "admin";
 
@@ -75,6 +85,7 @@ export const AuthProvider = ({ children }) => {
         loading,
         login,
         register,
+        loginWithGoogle,
         refreshUser,
         logout,
         isAdmin,
