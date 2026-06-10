@@ -1,7 +1,36 @@
 import { useState } from "react";
-import { Clock, Mail, MessageCircle, Send } from "lucide-react";
+import { Clock, HelpCircle, Mail, MessageCircle, Send } from "lucide-react";
 import Navbar from "../components/Navbar";
 import Footer from "../components/Footer";
+import ChatSupport from "../components/ChatSupport";
+
+const faqs = [
+  {
+    question: "EzFormat hỗ trợ loại file nào?",
+    answer:
+      "Hiện EzFormat hỗ trợ file Excel .xlsx và .xls. Nếu dữ liệu đang ở PDF, bạn cần xuất hoặc chuyển sang Excel trước khi upload.",
+  },
+  {
+    question: "Tôi có thể xem trước dữ liệu trước khi tải về không?",
+    answer:
+      "Có. Sau khi hệ thống map cột, bạn có thể xem trước dữ liệu, rà lại cảnh báo và chỉnh sửa trước khi xuất file Misa.",
+  },
+  {
+    question: "Dữ liệu kế toán của tôi có được bảo mật không?",
+    answer:
+      "EzFormat được thiết kế để chỉ dùng dữ liệu cho quy trình xử lý file của bạn và không chia sẻ dữ liệu cho bên thứ ba trong quá trình chuyển đổi.",
+  },
+  {
+    question: "Tôi nên chọn gói nào?",
+    answer:
+      "Nếu chỉ dùng thử, bạn có thể bắt đầu với gói miễn phí. Nếu chuyển đổi thường xuyên, gói tháng hoặc gói năm sẽ phù hợp hơn.",
+  },
+  {
+    question: "File xuất ra có dùng để nhập vào MISA không?",
+    answer:
+      "Có. Mục tiêu của EzFormat là chuẩn hóa dữ liệu Excel sang form nhập MISA để bạn kiểm tra, chỉnh sửa và tải về trong vài bước.",
+  },
+];
 
 const ContactPage = () => {
   const [email, setEmail] = useState("");
@@ -31,7 +60,7 @@ const ContactPage = () => {
         </section>
 
         {/* Contact info */}
-        <section className="bg-gradient-to-b from-white via-primary-50/30 to-white px-4 py-14 sm:py-16">
+        <section className="bg-white px-4 py-14 sm:py-16">
           <div className="max-w-6xl mx-auto grid grid-cols-1 md:grid-cols-[1fr_0.9fr] gap-8 items-stretch">
             <div>
               <div className="h-full rounded-[2rem] border border-white/80 bg-white/85 p-6 shadow-card backdrop-blur sm:p-8">
@@ -86,6 +115,45 @@ const ContactPage = () => {
           </div>
         </section>
 
+        <section className="relative overflow-hidden bg-white px-4 py-14 sm:py-16">
+          <div className="relative max-w-4xl mx-auto">
+            <div className="mb-10 text-center">
+              <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-2xl bg-primary-600 text-white shadow-glow">
+                <HelpCircle size={28} />
+              </div>
+              <p className="mb-2 text-sm font-semibold uppercase tracking-wide text-primary-600">
+                Giải đáp nhanh
+              </p>
+              <h2 className="text-3xl font-black text-gray-900 sm:text-4xl">
+                Câu hỏi thường gặp
+              </h2>
+              <p className="mt-3 text-base text-gray-500">
+                Các thắc mắc phổ biến khi chuyển đổi Excel sang Misa bằng EzFormat.
+              </p>
+            </div>
+
+            <div className="space-y-3 rounded-[2rem] border border-white/80 bg-white/70 p-3 shadow-card backdrop-blur sm:p-4">
+              {faqs.map((faq, index) => (
+                <details
+                  key={faq.question}
+                  className="group rounded-2xl border border-gray-100 bg-white p-5 shadow-sm open:border-primary-100 open:shadow-card"
+                  open={index === 0}
+                >
+                  <summary className="flex cursor-pointer list-none items-center justify-between gap-4 text-left font-bold text-gray-900">
+                    <span>{faq.question}</span>
+                    <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-primary-50 text-primary-600 transition-transform group-open:rotate-45">
+                      +
+                    </span>
+                  </summary>
+                  <p className="mt-3 text-sm leading-relaxed text-gray-600">
+                    {faq.answer}
+                  </p>
+                </details>
+              ))}
+            </div>
+          </div>
+        </section>
+
         {/* Newsletter */}
         <section className="bg-gradient-to-r from-primary-600 via-blue-600 to-cyan-600 py-14 px-4">
           <div className="max-w-6xl mx-auto flex flex-col md:flex-row items-center justify-between gap-6">
@@ -115,6 +183,7 @@ const ContactPage = () => {
       </main>
 
       <Footer />
+      <ChatSupport />
     </div>
   );
 };

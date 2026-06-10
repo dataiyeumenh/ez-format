@@ -7,6 +7,7 @@ import Footer from "../components/Footer";
 import Alert from "../components/ui/Alert";
 import GoogleSignInButton from "../components/GoogleSignInButton";
 import { getApiErrorMessage } from "../utils/apiError";
+import ezFormatMainLogo from "../assets/ezformat-main-logo.png";
 
 const RegisterPage = () => {
   const navigate = useNavigate();
@@ -64,13 +65,11 @@ const RegisterPage = () => {
         <div className="w-full max-w-sm bg-white rounded-2xl shadow-sm border border-gray-100 p-8">
           {/* Logo */}
           <div className="flex flex-col items-center mb-6">
-            <div className="relative w-16 h-16 mb-3">
-              <div className="absolute inset-0 bg-blue-600 rounded-xl transform rotate-6" />
-              <div className="absolute inset-0 bg-green-500 rounded-xl transform -rotate-6 opacity-80" />
-              <div className="absolute inset-0 flex items-center justify-center">
-                <span className="text-white font-black text-xl">EZ</span>
-              </div>
-            </div>
+            <img
+              src={ezFormatMainLogo}
+              alt="EzFormat logo"
+              className="mb-3 h-16 w-16 object-contain"
+            />
             <h2 className="text-lg font-bold text-gray-900">Tạo tài khoản mới</h2>
             <p className="text-sm text-gray-500 text-center mt-1">
               Tham gia EzFormat và chuẩn hoá dữ liệu kế toán của bạn

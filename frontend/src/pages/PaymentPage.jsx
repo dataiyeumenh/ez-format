@@ -105,7 +105,7 @@ const PaymentPage = () => {
   };
 
   return (
-    <div className="min-h-screen flex flex-col bg-gray-50">
+    <div className="min-h-screen flex flex-col bg-white">
       <Navbar />
       <main className="flex-1 py-10 px-4">
         <h1 className="text-3xl font-black text-gray-900 text-center mb-8">

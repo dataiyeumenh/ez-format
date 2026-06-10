@@ -18,7 +18,7 @@ export default class ErrorBoundary extends Component {
   render() {
     if (this.state.hasError) {
       return (
-        <div className="min-h-screen flex items-center justify-center p-6 bg-gray-50">
+      <div className="min-h-screen flex items-center justify-center bg-white p-6">
           <div className="max-w-md w-full">
             <Alert variant="error" title="Đã xảy ra lỗi giao diện">
               Vui lòng tải lại trang. Nếu lỗi lặp lại, liên hệ hỗ trợ.
