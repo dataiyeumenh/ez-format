@@ -1,11 +1,8 @@
 const Payment = require("../models/Payment");
 const User = require("../models/User");
 const { getPayOSClient } = require("../services/payosClient");
-const {
-  buildPaymentDescription,
-  getPlanConfig,
-  normalizePlanType,
-} = require("../services/paymentPlans");
+const { buildPaymentDescription } = require("../services/paymentPlans");
+const { findActivePlanByCodeOrId, serializePlan } = require("../services/planService");
 const { applyPaidPlanToUser } = require("../services/subscriptionService");
 const {
   normalizePayOSStatus,
@@ -42,7 +39,9 @@ function serializePayment(payment) {
   return {
     id: payment._id,
     orderCode: payment.orderCode,
-    planType: payment.planType,
+    plan: payment.plan ? serializePlan(payment.plan) : null,
+    planCode: payment.planCode,
+    planName: payment.planName,
     amount: payment.amount,
     status: payment.status,
     checkoutUrl: payment.checkoutUrl,
@@ -53,38 +52,38 @@ function serializePayment(payment) {
 }
 
 async function createPayment(req, res) {
-  let planType;
-  try {
-    planType = normalizePlanType(req.body?.planType);
-  } catch {
+  const planIdentifier = req.body?.planId || req.body?.planCode || req.body?.planType;
+  const plan = await findActivePlanByCodeOrId(planIdentifier);
+
+  if (!plan || plan.price <= 0 || plan.code === "free") {
     return res.status(400).json({
       success: false,
       message: "Gói thanh toán không hợp lệ",
     });
   }
 
-  const plan = getPlanConfig(planType);
-
   try {
     const orderCode = await generateOrderCode();
     const payment = await Payment.create({
       user: req.user._id,
+      plan: plan._id,
       orderCode,
-      planType,
-      amount: plan.amount,
+      planCode: plan.code,
+      planName: plan.name,
+      amount: plan.price,
       status: "pending",
     });
 
     const payOS = getPayOSClient();
     const paymentLink = await payOS.paymentRequests.create({
       orderCode,
-      amount: plan.amount,
-      description: buildPaymentDescription(planType),
+      amount: plan.price,
+      description: buildPaymentDescription(plan.code),
       items: [
         {
-          name: plan.itemName,
+          name: plan.name,
           quantity: 1,
-          price: plan.amount,
+          price: plan.price,
         },
       ],
       buyerName: req.user.name,
@@ -118,7 +117,7 @@ async function getPayment(req, res) {
     const payment = await Payment.findOne({
       orderCode: Number(req.params.orderCode),
       user: req.user._id,
-    });
+    }).populate("plan");
 
     if (!payment) {
       return res
@@ -141,7 +140,7 @@ async function syncPayment(req, res) {
   try {
     const payment = await Payment.findOne({
       orderCode: Number(req.params.orderCode),
-    });
+    }).populate("plan");
 
     if (!payment) {
       return res
@@ -180,7 +179,7 @@ async function handlePayOSWebhook(req, res) {
       webhookData?.code === "00" ||
       webhookMappedStatus === "paid";
 
-    const payment = await Payment.findOne({ orderCode: webhookData.orderCode });
+    const payment = await Payment.findOne({ orderCode: webhookData.orderCode }).populate("plan");
     if (!payment) {
       return res.status(200).json({ success: true, message: "Payment ignored" });
     }
@@ -227,11 +226,12 @@ async function handlePayOSWebhook(req, res) {
       return res.status(200).json({ success: true, message: "User missing" });
     }
 
-    applyPaidPlanToUser(user, payment.planType);
+    const paidAt = new Date();
+    applyPaidPlanToUser(user, payment.plan, paidAt);
     await user.save();
 
     payment.status = "paid";
-    payment.paidAt = new Date();
+    payment.paidAt = paidAt;
     await payment.save();
 
     return res.status(200).json({ success: true });

@@ -41,9 +41,13 @@ const userSchema = new mongoose.Schema(
       default: "user",
     },
     plan: {
-      type: String,
-      enum: ["Free", "Monthly", "Yearly", "PerFile"],
-      default: "Free",
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Plan",
+      default: null,
+    },
+    planStartedAt: {
+      type: Date,
+      default: null,
     },
     planExpiresAt: {
       type: Date,

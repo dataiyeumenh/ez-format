@@ -1,24 +1,44 @@
 const User = require("../models/User");
 const Payment = require("../models/Payment");
+const Plan = require("../models/Plan");
 const { syncPaymentStatusFromPayOS } = require("../services/paymentStatusSync");
+const {
+  applyAdminPlanToUser,
+  normalizeSubscriptionState,
+} = require("../services/subscriptionService");
+const { findActivePlanByCodeOrId, getDefaultFreePlan } = require("../services/planService");
 
 // @desc    Get all users (admin only)
 // @route   GET /api/admin/users
 // @access  Private/Admin
 const getUsers = async (req, res) => {
   try {
+    await User.updateMany(
+      {
+        planExpiresAt: { $ne: null, $lte: new Date() },
+      },
+      { $set: { plan: null, planStartedAt: null, planExpiresAt: null } },
+    );
+
     const page = parseInt(req.query.page) || 1;
     const limit = parseInt(req.query.limit) || 20;
     const skip = (page - 1) * limit;
 
     const filter = {};
-    if (req.query.plan) filter.plan = req.query.plan;
+    if (req.query.plan) {
+      const planQuery = req.query.plan.match(/^[0-9a-fA-F]{24}$/)
+        ? { _id: req.query.plan }
+        : { code: req.query.plan };
+      const plan = await Plan.findOne(planQuery);
+      if (plan) filter.plan = plan._id;
+    }
     if (req.query.status === "Active") filter.isActive = true;
     if (req.query.status === "Banned") filter.isActive = false;
 
     const total = await User.countDocuments(filter);
     const users = await User.find(filter)
       .select("-password")
+      .populate("plan")
       .sort({ createdAt: -1 })
       .skip(skip)
       .limit(limit);
@@ -42,22 +62,45 @@ const getUsers = async (req, res) => {
 // @access  Private/Admin
 const updateUser = async (req, res) => {
   try {
-    const { plan, isActive, name, email } = req.body;
-    const user = await User.findByIdAndUpdate(
-      req.params.id,
-      {
-        ...(plan !== undefined && { plan }),
-        ...(isActive !== undefined && { isActive }),
-        ...(name && { name }),
-        ...(email && { email }),
-      },
-      { new: true, runValidators: true },
-    ).select("-password");
+    const { plan, isActive, name, email, fileCredits } = req.body;
+    const user = await User.findById(req.params.id);
 
     if (!user)
       return res
         .status(404)
         .json({ success: false, message: "Không tìm thấy người dùng" });
+
+    if (String(user._id) === String(req.user._id) || user.role === "admin") {
+      return res.status(403).json({
+        success: false,
+        message: "Admin không thể chỉnh sửa tài khoản admin hoặc chính mình",
+      });
+    }
+
+    if (plan !== undefined) {
+      const nextPlan = await findActivePlanByCodeOrId(plan);
+      if (!nextPlan) {
+        return res.status(400).json({ success: false, message: "Gói dịch vụ không hợp lệ" });
+      }
+      applyAdminPlanToUser(user, nextPlan);
+    }
+    if (fileCredits !== undefined) {
+      const nextCredits = Number(fileCredits);
+      if (!Number.isInteger(nextCredits) || nextCredits < 0) {
+        return res.status(400).json({
+          success: false,
+          message: "Số lượt chuyển đổi phải là số nguyên không âm",
+        });
+      }
+      user.fileCredits = nextCredits;
+    }
+    if (isActive !== undefined) user.isActive = isActive;
+    if (name) user.name = name;
+    if (email) user.email = email;
+    normalizeSubscriptionState(user);
+    if (!user.plan) user.plan = (await getDefaultFreePlan())._id;
+    await user.save();
+    await user.populate("plan");
 
     res.json({ success: true, user });
   } catch (error) {
@@ -67,17 +110,25 @@ const updateUser = async (req, res) => {
   }
 };
 
-// @desc    Delete user
-// @route   DELETE /api/admin/users/:id
-// @access  Private/Admin
 const deleteUser = async (req, res) => {
   try {
-    const user = await User.findByIdAndDelete(req.params.id);
+    const user = await User.findById(req.params.id);
     if (!user)
       return res
         .status(404)
         .json({ success: false, message: "Không tìm thấy người dùng" });
-    res.json({ success: true, message: "Đã xóa người dùng" });
+
+    if (String(user._id) === String(req.user._id) || user.role === "admin") {
+      return res.status(403).json({
+        success: false,
+        message: "Admin không thể khoá tài khoản admin hoặc chính mình",
+      });
+    }
+
+    user.isActive = false;
+    await user.save();
+
+    res.json({ success: true, message: "Đã khoá người dùng", user });
   } catch (error) {
     res
       .status(500)
@@ -97,13 +148,18 @@ const createUser = async (req, res) => {
         .status(400)
         .json({ success: false, message: "Email đã được sử dụng" });
 
-    const user = await User.create({
+    const user = new User({
       name,
       email,
       password: password || "123456",
-      plan: plan || "Free",
       role: role || "user",
     });
+    const nextPlan = plan ? await findActivePlanByCodeOrId(plan) : await getDefaultFreePlan();
+    applyAdminPlanToUser(user, nextPlan || (await getDefaultFreePlan()));
+    normalizeSubscriptionState(user);
+    if (!user.plan) user.plan = (await getDefaultFreePlan())._id;
+    await user.save();
+    await user.populate("plan");
     res
       .status(201)
       .json({
@@ -160,8 +216,8 @@ function formatPayment(payment) {
     id: payment._id,
     orderCode: payment.orderCode,
     paymentLinkId: payment.paymentLinkId,
-    planType: payment.planType,
-    planName: PLAN_LABELS[payment.planType] || payment.planType,
+    planCode: payment.planCode,
+    planName: payment.planName || PLAN_LABELS[payment.planCode] || payment.planCode,
     amount: payment.amount,
     status: payment.status,
     checkoutUrl: payment.checkoutUrl,
@@ -251,7 +307,7 @@ const getRevenue = async (req, res) => {
     const paidCount = paidCurrent.length;
     const arpu = paidCount ? Math.round(totalRevenue / paidCount) : 0;
     const monthlyRevenue = paidCurrent
-      .filter((payment) => payment.planType === "monthly")
+      .filter((payment) => payment.planCode === "monthly")
       .reduce((sum, payment) => sum + payment.amount, 0);
 
     const chart = Array.from({ length: days }, (_, index) => {
@@ -279,7 +335,7 @@ const getRevenue = async (req, res) => {
 
     const planRevenue = Object.entries(PLAN_LABELS).map(([planType, label]) => {
       const amount = paidCurrent
-        .filter((payment) => payment.planType === planType)
+        .filter((payment) => payment.planCode === planType)
         .reduce((sum, payment) => sum + payment.amount, 0);
       return {
         planType,

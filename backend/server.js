@@ -38,6 +38,7 @@ app.use(express.urlencoded({ extended: true, limit: "50mb" }));
 
 // Routes
 app.use("/api/auth", require("./routes/auth"));
+app.use("/api/plans", require("./routes/plans"));
 app.use("/api/admin", require("./routes/admin"));
 app.use("/api/convert", require("./routes/convert"));
 app.use("/api/payments", require("./routes/payments"));

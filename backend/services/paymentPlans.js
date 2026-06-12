@@ -38,7 +38,8 @@ function getPlanConfig(planType) {
 }
 
 function buildPaymentDescription(planType) {
-  const normalized = normalizePlanType(planType);
+  const normalized = String(planType || "").trim().toLowerCase();
+  if (!normalized) throw new Error("Unsupported plan type");
   return `EZF ${normalized}`.slice(0, 25);
 }
 

@@ -1,6 +1,6 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
-import { Mail, Lock, Eye, EyeOff, User } from "lucide-react";
+import { Mail, Lock, Eye, EyeOff, User, AlertCircle, CheckCircle } from "lucide-react";
 import { useAuth } from "../context/AuthContext";
 import Navbar from "../components/Navbar";
 import Footer from "../components/Footer";
@@ -22,24 +22,43 @@ const RegisterPage = () => {
   const [showConfirmPassword, setShowConfirmPassword] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [errorPopup, setErrorPopup] = useState("");
+  const [successPopup, setSuccessPopup] = useState("");
+
+  useEffect(() => {
+    if (!successPopup) return undefined;
+    const timer = window.setTimeout(() => {
+      setSuccessPopup("");
+      navigate("/login");
+    }, 3000);
+    return () => window.clearTimeout(timer);
+  }, [navigate, successPopup]);
 
   const handleChange = (e) => {
     setFormData({ ...formData, [e.target.name]: e.target.value });
     setError("");
+    setErrorPopup("");
   };
 
   const handleSubmit = async (e) => {
     e.preventDefault();
     if (formData.password !== formData.confirmPassword) {
-      return setError("Mật khẩu xác nhận không khớp");
+      const message = "Mật khẩu xác nhận không khớp";
+      setError(message);
+      setErrorPopup(message);
+      return;
     }
     setLoading(true);
     setError("");
     try {
       await register(formData.name, formData.email, formData.password);
-      navigate("/");
+      setSuccessPopup(
+        "Tạo tài khoản thành công. Vui lòng đăng nhập để bắt đầu sử dụng EzFormat.",
+      );
     } catch (err) {
-      setError(getApiErrorMessage(err, "Đăng ký thất bại"));
+      const message = getApiErrorMessage(err, "Đăng ký thất bại");
+      setError(message);
+      setErrorPopup(message);
     } finally {
       setLoading(false);
     }
@@ -52,7 +71,9 @@ const RegisterPage = () => {
       const user = await loginWithGoogle(credential);
       navigate(user.role === "admin" ? "/admin" : "/");
     } catch (err) {
-      setError(getApiErrorMessage(err, "Đăng nhập Google thất bại"));
+      const message = getApiErrorMessage(err, "Đăng nhập Google thất bại");
+      setError(message);
+      setErrorPopup(message);
     } finally {
       setLoading(false);
     }
@@ -219,6 +240,50 @@ const RegisterPage = () => {
         </div>
       </main>
       <Footer />
+      {errorPopup && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/40 px-4">
+          <div className="w-full max-w-sm rounded-2xl bg-white p-6 text-center shadow-2xl">
+            <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-2xl bg-red-50 text-red-600">
+              <AlertCircle size={28} />
+            </div>
+            <h2 className="mb-2 text-lg font-bold text-gray-900">
+              Đăng ký thất bại
+            </h2>
+            <p className="mb-5 text-sm leading-relaxed text-gray-500">
+              {errorPopup}
+            </p>
+            <button
+              type="button"
+              onClick={() => setErrorPopup("")}
+              className="w-full rounded-xl bg-blue-600 px-4 py-2.5 text-sm font-semibold text-white hover:bg-blue-700"
+            >
+              Thử lại
+            </button>
+          </div>
+        </div>
+      )}
+      {successPopup && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/40 px-4">
+          <div className="w-full max-w-sm rounded-2xl bg-white p-6 text-center shadow-2xl">
+            <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-2xl bg-emerald-50 text-emerald-600">
+              <CheckCircle size={28} />
+            </div>
+            <h2 className="mb-2 text-lg font-bold text-gray-900">
+              Đăng ký thành công
+            </h2>
+            <p className="mb-5 text-sm leading-relaxed text-gray-500">
+              {successPopup}
+            </p>
+            <button
+              type="button"
+              onClick={() => navigate("/login")}
+              className="w-full rounded-xl bg-blue-600 px-4 py-2.5 text-sm font-semibold text-white hover:bg-blue-700"
+            >
+              Đi tới đăng nhập
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

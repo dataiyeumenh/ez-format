@@ -9,15 +9,40 @@ function formatExpiry(dateValue) {
   if (!dateValue) return null;
   const date = new Date(dateValue);
   if (Number.isNaN(date.getTime())) return null;
-  return date.toLocaleDateString("vi-VN");
+  return new Intl.DateTimeFormat("vi-VN", {
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric",
+  }).format(date);
 }
 
 const UserPlanBadge = ({ user, compact = false }) => {
   if (!user) return null;
 
-  const planLabel = planLabels[user.plan] || user.plan || "Gói miễn phí";
+  const plan = typeof user.plan === "object" && user.plan ? user.plan : null;
+  const planCode = plan?.code || user.planCode || user.plan;
+  const legacyPlan = planCode
+    ? String(planCode).charAt(0).toUpperCase() + String(planCode).slice(1)
+    : "Free";
+  const normalizedLegacyPlan =
+    legacyPlan === "Perfile" ? "PerFile" : legacyPlan;
+  const planLabel =
+    plan?.name || planLabels[normalizedLegacyPlan] || user.plan || "Gói miễn phí";
   const credits = Number(user.fileCredits || 0);
   const expiry = formatExpiry(user.planExpiresAt);
+  const isTimePlan =
+    planCode === "monthly" ||
+    planCode === "yearly" ||
+    normalizedLegacyPlan === "Monthly" ||
+    normalizedLegacyPlan === "Yearly";
+  const detailText =
+    planCode === "perfile" || normalizedLegacyPlan === "PerFile"
+      ? `${credits} lượt chuyển đổi`
+      : isTimePlan && expiry
+        ? `Hết hạn vào ${expiry}`
+        : planCode === "free" || normalizedLegacyPlan === "Free"
+          ? "0 lượt chuyển đổi"
+          : "";
 
   return (
     <div
@@ -29,13 +54,10 @@ const UserPlanBadge = ({ user, compact = false }) => {
         <span className="text-xs font-bold uppercase tracking-wide text-blue-600">
           {planLabel}
         </span>
-        <span className="text-xs font-semibold text-blue-800">
-          {credits} lượt chuyển đổi
-        </span>
+        {detailText && (
+          <span className="text-xs font-semibold text-blue-800">{detailText}</span>
+        )}
       </div>
-      {!compact && expiry && (
-        <p className="mt-1 text-xs text-blue-700">Hạn gói: {expiry}</p>
-      )}
     </div>
   );
 };

@@ -8,16 +8,28 @@ const paymentSchema = new mongoose.Schema(
       required: true,
       index: true,
     },
+    plan: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Plan",
+      default: null,
+      index: true,
+    },
     orderCode: {
       type: Number,
       required: true,
       unique: true,
       index: true,
     },
-    planType: {
+    planCode: {
       type: String,
-      enum: ["monthly", "yearly", "perfile"],
       required: true,
+      trim: true,
+      lowercase: true,
+    },
+    planName: {
+      type: String,
+      required: true,
+      trim: true,
     },
     amount: {
       type: Number,

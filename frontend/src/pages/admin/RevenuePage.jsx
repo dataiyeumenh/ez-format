@@ -167,7 +167,7 @@ const RevenuePage = () => {
                 {
                   label: "Doanh thu gói tháng",
                   value: formatVnd(stats.monthlyRevenue),
-                  change: `${stats.paidCount || 0} đơn paid`,
+                  change: `${stats.paidCount || 0} đơn đã thanh toán`,
                   icon: "⏱",
                 },
                 {
@@ -179,7 +179,7 @@ const RevenuePage = () => {
                 {
                   label: "Đơn đang xử lý",
                   value: String(stats.pendingCount || 0),
-                  change: "pending",
+                  change: "Đang chờ xử lý",
                   chgColor: "text-amber-600",
                   icon: "👤",
                 },
