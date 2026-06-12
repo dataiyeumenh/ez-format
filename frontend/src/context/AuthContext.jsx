@@ -42,12 +42,7 @@ export const AuthProvider = ({ children }) => {
       email,
       password,
     });
-    const { token, user } = response.data;
-    localStorage.setItem("token", token);
-    localStorage.setItem("user", JSON.stringify(user));
-    setToken(token);
-    setUser(user);
-    return user;
+    return response.data?.user;
   }, []);
 
   const loginWithGoogle = useCallback(async (credential) => {

@@ -28,11 +28,12 @@ async function applyPaidPayment(payment, remotePaymentLink) {
     return;
   }
 
-  applyPaidPlanToUser(user, payment.planType);
+  payment.paidAt = payment.paidAt || new Date();
+  const plan = payment.plan?.code ? payment.plan : await payment.populate("plan").then((doc) => doc.plan);
+  applyPaidPlanToUser(user, plan, payment.paidAt);
   await user.save();
 
   payment.status = "paid";
-  payment.paidAt = payment.paidAt || new Date();
 }
 
 async function syncPaymentStatusFromPayOS(payment) {

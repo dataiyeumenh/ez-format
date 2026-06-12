@@ -39,23 +39,13 @@ const paymentMethods = [
   },
 ];
 
-const planSummaries = {
-  monthly: {
-    name: "GÓI THÁNG",
-    price: "149.000 VND",
-    description: "Gia hạn 30 ngày",
-  },
-  yearly: {
-    name: "GÓI NĂM",
-    price: "1.308.000 VND",
-    description: "Gia hạn 365 ngày",
-  },
-  perfile: {
-    name: "THEO LƯỢT",
-    price: "10.000 VND",
-    description: "Cộng 1 lượt chuyển đổi",
-  },
-};
+function formatVnd(amount) {
+  return new Intl.NumberFormat("vi-VN", {
+    style: "currency",
+    currency: "VND",
+    maximumFractionDigits: 0,
+  }).format(Number(amount || 0));
+}
 
 const PaymentPage = () => {
   const location = useLocation();
@@ -65,15 +55,21 @@ const PaymentPage = () => {
   const [loading, setLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState("");
 
-  const planType = location.state?.planType;
+  const selectedPlan = location.state?.plan;
+  const planId = location.state?.planId || selectedPlan?.id;
+  const planCode = location.state?.planCode || selectedPlan?.code;
   const plan = useMemo(
-    () =>
-      planSummaries[planType] || {
-        name: location.state?.planName || "Gói EzFormat",
-        price: location.state?.planPrice || "",
-        description: "Thanh toán EzFormat",
-      },
-    [location.state?.planName, location.state?.planPrice, planType],
+    () => ({
+      name: selectedPlan?.name || location.state?.planName || "Gói EzFormat",
+      price: selectedPlan?.price ? formatVnd(selectedPlan.price) : location.state?.planPrice || "",
+      description:
+        selectedPlan?.code === "perfile"
+          ? `Cộng ${selectedPlan.fileCredits || 1} lượt chuyển đổi`
+          : selectedPlan?.durationDays
+            ? `Gia hạn ${selectedPlan.durationDays} ngày`
+            : "Thanh toán EzFormat",
+    }),
+    [location.state?.planName, location.state?.planPrice, selectedPlan],
   );
 
   const handleCreatePayment = async () => {
@@ -81,7 +77,7 @@ const PaymentPage = () => {
       navigate("/login");
       return;
     }
-    if (!planType || !planSummaries[planType]) {
+    if (!planId && !planCode) {
       setErrorMsg("Vui lòng chọn lại gói thanh toán.");
       return;
     }
@@ -89,7 +85,7 @@ const PaymentPage = () => {
     setLoading(true);
     setErrorMsg("");
     try {
-      const response = await api.post("/payments/create", { planType });
+      const response = await api.post("/payments/create", { planId, planCode });
       const checkoutUrl = response.data?.checkoutUrl;
       if (!checkoutUrl) throw new Error("Backend không trả checkoutUrl.");
       window.location.href = checkoutUrl;

@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { Link, NavLink, useNavigate } from "react-router-dom";
 import { useAuth } from "../context/AuthContext";
-import { Menu, X } from "lucide-react";
+import { LogOut, Menu, X } from "lucide-react";
 import ezFormatLogo from "../assets/ezformat-main-logo.png";
 import UserPlanBadge from "./UserPlanBadge";
 
@@ -28,16 +28,58 @@ const Navbar = () => {
   const navigate = useNavigate();
   const [mobileOpen, setMobileOpen] = useState(false);
   const [userMenuOpen, setUserMenuOpen] = useState(false);
+  const [logoutConfirmOpen, setLogoutConfirmOpen] = useState(false);
 
   const closeMobile = () => setMobileOpen(false);
   const closeUserMenu = () => setUserMenuOpen(false);
 
+  const requestLogout = () => {
+    setLogoutConfirmOpen(true);
+  };
+
   const handleLogout = () => {
     logout();
+    setLogoutConfirmOpen(false);
     closeMobile();
     closeUserMenu();
     navigate("/");
   };
+
+  const LogoutConfirmPopover = ({ mobile = false }) => (
+    <div
+      className={`z-[80] w-80 rounded-2xl border border-gray-100 bg-white p-4 text-left shadow-xl shadow-gray-200/70 ${
+        mobile ? "mt-2" : "absolute right-0 top-full mt-3"
+      }`}
+    >
+      <div className="mb-3 flex items-start gap-3">
+        <div className="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-xl bg-blue-50 text-blue-600">
+          <LogOut size={20} />
+        </div>
+        <div>
+          <h2 className="text-sm font-bold text-gray-900">Xác nhận đăng xuất</h2>
+          <p className="mt-1 text-xs leading-relaxed text-gray-500">
+            Bạn có chắc muốn đăng xuất khỏi tài khoản hiện tại không?
+          </p>
+        </div>
+      </div>
+      <div className="flex gap-2">
+        <button
+          type="button"
+          onClick={() => setLogoutConfirmOpen(false)}
+          className="flex-1 rounded-xl border border-gray-200 px-3 py-2 text-sm font-semibold text-gray-600 hover:bg-gray-50"
+        >
+          Hủy
+        </button>
+        <button
+          type="button"
+          onClick={handleLogout}
+          className="flex-1 rounded-xl bg-blue-600 px-3 py-2 text-sm font-semibold text-white hover:bg-blue-700"
+        >
+          Đăng xuất
+        </button>
+      </div>
+    </div>
+  );
 
   return (
     <nav className="bg-white/90 backdrop-blur-md border-b border-gray-100/80 sticky top-0 z-50">
@@ -93,13 +135,16 @@ const Navbar = () => {
                     </div>
                   )}
                 </div>
-                <button
-                  type="button"
-                  onClick={handleLogout}
-                  className="btn-secondary py-2 text-base font-semibold"
-                >
-                  Đăng xuất
-                </button>
+                <div className="relative">
+                  <button
+                    type="button"
+                    onClick={requestLogout}
+                    className="btn-secondary py-2 text-base font-semibold"
+                  >
+                    Đăng xuất
+                  </button>
+                  {logoutConfirmOpen && <LogoutConfirmPopover />}
+                </div>
               </>
             ) : (
               <>
@@ -174,13 +219,16 @@ const Navbar = () => {
                   </div>
                 )}
               </div>
-              <button
-                type="button"
-                onClick={handleLogout}
-                className="block w-full py-2 text-left text-base font-semibold text-gray-600"
-              >
-                Đăng xuất
-              </button>
+              <div>
+                <button
+                  type="button"
+                  onClick={requestLogout}
+                  className="block w-full py-2 text-left text-base font-semibold text-gray-600"
+                >
+                  Đăng xuất
+                </button>
+                {logoutConfirmOpen && <LogoutConfirmPopover mobile />}
+              </div>
             </>
           ) : (
             <div className="pt-2 flex flex-col gap-2">

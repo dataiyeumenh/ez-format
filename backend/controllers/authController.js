@@ -2,6 +2,8 @@ const jwt = require("jsonwebtoken");
 const { validationResult } = require("express-validator");
 const User = require("../models/User");
 const { verifyGoogleCredential } = require("../services/googleAuth");
+const { normalizeSubscriptionState } = require("../services/subscriptionService");
+const { getDefaultFreePlan, serializePlan } = require("../services/planService");
 
 // Generate JWT
 const generateToken = (id, role) => {
@@ -15,7 +17,8 @@ const serializeUser = (user) => ({
   name: user.name,
   email: user.email,
   role: user.role,
-  plan: user.plan,
+  plan: serializePlan(user.plan),
+  planStartedAt: user.planStartedAt,
   planExpiresAt: user.planExpiresAt,
   fileCredits: user.fileCredits,
   avatar: user.avatar,
@@ -40,7 +43,9 @@ const register = async (req, res) => {
         .json({ success: false, message: "Email đã được sử dụng" });
     }
 
-    const user = await User.create({ name, email, password });
+    const freePlan = await getDefaultFreePlan();
+    const user = await User.create({ name, email, password, plan: freePlan?._id });
+    await user.populate("plan");
     const token = generateToken(user._id, user.role);
 
     res.status(201).json({
@@ -67,7 +72,7 @@ const login = async (req, res) => {
 
   const { email, password } = req.body;
   try {
-    const user = await User.findOne({ email }).select("+password");
+    const user = await User.findOne({ email }).select("+password").populate("plan");
     if (!user) {
       return res
         .status(401)
@@ -89,9 +94,22 @@ const login = async (req, res) => {
     }
 
     if (!user.isActive) {
-      return res
-        .status(403)
-        .json({ success: false, message: "Tài khoản đã bị vô hiệu hóa" });
+      return res.status(403).json({
+        success: false,
+        message: "Tài khoản của bạn đã bị khoá. Vui lòng liên hệ quản trị viên.",
+      });
+    }
+
+    normalizeSubscriptionState(user);
+    if (!user.plan) user.plan = (await getDefaultFreePlan())._id;
+    if (
+      user.isModified("plan") ||
+      user.isModified("fileCredits") ||
+      user.isModified("planStartedAt") ||
+      user.isModified("planExpiresAt")
+    ) {
+      await user.save();
+      await user.populate("plan");
     }
 
     const token = generateToken(user._id, user.role);
@@ -138,13 +156,28 @@ const googleLogin = async (req, res) => {
         googleId: googleProfile.googleId,
         authProvider: "google",
         avatar: googleProfile.avatar,
+        plan: (await getDefaultFreePlan())?._id,
+      });
+    }
+    await user.populate("plan");
+
+    if (!user.isActive) {
+      return res.status(403).json({
+        success: false,
+        message: "Tài khoản của bạn đã bị khoá. Vui lòng liên hệ quản trị viên.",
       });
     }
 
-    if (!user.isActive) {
-      return res
-        .status(403)
-        .json({ success: false, message: "Tài khoản đã bị vô hiệu hóa" });
+    normalizeSubscriptionState(user);
+    if (!user.plan) user.plan = (await getDefaultFreePlan())._id;
+    if (
+      user.isModified("plan") ||
+      user.isModified("fileCredits") ||
+      user.isModified("planStartedAt") ||
+      user.isModified("planExpiresAt")
+    ) {
+      await user.save();
+      await user.populate("plan");
     }
 
     const token = generateToken(user._id, user.role);
@@ -169,7 +202,18 @@ const googleLogin = async (req, res) => {
 // @access  Private
 const getMe = async (req, res) => {
   try {
-    const user = await User.findById(req.user.id);
+    const user = await User.findById(req.user.id).populate("plan");
+    normalizeSubscriptionState(user);
+    if (!user.plan) user.plan = (await getDefaultFreePlan())._id;
+    if (
+      user.isModified("plan") ||
+      user.isModified("fileCredits") ||
+      user.isModified("planStartedAt") ||
+      user.isModified("planExpiresAt")
+    ) {
+      await user.save();
+      await user.populate("plan");
+    }
     res.json({
       success: true,
       user: {

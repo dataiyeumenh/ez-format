@@ -11,11 +11,18 @@ const {
   createUser,
   getRevenue,
 } = require("../controllers/adminController");
+const {
+  getAdminPlans,
+  createPlan,
+  updatePlan,
+} = require("../controllers/planController");
 
 router.use(protect, adminOnly);
 
 router.route("/users").get(getUsers).post(createUser);
 router.route("/users/:id").put(updateUser).delete(deleteUser);
+router.route("/plans").get(getAdminPlans).post(createPlan);
+router.route("/plans/:id").put(updatePlan);
 router.get("/revenue", getRevenue);
 
 module.exports = router;

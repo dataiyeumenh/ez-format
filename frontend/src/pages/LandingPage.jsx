@@ -389,7 +389,7 @@ const LandingPage = () => {
                   {plan.popular && (
                     <div className="absolute -top-3.5 left-0 right-0 flex justify-center">
                       <span className="whitespace-nowrap rounded-full bg-blue-600 px-4 py-1 text-xs font-bold uppercase tracking-wider text-white shadow-lg shadow-blue-200">
-                        MOST POPULAR
+                        PHỔ BIẾN
                       </span>
                     </div>
                   )}

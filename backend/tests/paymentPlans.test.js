@@ -6,7 +6,12 @@ const {
   buildPaymentDescription,
   normalizePlanType,
 } = require("../services/paymentPlans");
-const { applyPaidPlanToUser } = require("../services/subscriptionService");
+const {
+  applyPaidPlanToUser,
+  applyAdminPlanToUser,
+  normalizeDepletedPerFilePlan,
+  normalizeExpiredTimePlan,
+} = require("../services/subscriptionService");
 
 test("payment plan prices are fixed server-side", () => {
   assert.equal(PLAN_CONFIGS.monthly.amount, 149000);
@@ -28,6 +33,7 @@ test("payOS descriptions stay short and ascii-safe", () => {
 test("monthly payment extends from later existing expiry", () => {
   const user = {
     plan: "Free",
+    planStartedAt: null,
     planExpiresAt: new Date("2026-01-10T00:00:00.000Z"),
     fileCredits: 0,
   };
@@ -36,6 +42,7 @@ test("monthly payment extends from later existing expiry", () => {
   applyPaidPlanToUser(user, "monthly", now);
 
   assert.equal(user.plan, "Monthly");
+  assert.equal(user.planStartedAt.toISOString(), "2026-01-10T00:00:00.000Z");
   assert.equal(user.planExpiresAt.toISOString(), "2026-02-09T00:00:00.000Z");
 });
 
@@ -46,7 +53,49 @@ test("yearly payment sets yearly and adds 365 days", () => {
   applyPaidPlanToUser(user, "yearly", now);
 
   assert.equal(user.plan, "Yearly");
+  assert.equal(user.planStartedAt.toISOString(), "2026-01-01T00:00:00.000Z");
   assert.equal(user.planExpiresAt.toISOString(), "2027-01-01T00:00:00.000Z");
+});
+
+test("admin monthly plan starts from admin edit time", () => {
+  const user = {
+    plan: "Free",
+    planStartedAt: null,
+    planExpiresAt: new Date("2030-01-01T00:00:00.000Z"),
+    fileCredits: 0,
+  };
+  const now = new Date("2026-06-13T10:30:00.000Z");
+
+  applyAdminPlanToUser(user, "Monthly", now);
+
+  assert.equal(user.plan, "Monthly");
+  assert.equal(user.planStartedAt.toISOString(), "2026-06-13T10:30:00.000Z");
+  assert.equal(user.planExpiresAt.toISOString(), "2026-07-13T10:30:00.000Z");
+});
+
+test("admin yearly plan starts from admin edit time", () => {
+  const user = { plan: "Free", planStartedAt: null, planExpiresAt: null };
+  const now = new Date("2026-06-13T10:30:00.000Z");
+
+  applyAdminPlanToUser(user, "Yearly", now);
+
+  assert.equal(user.plan, "Yearly");
+  assert.equal(user.planStartedAt.toISOString(), "2026-06-13T10:30:00.000Z");
+  assert.equal(user.planExpiresAt.toISOString(), "2027-06-13T10:30:00.000Z");
+});
+
+test("admin free plan clears time subscription dates", () => {
+  const user = {
+    plan: "Monthly",
+    planStartedAt: new Date("2026-01-01T00:00:00.000Z"),
+    planExpiresAt: new Date("2026-02-01T00:00:00.000Z"),
+  };
+
+  applyAdminPlanToUser(user, "Free", new Date("2026-06-13T10:30:00.000Z"));
+
+  assert.equal(user.plan, "Free");
+  assert.equal(user.planStartedAt, null);
+  assert.equal(user.planExpiresAt, null);
 });
 
 test("per-file payment adds exactly one credit", () => {
@@ -56,4 +105,44 @@ test("per-file payment adds exactly one credit", () => {
 
   assert.equal(user.plan, "PerFile");
   assert.equal(user.fileCredits, 3);
+});
+
+test("depleted per-file plan falls back to free", () => {
+  const user = {
+    plan: "PerFile",
+    planStartedAt: new Date("2026-01-01T00:00:00.000Z"),
+    planExpiresAt: new Date("2026-02-01T00:00:00.000Z"),
+    fileCredits: 0,
+  };
+
+  normalizeDepletedPerFilePlan(user);
+
+  assert.equal(user.plan, "Free");
+  assert.equal(user.planStartedAt, null);
+  assert.equal(user.planExpiresAt, null);
+  assert.equal(user.fileCredits, 0);
+});
+
+test("non per-file plan is not changed when credits are zero", () => {
+  const user = { plan: "Monthly", planExpiresAt: null, fileCredits: 0 };
+
+  normalizeDepletedPerFilePlan(user);
+
+  assert.equal(user.plan, "Monthly");
+  assert.equal(user.fileCredits, 0);
+});
+
+test("expired monthly/yearly plan falls back to free", () => {
+  const user = {
+    plan: "Monthly",
+    planStartedAt: new Date("2026-01-01T00:00:00.000Z"),
+    planExpiresAt: new Date("2026-02-01T00:00:00.000Z"),
+    fileCredits: 0,
+  };
+
+  normalizeExpiredTimePlan(user, new Date("2026-02-01T00:00:00.001Z"));
+
+  assert.equal(user.plan, "Free");
+  assert.equal(user.planStartedAt, null);
+  assert.equal(user.planExpiresAt, null);
 });

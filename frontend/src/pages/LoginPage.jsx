@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
-import { Mail, Lock, Eye, EyeOff } from "lucide-react";
+import { Mail, Lock, Eye, EyeOff, Ban, AlertCircle } from "lucide-react";
 import { useAuth } from "../context/AuthContext";
 import Navbar from "../components/Navbar";
 import Footer from "../components/Footer";
@@ -17,10 +17,14 @@ const LoginPage = () => {
   const [rememberMe, setRememberMe] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [banPopup, setBanPopup] = useState("");
+  const [errorPopup, setErrorPopup] = useState("");
 
   const handleChange = (e) => {
     setFormData({ ...formData, [e.target.name]: e.target.value });
     setError("");
+    setBanPopup("");
+    setErrorPopup("");
   };
 
   const handleSubmit = async (e) => {
@@ -35,7 +39,13 @@ const LoginPage = () => {
         navigate("/");
       }
     } catch (err) {
-      setError(getApiErrorMessage(err, "Đăng nhập thất bại"));
+      const message = getApiErrorMessage(err, "Đăng nhập thất bại");
+      setError(message);
+      if (err?.response?.status === 403 || message.toLowerCase().includes("ban")) {
+        setBanPopup(message);
+      } else {
+        setErrorPopup(message);
+      }
     } finally {
       setLoading(false);
     }
@@ -48,7 +58,13 @@ const LoginPage = () => {
       const user = await loginWithGoogle(credential);
       navigate(user.role === "admin" ? "/admin" : "/");
     } catch (err) {
-      setError(getApiErrorMessage(err, "Đăng nhập Google thất bại"));
+      const message = getApiErrorMessage(err, "Đăng nhập Google thất bại");
+      setError(message);
+      if (err?.response?.status === 403 || message.toLowerCase().includes("ban")) {
+        setBanPopup(message);
+      } else {
+        setErrorPopup(message);
+      }
     } finally {
       setLoading(false);
     }
@@ -189,6 +205,50 @@ const LoginPage = () => {
         </div>
       </main>
       <Footer />
+      {banPopup && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/40 px-4">
+          <div className="w-full max-w-sm rounded-2xl bg-white p-6 text-center shadow-2xl">
+            <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-2xl bg-red-50 text-red-600">
+              <Ban size={28} />
+            </div>
+            <h2 className="mb-2 text-lg font-bold text-gray-900">
+              Tài khoản đã bị khoá
+            </h2>
+            <p className="mb-5 text-sm leading-relaxed text-gray-500">
+              {banPopup}
+            </p>
+            <button
+              type="button"
+              onClick={() => setBanPopup("")}
+              className="w-full rounded-xl bg-blue-600 px-4 py-2.5 text-sm font-semibold text-white hover:bg-blue-700"
+            >
+              Tôi đã hiểu
+            </button>
+          </div>
+        </div>
+      )}
+      {errorPopup && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/40 px-4">
+          <div className="w-full max-w-sm rounded-2xl bg-white p-6 text-center shadow-2xl">
+            <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-2xl bg-red-50 text-red-600">
+              <AlertCircle size={28} />
+            </div>
+            <h2 className="mb-2 text-lg font-bold text-gray-900">
+              Đăng nhập thất bại
+            </h2>
+            <p className="mb-5 text-sm leading-relaxed text-gray-500">
+              {errorPopup}
+            </p>
+            <button
+              type="button"
+              onClick={() => setErrorPopup("")}
+              className="w-full rounded-xl bg-blue-600 px-4 py-2.5 text-sm font-semibold text-white hover:bg-blue-700"
+            >
+              Thử lại
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 };
