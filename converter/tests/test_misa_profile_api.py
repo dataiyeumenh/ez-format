@@ -168,13 +168,15 @@ def test_analyze_preview_confirm_export_learns_profile(tmp_path, monkeypatch):
     assert reanalyze.json()["mapping_suggestion"]["profile_id"] == profile_id
 
 
-def test_analyze_falls_back_when_remote_ai_times_out(tmp_path, monkeypatch):
+def test_high_confidence_heuristic_skips_remote_ai(tmp_path, monkeypatch):
     monkeypatch.setenv("MAPPING_DB_PATH", str(tmp_path / "profiles.sqlite"))
     monkeypatch.setenv("AI_PROVIDER", "remote_http")
-    monkeypatch.setenv("AI_BASE_URL", "http://127.0.0.1:9/v1/misa/suggest-mapping")
-    monkeypatch.setenv("AI_TOKEN", "secret")
-    monkeypatch.setenv("AI_TIMEOUT_SECONDS", "0.01")
     monkeypatch.setenv("AI_REQUIRED", "false")
+
+    def fail_if_called(_payload):
+        raise AssertionError("AI should not be called when heuristic confidence is already high")
+
+    monkeypatch.setattr("app.misa_workflow.request_mapping_suggestion", fail_if_called)
 
     with (SAMPLES / "raw_sales_sample.xlsx").open("rb") as handle:
         response = client.post(
@@ -183,6 +185,99 @@ def test_analyze_falls_back_when_remote_ai_times_out(tmp_path, monkeypatch):
             files={
                 "file": (
                     "raw_sales_sample.xlsx",
+                    handle,
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                )
+            },
+        )
+
+    assert response.status_code == 200
+    suggestion = response.json()["mapping_suggestion"]
+    assert suggestion["source"] == "heuristic"
+
+
+def test_high_confidence_unknown_schema_still_uses_remote_ai(tmp_path, monkeypatch):
+    import openpyxl
+
+    from app.conversion_types import CONVERSION_TYPES
+    from app.misa_mapping import MappingSuggestion
+
+    monkeypatch.setenv("MAPPING_DB_PATH", str(tmp_path / "profiles.sqlite"))
+    monkeypatch.setenv("AI_PROVIDER", "remote_http")
+    monkeypatch.setenv("AI_REQUIRED", "false")
+
+    raw_path = tmp_path / "unknown_but_confident.xlsx"
+    workbook = openpyxl.Workbook()
+    sheet = workbook.active
+    sheet.append(["InvoiceX", "DateX", "ItemX"])
+    sheet.append(["HD001", "01/01/2026", "SKU001"])
+    workbook.save(raw_path)
+
+    def high_confidence_unknown_heuristic(_table, _target_template_id, _target_headers):
+        return MappingSuggestion(
+            source="heuristic",
+            confidence=0.95,
+            mapping={
+                "InvoiceX": "Số chứng từ (*)",
+                "DateX": ["Ngày hạch toán (*)", "Ngày chứng từ (*)"],
+                "ItemX": "Mã hàng (*)",
+            },
+            defaults=CONVERSION_TYPES["bsn_sales"].defaults,
+            formulas={},
+            warnings=[],
+        )
+
+    ai_called = False
+
+    def mark_ai_called(_payload):
+        nonlocal ai_called
+        ai_called = True
+        return {"mapping": {}, "defaults": {}, "formulas": {}, "confidence": 0.0}
+
+    monkeypatch.setattr("app.misa_workflow.heuristic_suggestion", high_confidence_unknown_heuristic)
+    monkeypatch.setattr("app.misa_workflow.request_mapping_suggestion", mark_ai_called)
+
+    with raw_path.open("rb") as handle:
+        response = client.post(
+            "/api/v1/uploads/analyze",
+            data={"target_template_id": "bsn_sales"},
+            files={
+                "file": (
+                    raw_path.name,
+                    handle,
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                )
+            },
+        )
+
+    assert response.status_code == 200
+    assert ai_called is True
+
+
+def test_analyze_falls_back_when_low_confidence_remote_ai_fails(tmp_path, monkeypatch):
+    import openpyxl
+
+    monkeypatch.setenv("MAPPING_DB_PATH", str(tmp_path / "profiles.sqlite"))
+    monkeypatch.setenv("AI_PROVIDER", "remote_http")
+    monkeypatch.setenv("AI_BASE_URL", "http://127.0.0.1:9/v1/misa/suggest-mapping")
+    monkeypatch.setenv("AI_TOKEN", "secret")
+    monkeypatch.setenv("AI_MAPPING_TIMEOUT_SECONDS", "0.01")
+    monkeypatch.setenv("AI_REQUIRED", "false")
+
+    raw_path = tmp_path / "unknown_schema.xlsx"
+    workbook = openpyxl.Workbook()
+    sheet = workbook.active
+    sheet.append(["Unknown A", "Unknown B"])
+    sheet.append(["foo", "bar"])
+    workbook.save(raw_path)
+
+    with raw_path.open("rb") as handle:
+        response = client.post(
+            "/api/v1/uploads/analyze",
+            data={"target_template_id": "bsn_sales"},
+            files={
+                "file": (
+                    raw_path.name,
                     handle,
                     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 )
@@ -210,6 +305,16 @@ def test_ai_gateway_requires_bearer_token(monkeypatch):
     )
 
     assert response.status_code == 401
+
+
+def test_converter_ai_mapping_timeout_caps_legacy_long_timeout(monkeypatch):
+    from app.ai_mapping_client import mapping_timeout_seconds
+
+    monkeypatch.delenv("AI_MAPPING_TIMEOUT_SECONDS", raising=False)
+    monkeypatch.setenv("AI_TIMEOUT_SECONDS", "120")
+    monkeypatch.delenv("AI_MAPPING_TIMEOUT_CAP_SECONDS", raising=False)
+
+    assert mapping_timeout_seconds() == 20.0
 
 
 def test_ai_gateway_normalizes_reversed_mapping_and_percent_confidence():

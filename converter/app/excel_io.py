@@ -2,13 +2,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, datetime
+from itertools import islice
 from pathlib import Path
 from typing import Any
 
 import openpyxl
 import xlrd
 import xlwt
-from xlutils.copy import copy as copy_xlrd_workbook
 from xlutils.filter import XLWTWriter
 
 from app.normalization import is_blank
@@ -126,28 +126,38 @@ def _read_xlsx(path: Path) -> InputTable:
         raise InputReadError("corrupt_xlsx", f"Cannot read Excel workbook: {exc}") from exc
     try:
         best_name: str | None = None
-        best_rows: list[Any] = []
         best_score = (-1, -1)
         best_header_idx = 0
         for name in workbook.sheetnames:
             sheet = workbook[name]
-            rows = list(sheet.iter_rows(values_only=True))
+            rows = list(islice(sheet.iter_rows(values_only=True), 30))
             if not rows:
                 continue
             header_idx, score = score_header_rows(rows)
             if score > best_score:
                 best_score = score
                 best_name = name
-                best_rows = rows
                 best_header_idx = header_idx
 
-        if not best_rows:
+        if not best_name:
             return InputTable(headers=[], rows=[], sheet_name=None, header_row_index=0)
 
+        sheet = workbook[best_name]
+        header_row = next(
+            sheet.iter_rows(
+                min_row=best_header_idx + 1,
+                max_row=best_header_idx + 1,
+                values_only=True,
+            ),
+            (),
+        )
         headers = [
-            "" if value is None else str(value).strip() for value in best_rows[best_header_idx]
+            "" if value is None else str(value).strip() for value in header_row
         ]
-        records = _rows_to_records(headers, best_rows[best_header_idx + 1 :])
+        records = _rows_to_records(
+            headers,
+            sheet.iter_rows(min_row=best_header_idx + 2, values_only=True),
+        )
         return InputTable(
             headers=headers,
             rows=records,
@@ -167,26 +177,38 @@ def _read_xls(path: Path) -> InputTable:
         raise InputReadError("corrupt_xls", f"Cannot read .xls file: {exc}") from exc
 
     best_name: str | None = None
-    best_rows: list[Any] = []
+    best_sheet: xlrd.sheet.Sheet | None = None
     best_score = (-1, -1)
     best_header_idx = 0
 
     for sheet in book.sheets():
-        rows = [[sheet.cell_value(row, col) for col in range(sheet.ncols)] for row in range(sheet.nrows)]
+        rows = [
+            [sheet.cell_value(row, col) for col in range(sheet.ncols)]
+            for row in range(min(sheet.nrows, 30))
+        ]
         if not rows:
             continue
         header_idx, score = score_header_rows(rows)
         if score > best_score:
             best_score = score
             best_name = sheet.name
-            best_rows = rows
+            best_sheet = sheet
             best_header_idx = header_idx
 
-    if not best_rows:
+    if best_sheet is None:
         return InputTable(headers=[], rows=[], sheet_name=None, header_row_index=0)
 
-    headers = ["" if value is None else str(value).strip() for value in best_rows[best_header_idx]]
-    records = _rows_to_records(headers, best_rows[best_header_idx + 1 :])
+    headers = [
+        "" if value is None else str(value).strip()
+        for value in best_sheet.row_values(best_header_idx)
+    ]
+    records = _rows_to_records(
+        headers,
+        (
+            [best_sheet.cell_value(row, col) for col in range(best_sheet.ncols)]
+            for row in range(best_header_idx + 1, best_sheet.nrows)
+        ),
+    )
     return InputTable(
         headers=headers,
         rows=records,
@@ -218,9 +240,8 @@ def write_xls_from_template(
 ) -> None:
     source_book = xlrd.open_workbook(str(template.path), formatting_info=True)
     source_sheet = source_book.sheet_by_name(template.sheet_name)
-    workbook = copy_xlrd_workbook(source_book)
-    sheet_index = source_book.sheet_names().index(template.sheet_name)
-    sheet = workbook.get_sheet(sheet_index)
+    workbook = xlwt.Workbook(encoding="utf-8")
+    sheet = workbook.add_sheet(template.sheet_name)
     styles = _xlwt_styles_for(source_book)
     data_start_row = template.header_row_index + 1
     output_end_row = data_start_row + len(output_rows)
@@ -228,31 +249,122 @@ def write_xls_from_template(
     if output_end_row > 65536:
         raise ValueError("Output exceeds the .xls row limit of 65,536 rows.")
 
+    _copy_column_layout(source_sheet, sheet, len(template.headers))
+    _copy_static_template_rows(
+        source_sheet=source_sheet,
+        output_sheet=sheet,
+        styles=styles,
+        max_col_count=len(template.headers),
+        data_start_row=data_start_row,
+    )
+    for row_idx in range(data_start_row, min(source_sheet.nrows, max(output_end_row, 12))):
+        _copy_row_layout(
+            source_sheet,
+            sheet,
+            row_idx,
+            fallback_row=data_start_row,
+        )
+    data_styles = [
+        _style_for_cell(
+            source_sheet,
+            styles,
+            data_start_row,
+            col_idx,
+            fallback_row=data_start_row,
+        )
+        for col_idx in range(len(template.headers))
+    ]
+
     for record_idx, record in enumerate(output_rows, start=data_start_row):
+        _copy_row_layout(
+            source_sheet,
+            sheet,
+            record_idx,
+            fallback_row=data_start_row,
+        )
         for col_idx, header in enumerate(template.headers):
             if not header:
                 continue
             value = record.get(header, "")
-            style = _style_for_cell(
-                source_sheet,
-                styles,
-                record_idx,
-                col_idx,
-                fallback_row=data_start_row,
-            )
-            sheet.write(record_idx, col_idx, _xls_cell_value(value), style)
-
-    _clear_stale_template_rows(
-        source_sheet=source_sheet,
-        output_sheet=sheet,
-        styles=styles,
-        start_row=output_end_row,
-        max_col_count=len(template.headers),
-        fallback_row=data_start_row,
-    )
+            sheet.write(record_idx, col_idx, _xls_cell_value(value), data_styles[col_idx])
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     workbook.save(str(output_path))
+
+
+def _copy_column_layout(
+    source_sheet: xlrd.sheet.Sheet,
+    output_sheet: xlwt.Worksheet.Worksheet,
+    max_col_count: int,
+) -> None:
+    for col_idx in range(max_col_count):
+        source_col = source_sheet.colinfo_map.get(col_idx)
+        if source_col is None:
+            continue
+        output_col = output_sheet.col(col_idx)
+        output_col.width = source_col.width
+        output_col.hidden = source_col.hidden
+        output_col.level = source_col.outline_level
+        output_col.collapse = source_col.collapsed
+
+
+def _copy_static_template_rows(
+    *,
+    source_sheet: xlrd.sheet.Sheet,
+    output_sheet: xlwt.Worksheet.Worksheet,
+    styles: list[xlwt.Style.XFStyle],
+    max_col_count: int,
+    data_start_row: int,
+) -> None:
+    merged_top_left: dict[tuple[int, int], tuple[int, int, int, int]] = {}
+    merged_covered: set[tuple[int, int]] = set()
+    for rlo, rhi, clo, chi in source_sheet.merged_cells:
+        if rlo >= data_start_row:
+            continue
+        merged_top_left[(rlo, clo)] = (rlo, rhi, clo, chi)
+        for row_idx in range(rlo, rhi):
+            for col_idx in range(clo, chi):
+                if (row_idx, col_idx) != (rlo, clo):
+                    merged_covered.add((row_idx, col_idx))
+
+    for row_idx in range(data_start_row):
+        _copy_row_layout(source_sheet, output_sheet, row_idx, fallback_row=row_idx)
+        for col_idx in range(max_col_count):
+            if (row_idx, col_idx) in merged_covered:
+                continue
+            value = (
+                source_sheet.cell_value(row_idx, col_idx)
+                if row_idx < source_sheet.nrows and col_idx < source_sheet.ncols
+                else ""
+            )
+            style = _style_for_cell(
+                source_sheet,
+                styles,
+                row_idx,
+                col_idx,
+                fallback_row=min(row_idx, max(source_sheet.nrows - 1, 0)),
+            )
+            merged = merged_top_left.get((row_idx, col_idx))
+            if merged:
+                rlo, rhi, clo, chi = merged
+                output_sheet.write_merge(rlo, rhi - 1, clo, chi - 1, value, style)
+            else:
+                output_sheet.write(row_idx, col_idx, value, style)
+
+
+def _copy_row_layout(
+    source_sheet: xlrd.sheet.Sheet,
+    output_sheet: xlwt.Worksheet.Worksheet,
+    row_idx: int,
+    *,
+    fallback_row: int,
+) -> None:
+    source_row = source_sheet.rowinfo_map.get(row_idx) or source_sheet.rowinfo_map.get(fallback_row)
+    if source_row is None:
+        return
+    output_row = output_sheet.row(row_idx)
+    output_row.height = source_row.height
+    output_row.height_mismatch = True
 
 
 def _xlwt_styles_for(book: xlrd.book.Book) -> list[xlwt.Style.XFStyle]:

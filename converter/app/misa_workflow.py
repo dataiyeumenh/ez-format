@@ -15,6 +15,8 @@ from app.ai_mapping_client import (
 from app.conversion_types import BACKEND_ROOT
 from app.excel_io import InputTable, read_input_table, write_xls_from_template
 from app.misa_mapping import (
+    BSN_SALES_DIRECT_MAPPING,
+    SourceSignature,
     ai_suggestion_payload,
     apply_mapping,
     detect_target_template_id,
@@ -28,10 +30,19 @@ from app.misa_mapping import (
 )
 from app.misa_profiles import ProfileStore
 from app.misa_templates import get_misa_template, list_misa_templates
+from app.normalization import normalize_header
 
 
 UPLOAD_ROOT = BACKEND_ROOT / ".artifacts" / "uploads"
 EXPORT_MEDIA_TYPE = "application/vnd.ms-excel"
+DETERMINISTIC_BSN_SALES_RAW_HEADERS = (
+    "Mã hóa đơn",
+    "Thời gian",
+    "Tên khách hàng",
+    "Mã hàng",
+    "Số lượng",
+    "Đơn giá",
+)
 
 
 def templates_payload() -> dict[str, Any]:
@@ -87,7 +98,13 @@ def analyze_upload(
         suggestion = profile_suggestion(profile)
     else:
         suggestion = heuristic_suggestion(table, target_template_id, template.headers)
-        if ai_enabled():
+        heuristic_issues = validate_mapping(target_template_id, suggestion.mapping, template.headers)
+        if ai_enabled() and _should_request_ai_mapping(
+            table=table,
+            target_template_id=target_template_id,
+            suggestion=suggestion,
+            issues=heuristic_issues,
+        ):
             try:
                 ai_payload = request_mapping_suggestion(
                     ai_suggestion_payload(table, target_template_id, template.headers)
@@ -177,9 +194,18 @@ def confirm_mapping(
     formulas: dict[str, str] | None = None,
     profile_name: str | None = None,
 ) -> dict[str, Any]:
-    table = _read_upload_table(upload_id)
     metadata = _read_metadata(upload_id)
-    signature = source_signature(table)
+    signature_payload = metadata.get("signature")
+    if isinstance(signature_payload, dict):
+        signature = SourceSignature(
+            sheet_name=str(signature_payload.get("sheet_name") or ""),
+            header_row=int(signature_payload.get("header_row") or 1),
+            row_count=int(signature_payload.get("row_count") or 0),
+            headers=[str(header) for header in signature_payload.get("headers") or []],
+            hash=str(signature_payload.get("hash") or ""),
+        )
+    else:
+        signature = source_signature(_read_upload_table(upload_id))
     store = ProfileStore()
     previous = metadata.get("suggestion")
     template = get_misa_template(target_template_id)
@@ -238,6 +264,51 @@ def export_confirmed_profile(upload_id: str, profile_id: str) -> tuple[bytes, st
 
 def purge_uploads() -> None:
     shutil.rmtree(UPLOAD_ROOT, ignore_errors=True)
+
+
+def _should_request_ai_mapping(
+    *,
+    table: InputTable,
+    target_template_id: str,
+    suggestion: Any,
+    issues: list[dict[str, str]],
+) -> bool:
+    import os
+
+    if os.getenv("AI_ALWAYS_SUGGEST", "false").lower() in {"1", "true", "yes"}:
+        return True
+    if issues or suggestion.warnings:
+        return True
+    return not _is_known_deterministic_schema(table, target_template_id, suggestion)
+
+
+def _is_known_deterministic_schema(
+    table: InputTable,
+    target_template_id: str,
+    suggestion: Any,
+) -> bool:
+    if target_template_id != "bsn_sales" or suggestion.source != "heuristic":
+        return False
+
+    normalized_counts: dict[str, int] = {}
+    resolved_headers: dict[str, str] = {}
+    for header in table.headers:
+        normalized = normalize_header(header)
+        if not normalized:
+            continue
+        normalized_counts[normalized] = normalized_counts.get(normalized, 0) + 1
+        resolved_headers.setdefault(normalized, header)
+
+    for raw_header in DETERMINISTIC_BSN_SALES_RAW_HEADERS:
+        normalized = normalize_header(raw_header)
+        if normalized_counts.get(normalized) != 1:
+            return False
+        resolved = resolved_headers[normalized]
+        expected_target = BSN_SALES_DIRECT_MAPPING[raw_header]
+        if suggestion.mapping.get(resolved) != expected_target:
+            return False
+
+    return True
 
 
 def _read_upload_table(upload_id: str) -> InputTable:

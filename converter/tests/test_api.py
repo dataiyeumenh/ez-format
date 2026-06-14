@@ -159,7 +159,8 @@ def test_healthz():
     response = client.get("/healthz")
 
     assert response.status_code == 200
-    assert response.json() == {"status": "ok"}
+    assert response.json()["status"] == "ok"
+    assert response.json()["ai"] in {"disabled", "offline", "online"}
 
 
 def test_conversion_types_endpoint():

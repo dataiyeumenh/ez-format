@@ -10,6 +10,10 @@ class AiMappingError(Exception):
     pass
 
 
+DEFAULT_MAPPING_TIMEOUT_SECONDS = 15.0
+DEFAULT_MAPPING_TIMEOUT_CAP_SECONDS = 20.0
+
+
 def ai_enabled() -> bool:
     return os.getenv("AI_PROVIDER", "disabled").lower() == "remote_http"
 
@@ -23,10 +27,7 @@ def request_mapping_suggestion(payload: dict[str, Any]) -> dict[str, Any]:
     token = os.getenv("AI_TOKEN", "").strip()
     if not base_url:
         raise AiMappingError("AI_BASE_URL is not configured.")
-    try:
-        timeout = float(os.getenv("AI_TIMEOUT_SECONDS", "20"))
-    except ValueError:
-        timeout = 20.0
+    timeout = mapping_timeout_seconds()
 
     headers = {"Content-Type": "application/json"}
     if token:
@@ -46,3 +47,20 @@ def request_mapping_suggestion(payload: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(data, dict):
         raise AiMappingError("AI Gateway returned a non-object response.")
     return data
+
+
+def mapping_timeout_seconds() -> float:
+    configured = os.getenv("AI_MAPPING_TIMEOUT_SECONDS")
+    legacy = os.getenv("AI_TIMEOUT_SECONDS")
+    raw_timeout = configured if configured not in (None, "") else legacy
+    try:
+        timeout = float(raw_timeout) if raw_timeout not in (None, "") else DEFAULT_MAPPING_TIMEOUT_SECONDS
+    except ValueError:
+        timeout = DEFAULT_MAPPING_TIMEOUT_SECONDS
+
+    try:
+        cap = float(os.getenv("AI_MAPPING_TIMEOUT_CAP_SECONDS", str(DEFAULT_MAPPING_TIMEOUT_CAP_SECONDS)))
+    except ValueError:
+        cap = DEFAULT_MAPPING_TIMEOUT_CAP_SECONDS
+
+    return max(1.0, min(timeout, cap))
