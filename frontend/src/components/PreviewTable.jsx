@@ -11,9 +11,6 @@ export default function PreviewTable({
   disabled,
 }) {
   const [page, setPage] = useState(0);
-  const canEdit = !disabled && typeof onCellChange === "function";
-  const canDelete = !disabled && typeof onDeleteRow === "function";
-  const showActions = typeof onDeleteRow === "function";
   const totalPages = Math.max(1, Math.ceil(rows.length / PAGE_SIZE));
 
   useEffect(() => {
@@ -76,11 +73,9 @@ export default function PreviewTable({
                   {h}
                 </th>
               ))}
-              {showActions && (
-                <th className="bg-gray-50 border-b border-gray-200 px-3 py-2.5 text-center text-gray-500 font-semibold w-12">
-                  Xoá
-                </th>
-              )}
+              <th className="bg-gray-50 border-b border-gray-200 px-3 py-2.5 text-center text-gray-500 font-semibold w-12">
+                Xoá
+              </th>
             </tr>
           </thead>
           <tbody>
@@ -99,35 +94,28 @@ export default function PreviewTable({
                       key={`${rIdx}-${h}`}
                       className="border-b border-r border-gray-100 p-0"
                     >
-                      {canEdit ? (
-                        <input
-                          type="text"
-                          value={
-                            row[h] !== undefined && row[h] !== null ? String(row[h]) : ""
-                          }
-                          onChange={(e) => onCellChange(rIdx, h, e.target.value)}
-                          className="w-full min-w-[128px] px-3 py-2 text-xs text-gray-800 bg-transparent border-none outline-none transition-colors focus:bg-primary-50 focus:ring-1 focus:ring-inset focus:ring-primary-400"
-                        />
-                      ) : (
-                        <span className="block w-full min-w-[128px] px-3 py-2 text-xs text-gray-800">
-                          {row[h] !== undefined && row[h] !== null ? String(row[h]) : ""}
-                        </span>
-                      )}
+                      <input
+                        type="text"
+                        disabled={disabled}
+                        value={
+                          row[h] !== undefined && row[h] !== null ? String(row[h]) : ""
+                        }
+                        onChange={(e) => onCellChange(rIdx, h, e.target.value)}
+                        className="w-full min-w-[128px] px-3 py-2 text-xs text-gray-800 bg-transparent border-none outline-none transition-colors focus:bg-primary-50 focus:ring-1 focus:ring-inset focus:ring-primary-400 disabled:opacity-60"
+                      />
                     </td>
                   ))}
-                  {showActions && (
-                    <td className="border-b border-gray-100 px-2 py-1 text-center">
-                      <button
-                        type="button"
-                        disabled={!canDelete}
-                        onClick={() => onDeleteRow(rIdx)}
-                        className="rounded-md p-1 text-gray-400 opacity-0 group-hover:opacity-100 hover:bg-red-50 hover:text-red-600 transition-all disabled:opacity-30"
-                        title="Xoá dòng này"
-                      >
-                        <Trash2 size={14} />
-                      </button>
-                    </td>
-                  )}
+                  <td className="border-b border-gray-100 px-2 py-1 text-center">
+                    <button
+                      type="button"
+                      disabled={disabled}
+                      onClick={() => onDeleteRow(rIdx)}
+                      className="rounded-md p-1 text-gray-400 opacity-0 group-hover:opacity-100 hover:bg-red-50 hover:text-red-600 transition-all disabled:opacity-30"
+                      title="Xoá dòng này"
+                    >
+                      <Trash2 size={14} />
+                    </button>
+                  </td>
                 </tr>
               );
             })}

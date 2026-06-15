@@ -19,9 +19,6 @@ import ChatSupport from "../components/ChatSupport";
 import Alert from "../components/ui/Alert";
 import StepProgress from "../components/ui/StepProgress";
 import PreviewTable from "../components/PreviewTable";
-import ReconciliationPanel from "../components/ReconciliationPanel";
-import ValidationIssueTable from "../components/ValidationIssueTable";
-import ValidationReadinessCard from "../components/ValidationReadinessCard";
 import { useConverterApi } from "../hooks/useConverterApi";
 import api from "../services/api";
 
@@ -29,14 +26,13 @@ const STATUS = {
   IDLE: "idle",
   ANALYZING: "analyzing",
   MAPPING: "mapping",
-  VALIDATING: "validating",
   PREVIEW: "preview",
   DOWNLOADING: "downloading",
   SUCCESS: "success",
   ERROR: "error",
 };
 
-const STEPS = ["Tải file", "Ghép cột", "Kiểm tra lỗi", "Xem trước", "Tải file MISA"];
+const STEPS = ["Tải file", "Ghép cột", "Xem trước", "Tải file MISA"];
 const DEFAULT_TEMPLATE_ID = "bsn_sales";
 const EXCEL_EXT = ["xlsx", "xls"];
 const PDF_EXT = ["pdf"];
@@ -142,7 +138,6 @@ const ConvertPage = () => {
     aiOnline,
     analyzeFile,
     previewMapping,
-    validateMapping,
     confirmMapping,
     exportConfirmed,
   } = useConverterApi();
@@ -161,8 +156,6 @@ const ConvertPage = () => {
   const [previewHeaders, setPreviewHeaders] = useState([]);
   const [previewRows, setPreviewRows] = useState([]);
   const [previewStats, setPreviewStats] = useState(null);
-  const [validationReport, setValidationReport] = useState(null);
-  const [acknowledgeWarnings, setAcknowledgeWarnings] = useState(false);
   const [profileId, setProfileId] = useState(null);
   const [conversionRunId, setConversionRunId] = useState(null);
   const [focusedTarget, setFocusedTarget] = useState("");
@@ -254,15 +247,6 @@ const ConvertPage = () => {
   );
   const keyMappingOkCount = keyMappingValues.filter((item) => item.ok).length;
   const hasPreviewReady = previewRows.length > 0;
-  const validationSummary = validationReport?.summary || {};
-  const hasValidationBlocker =
-    (validationSummary.fatal || 0) + (validationSummary.blocker || 0) > 0;
-  const hasValidationWarnings = (validationSummary.warning || 0) > 0;
-  const canDownloadMisa =
-    hasPreviewReady &&
-    validationReport &&
-    !hasValidationBlocker &&
-    (!hasValidationWarnings || acknowledgeWarnings);
   const liveMissingRequiredIssues = useMemo(
     () =>
       !analyzePayload
@@ -331,13 +315,11 @@ const ConvertPage = () => {
   const stepIndex =
     convStatus === STATUS.MAPPING
       ? 1
-      : convStatus === STATUS.SUCCESS
-          ? 4
-          : convStatus === STATUS.PREVIEW || convStatus === STATUS.DOWNLOADING
-            ? 3
-            : convStatus === STATUS.VALIDATING || validationReport
-              ? 2
-              : 0;
+      : convStatus === STATUS.PREVIEW || convStatus === STATUS.DOWNLOADING
+        ? 2
+        : convStatus === STATUS.SUCCESS
+          ? 3
+          : 0;
 
   useEffect(() => {
     if (!templates.length) return;
@@ -356,12 +338,9 @@ const ConvertPage = () => {
     setPreviewHeaders([]);
     setPreviewRows([]);
     setPreviewStats(null);
-    setValidationReport(null);
-    setAcknowledgeWarnings(false);
     setProfileId(null);
     setConversionRunId(null);
   };
-
 
   const createConversionRunLog = async (file, templateId) => {
     if (!localStorage.getItem("token")) return null;
@@ -396,8 +375,6 @@ const ConvertPage = () => {
     setPreviewHeaders([]);
     setPreviewRows([]);
     setPreviewStats(null);
-    setValidationReport(null);
-    setAcknowledgeWarnings(false);
     setProfileId(null);
     if (convStatus === STATUS.PREVIEW || convStatus === STATUS.SUCCESS) {
       setConvStatus(STATUS.MAPPING);
@@ -528,22 +505,13 @@ const ConvertPage = () => {
     return result;
   };
 
-  const runValidation = async () => {
-    const result = await validateMapping(buildMappingPayload());
-    setValidationReport(result);
-    setAcknowledgeWarnings(false);
-    setIssues(result.issues || []);
-    return result;
-  };
-
   const handlePreview = async () => {
     if (!analyzePayload?.upload_id) return;
     window.scrollBy({ top: 800, behavior: "smooth" });
 
-    setConvStatus(STATUS.VALIDATING);
+    setConvStatus(STATUS.ANALYZING);
     setErrorMsg("");
     try {
-      await runValidation();
       await createPreview();
       setConvStatus(STATUS.PREVIEW);
     } catch (err) {
@@ -569,14 +537,6 @@ const ConvertPage = () => {
     setErrorMsg("");
     let exportStarted = false;
     try {
-      const report = validationReport || (await runValidation());
-      const summary = report?.summary || {};
-      if ((summary.fatal || 0) + (summary.blocker || 0) > 0) {
-        throw new Error("Còn lỗi nặng cần sửa trước khi tải file MISA.");
-      }
-      if ((summary.warning || 0) > 0 && !acknowledgeWarnings) {
-        throw new Error("Bạn cần xác nhận đã kiểm tra các cảnh báo trước khi tải.");
-      }
       if (!previewRows.length) {
         const preview = await createPreview();
         if (!(preview.rows || []).length) {
@@ -588,10 +548,6 @@ const ConvertPage = () => {
       const { blob, filename } = await exportConfirmed(
         analyzePayload.upload_id,
         savedProfileId,
-        {
-          acknowledgeWarnings,
-          validationRunId: report?.validation_run_id,
-        },
       );
       const url = window.URL.createObjectURL(blob);
       const a = document.createElement("a");
@@ -821,9 +777,7 @@ const ConvertPage = () => {
                     disabled={
                       !selectedFile ||
                       serviceOnline === false ||
-                      convStatus === STATUS.ANALYZING ||
-                      convStatus === STATUS.VALIDATING ||
-                      convStatus === STATUS.DOWNLOADING
+                      convStatus === STATUS.ANALYZING
                     }
                   >
                     {convStatus === STATUS.ANALYZING && !analyzePayload ? (
@@ -867,7 +821,7 @@ const ConvertPage = () => {
                         disabled={convStatus === STATUS.DOWNLOADING}
                       >
                         <Wand2 size={16} />
-                        Kiểm tra & xem trước
+                        Xem trước
                       </button>
                       <button
                         type="button"
@@ -876,8 +830,7 @@ const ConvertPage = () => {
                         disabled={
                           convStatus === STATUS.DOWNLOADING ||
                           convStatus === STATUS.ANALYZING ||
-                          convStatus === STATUS.VALIDATING ||
-                          !canDownloadMisa
+                          !hasPreviewReady
                         }
                       >
                         {convStatus === STATUS.DOWNLOADING ? (
@@ -892,16 +845,7 @@ const ConvertPage = () => {
 
                   {analyzePayload && !hasPreviewReady && (
                     <p className="text-center text-xs text-amber-700">
-                      Hoàn thành bước <strong>Kiểm tra & xem trước</strong> để mở tải file MISA.
-                    </p>
-                  )}
-                  {analyzePayload && hasPreviewReady && !canDownloadMisa && (
-                    <p className="text-center text-xs text-amber-700">
-                      {hasValidationBlocker
-                        ? "Còn lỗi nặng cần sửa trước khi tải."
-                        : hasValidationWarnings
-                          ? "Tick xác nhận cảnh báo để tải file."
-                          : "Cần chạy kiểm tra lỗi trước khi tải."}
+                      Hoàn thành bước <strong>Xem trước</strong> để mở tải file MISA.
                     </p>
                   )}
                 </div>
@@ -923,14 +867,13 @@ const ConvertPage = () => {
                 {(attentionItems.length > 0 ||
                   (analyzePayload &&
                     convStatus !== STATUS.ANALYZING &&
-                    convStatus !== STATUS.VALIDATING &&
                     !hasPreviewReady)) && (
                   <Alert
                     variant={attentionItems.length > 0 ? "warning" : "info"}
                     title={
                       attentionItems.length > 0
-                        ? `Cần hoàn thành trước khi kiểm tra lỗi${attentionItems.length ? ` · ${attentionItems.length} mục cần kiểm tra` : ""}`
-                        : "Bước tiếp theo: Kiểm tra & xem trước"
+                        ? `Cần hoàn thành trước khi sang bước 3${attentionItems.length ? ` · ${attentionItems.length} mục cần kiểm tra` : ""}`
+                        : "Bước tiếp theo: Xem trước"
                     }
                     className="text-left"
                   >
@@ -965,24 +908,21 @@ const ConvertPage = () => {
                       )}
                       {analyzePayload &&
                         convStatus !== STATUS.ANALYZING &&
-                        convStatus !== STATUS.VALIDATING &&
                         !hasPreviewReady && (
                           <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                             <p className="text-sm">
-                              Bạn cần bấm <strong>Kiểm tra & xem trước</strong> để rà
-                              lỗi và chuyển sang bước xem trước trước khi tải file MISA.
+                              Bạn cần bấm <strong>Xem trước</strong> để kiểm tra dữ
+                              liệu đầu ra và chuyển sang bước 3 trước khi tải file
+                              MISA.
                             </p>
                             <button
                               type="button"
                               className="btn-primary justify-center px-4 py-2"
                               onClick={handlePreview}
-                              disabled={
-                                convStatus === STATUS.DOWNLOADING ||
-                                convStatus === STATUS.VALIDATING
-                              }
+                              disabled={convStatus === STATUS.DOWNLOADING}
                             >
                               <Wand2 size={16} />
-                              Kiểm tra ngay
+                              Xem trước ngay
                             </button>
                           </div>
                         )}
@@ -990,9 +930,7 @@ const ConvertPage = () => {
                   </Alert>
                 )}
 
-                {!analyzePayload &&
-                  convStatus !== STATUS.ANALYZING &&
-                  convStatus !== STATUS.VALIDATING && (
+                {!analyzePayload && convStatus !== STATUS.ANALYZING && (
                   <div className="rounded-3xl border border-gray-200 bg-white p-8 sm:p-12 shadow-card text-center">
                     <AlertTriangle size={36} className="mx-auto text-gray-300 mb-3" />
                     <h2 className="text-base font-semibold text-gray-800">
@@ -1005,11 +943,11 @@ const ConvertPage = () => {
                   </div>
                 )}
 
-                {(convStatus === STATUS.ANALYZING || convStatus === STATUS.VALIDATING) && (
+                {convStatus === STATUS.ANALYZING && (
                   <div className="rounded-3xl border border-primary-100 bg-white p-8 sm:p-12 shadow-card flex flex-col items-center gap-4">
                     <Loader2 size={40} className="text-primary-500 animate-spin" />
                     <p className="text-sm font-semibold text-gray-800 text-center">
-                      {convStatus === STATUS.VALIDATING ? "Đang kiểm tra lỗi…" : "Đang xử lý…"}
+                      Đang xử lý…
                     </p>
                     <p className="text-xs text-gray-400 text-center">
                       File lớn có thể mất vài chục giây.
@@ -1017,9 +955,7 @@ const ConvertPage = () => {
                   </div>
                 )}
 
-                {analyzePayload &&
-                  convStatus !== STATUS.ANALYZING &&
-                  convStatus !== STATUS.VALIDATING && (
+                {analyzePayload && convStatus !== STATUS.ANALYZING && (
                   <div className="rounded-3xl border border-gray-200 bg-white shadow-card overflow-hidden">
                     <div className="px-5 sm:px-6 py-5 border-b border-gray-100 flex flex-col lg:flex-row lg:items-start lg:justify-between gap-4">
                       <div className="min-w-0">
@@ -1128,7 +1064,10 @@ const ConvertPage = () => {
                                     className="w-full min-w-[190px] rounded-xl border border-gray-200 bg-white px-3 py-2.5 text-sm text-gray-800 shadow-sm focus:border-primary-500 focus:outline-none focus:ring-2 focus:ring-primary-500/20"
                                     value={matchedRaw}
                                     onChange={(e) =>
-                                      updateTargetMapping(target, e.target.value)
+                                      setTargetMapping((prev) => ({
+                                        ...prev,
+                                        [target]: e.target.value,
+                                      }))
                                     }
                                   >
                                     <option value="">— Không lấy từ Excel —</option>
@@ -1151,7 +1090,10 @@ const ConvertPage = () => {
                                     placeholder="Giá trị mặc định"
                                     value={defaults[target] ?? ""}
                                     onChange={(e) =>
-                                      updateDefault(target, e.target.value)
+                                      setDefaults((prev) => ({
+                                        ...prev,
+                                        [target]: e.target.value,
+                                      }))
                                     }
                                   />
                                 </td>
@@ -1167,7 +1109,10 @@ const ConvertPage = () => {
                                     placeholder="VD: XK_${Số chứng từ (*)}"
                                     value={formulas[target] ?? ""}
                                     onChange={(e) =>
-                                      updateFormula(target, e.target.value)
+                                      setFormulas((prev) => ({
+                                        ...prev,
+                                        [target]: e.target.value,
+                                      }))
                                     }
                                   />
                                 </td>
@@ -1178,20 +1123,6 @@ const ConvertPage = () => {
                       </table>
                     </div>
 
-                    {validationReport && (
-                      <div className="space-y-4 border-t border-gray-100 bg-gray-50/60 px-5 py-4 sm:px-6">
-                        <ValidationReadinessCard
-                          report={validationReport}
-                          acknowledgeWarnings={acknowledgeWarnings}
-                          onAcknowledgeWarnings={setAcknowledgeWarnings}
-                        />
-                        <ReconciliationPanel
-                          reconciliation={validationReport.reconciliation}
-                        />
-                        <ValidationIssueTable issues={validationReport.issues || []} />
-                      </div>
-                    )}
-
                     {convStatus === STATUS.PREVIEW && previewRows.length > 0 && (
                       <div className="border-t border-gray-100 bg-white px-5 py-4 sm:px-6">
                         <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
@@ -1200,7 +1131,7 @@ const ConvertPage = () => {
                               Xem trước dữ liệu đầu ra
                             </h3>
                             <p className="text-sm text-gray-500">
-                              Preview chỉ để kiểm tra. Nếu cần sửa, hãy chỉnh mapping/default/formula rồi làm mới xem trước.
+                              Bạn có thể chỉnh sửa trực tiếp trước khi tải file MISA.
                             </p>
                           </div>
                           <div className="flex flex-col xs:flex-row gap-2">
@@ -1217,10 +1148,7 @@ const ConvertPage = () => {
                               type="button"
                               className="inline-flex items-center justify-center gap-2 rounded-xl bg-emerald-600 px-5 py-2.5 text-sm font-semibold text-white shadow-sm transition-all duration-200 hover:bg-emerald-700 hover:shadow-md active:scale-[0.98] disabled:pointer-events-none disabled:opacity-50"
                               onClick={handleDownload}
-                              disabled={
-                                convStatus === STATUS.DOWNLOADING ||
-                                !canDownloadMisa
-                              }
+                              disabled={convStatus === STATUS.DOWNLOADING}
                             >
                               {convStatus === STATUS.DOWNLOADING ? (
                                 <Loader2 size={16} className="animate-spin" />
@@ -1231,20 +1159,13 @@ const ConvertPage = () => {
                             </button>
                           </div>
                         </div>
-                        {!canDownloadMisa && (
-                          <p className="mb-3 text-sm font-semibold text-amber-700">
-                            {hasValidationBlocker
-                              ? "Còn lỗi nặng cần sửa trước khi tải."
-                              : hasValidationWarnings
-                                ? "Tick xác nhận cảnh báo ở bước Kiểm tra lỗi để tải file."
-                                : "Cần chạy kiểm tra lỗi trước khi tải."}
-                          </p>
-                        )}
 
                         <div className="rounded-2xl border border-gray-200 overflow-hidden shadow-sm">
                           <PreviewTable
                             headers={previewHeaders}
                             rows={previewRows}
+                            onCellChange={handlePreviewCellChange}
+                            onDeleteRow={handlePreviewRowDelete}
                           />
                         </div>
                       </div>

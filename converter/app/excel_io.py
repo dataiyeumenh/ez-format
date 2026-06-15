@@ -1,14 +1,12 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import date, datetime
 from itertools import islice
 from pathlib import Path
 from typing import Any
-import struct
 
 import openpyxl
-from openpyxl.utils import get_column_letter
 import xlrd
 import xlwt
 from xlutils.filter import XLWTWriter
@@ -31,9 +29,6 @@ class InputTable:
     rows: list[dict[str, Any]]
     sheet_name: str | None = None
     header_row_index: int = 0
-    hidden_rows: list[int] = field(default_factory=list)
-    formula_cells: list[str] = field(default_factory=list)
-    blank_rows_ignored: int = 0
 
 
 @dataclass(frozen=True)
@@ -159,19 +154,15 @@ def _read_xlsx(path: Path) -> InputTable:
         headers = [
             "" if value is None else str(value).strip() for value in header_row
         ]
-        records, blank_rows_ignored = _rows_to_records(
+        records = _rows_to_records(
             headers,
             sheet.iter_rows(min_row=best_header_idx + 2, values_only=True),
         )
-        hidden_rows, formula_cells = _xlsx_sheet_warnings(path, best_name, best_header_idx)
         return InputTable(
             headers=headers,
             rows=records,
             sheet_name=best_name,
             header_row_index=best_header_idx,
-            hidden_rows=hidden_rows,
-            formula_cells=formula_cells,
-            blank_rows_ignored=blank_rows_ignored,
         )
     finally:
         workbook.close()
@@ -179,71 +170,58 @@ def _read_xlsx(path: Path) -> InputTable:
 
 def _read_xls(path: Path) -> InputTable:
     try:
-        book = xlrd.open_workbook(str(path), formatting_info=True, on_demand=True)
+        book = xlrd.open_workbook(str(path), formatting_info=False)
     except xlrd.XLRDError as exc:
         raise InputReadError("corrupt_xls", f"Corrupt or unsupported .xls file: {exc}") from exc
     except Exception as exc:
         raise InputReadError("corrupt_xls", f"Cannot read .xls file: {exc}") from exc
 
-    try:
-        best_name: str | None = None
-        best_sheet: xlrd.sheet.Sheet | None = None
-        best_score = (-1, -1)
-        best_header_idx = 0
+    best_name: str | None = None
+    best_sheet: xlrd.sheet.Sheet | None = None
+    best_score = (-1, -1)
+    best_header_idx = 0
 
-        for sheet in book.sheets():
-            rows = [
-                [sheet.cell_value(row, col) for col in range(sheet.ncols)]
-                for row in range(min(sheet.nrows, 30))
-            ]
-            if not rows:
-                continue
-            header_idx, score = score_header_rows(rows)
-            if score > best_score:
-                best_score = score
-                best_name = sheet.name
-                best_sheet = sheet
-                best_header_idx = header_idx
-
-        if best_sheet is None:
-            return InputTable(headers=[], rows=[], sheet_name=None, header_row_index=0)
-
-        headers = [
-            "" if value is None else str(value).strip()
-            for value in best_sheet.row_values(best_header_idx)
+    for sheet in book.sheets():
+        rows = [
+            [sheet.cell_value(row, col) for col in range(sheet.ncols)]
+            for row in range(min(sheet.nrows, 30))
         ]
-        records, blank_rows_ignored = _rows_to_records(
-            headers,
-            (
-                [best_sheet.cell_value(row, col) for col in range(best_sheet.ncols)]
-                for row in range(best_header_idx + 1, best_sheet.nrows)
-            ),
-        )
-        hidden_rows = [
-            row_idx - best_header_idx
-            for row_idx, row_info in getattr(best_sheet, "rowinfo_map", {}).items()
-            if row_idx > best_header_idx and getattr(row_info, "hidden", 0)
-        ]
-        formula_cells = _xls_formula_cells(book, best_sheet, best_header_idx)
-        return InputTable(
-            headers=headers,
-            rows=records,
-            sheet_name=best_name,
-            header_row_index=best_header_idx,
-            hidden_rows=hidden_rows,
-            formula_cells=formula_cells,
-            blank_rows_ignored=blank_rows_ignored,
-        )
-    finally:
-        book.release_resources()
+        if not rows:
+            continue
+        header_idx, score = score_header_rows(rows)
+        if score > best_score:
+            best_score = score
+            best_name = sheet.name
+            best_sheet = sheet
+            best_header_idx = header_idx
 
-def _rows_to_records(headers: list[str], rows: list[Any]) -> tuple[list[dict[str, Any]], int]:
+    if best_sheet is None:
+        return InputTable(headers=[], rows=[], sheet_name=None, header_row_index=0)
+
+    headers = [
+        "" if value is None else str(value).strip()
+        for value in best_sheet.row_values(best_header_idx)
+    ]
+    records = _rows_to_records(
+        headers,
+        (
+            [best_sheet.cell_value(row, col) for col in range(best_sheet.ncols)]
+            for row in range(best_header_idx + 1, best_sheet.nrows)
+        ),
+    )
+    return InputTable(
+        headers=headers,
+        rows=records,
+        sheet_name=best_name,
+        header_row_index=best_header_idx,
+    )
+
+
+def _rows_to_records(headers: list[str], rows: list[Any]) -> list[dict[str, Any]]:
     records: list[dict[str, Any]] = []
-    blank_rows_ignored = 0
     for row in rows:
         values = list(row)
         if all(is_blank(value) for value in values):
-            blank_rows_ignored += 1
             continue
         record: dict[str, Any] = {}
         for idx, header in enumerate(headers):
@@ -252,67 +230,7 @@ def _rows_to_records(headers: list[str], rows: list[Any]) -> tuple[list[dict[str
             record[header] = values[idx] if idx < len(values) else None
         if any(not is_blank(value) for value in record.values()):
             records.append(record)
-    return records, blank_rows_ignored
-
-
-def _xlsx_sheet_warnings(path: Path, sheet_name: str, header_row_index: int) -> tuple[list[int], list[str]]:
-    workbook = None
-    try:
-        workbook = openpyxl.load_workbook(path, read_only=False, data_only=False)
-        sheet = workbook[sheet_name]
-        data_start_excel_row = header_row_index + 2
-        hidden_rows = [
-            row_idx - header_row_index - 1
-            for row_idx, row_info in sheet.row_dimensions.items()
-            if row_idx >= data_start_excel_row and getattr(row_info, "hidden", False)
-        ]
-        formula_cells: list[str] = []
-        for row in sheet.iter_rows(min_row=data_start_excel_row):
-            for cell in row:
-                if cell.data_type == "f" or (
-                    isinstance(cell.value, str) and cell.value.startswith("=")
-                ):
-                    formula_cells.append(f"{get_column_letter(cell.column)}{cell.row}")
-                    if len(formula_cells) >= 25:
-                        return hidden_rows, formula_cells
-        return hidden_rows, formula_cells
-    except Exception:
-        return [], []
-    finally:
-        if workbook is not None:
-            workbook.close()
-
-
-def _xls_formula_cells(
-    book: xlrd.book.Book,
-    sheet: xlrd.sheet.Sheet,
-    header_row_index: int,
-) -> list[str]:
-    data = getattr(book, "filestr", None) or getattr(book, "mem", None)
-    if data is None:
-        return []
-
-    pos = getattr(sheet, "_position", None)
-    if pos is None:
-        return []
-
-    formula_cells: list[str] = []
-    try:
-        while pos + 4 <= len(data):
-            record_id, size = struct.unpack_from("<HH", data, pos)
-            pos += 4
-            if record_id == 0x0006 and size >= 20:  # BIFF FORMULA record
-                row_idx, col_idx, _xf_idx = struct.unpack_from("<HHH", data, pos)
-                if row_idx > header_row_index:
-                    formula_cells.append(f"{get_column_letter(col_idx + 1)}{row_idx + 1}")
-                    if len(formula_cells) >= 25:
-                        return formula_cells
-            pos += size
-            if record_id == 0x000A:  # EOF record for this sheet substream
-                break
-    except Exception:
-        return []
-    return formula_cells
+    return records
 
 
 def write_xls_from_template(
