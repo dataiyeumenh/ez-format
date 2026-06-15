@@ -11,6 +11,7 @@ const {
   createUser,
   getRevenue,
 } = require("../controllers/adminController");
+const { getAdminConversionRuns } = require("../controllers/conversionRunController");
 const {
   getAdminPlans,
   createPlan,
@@ -24,5 +25,6 @@ router.route("/users/:id").put(updateUser).delete(deleteUser);
 router.route("/plans").get(getAdminPlans).post(createPlan);
 router.route("/plans/:id").put(updatePlan);
 router.get("/revenue", getRevenue);
+router.get("/conversion-runs", getAdminConversionRuns);
 
 module.exports = router;

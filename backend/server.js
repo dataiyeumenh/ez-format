@@ -41,6 +41,7 @@ app.use("/api/auth", require("./routes/auth"));
 app.use("/api/plans", require("./routes/plans"));
 app.use("/api/admin", require("./routes/admin"));
 app.use("/api/convert", require("./routes/convert"));
+app.use("/api/conversion-runs", require("./routes/conversionRuns"));
 app.use("/api/payments", require("./routes/payments"));
 
 // Backward-compatible alias for older admin revenue bundles.

@@ -23,6 +23,7 @@ import ReconciliationPanel from "../components/ReconciliationPanel";
 import ValidationIssueTable from "../components/ValidationIssueTable";
 import ValidationReadinessCard from "../components/ValidationReadinessCard";
 import { useConverterApi } from "../hooks/useConverterApi";
+import api from "../services/api";
 
 const STATUS = {
   IDLE: "idle",
@@ -163,6 +164,7 @@ const ConvertPage = () => {
   const [validationReport, setValidationReport] = useState(null);
   const [acknowledgeWarnings, setAcknowledgeWarnings] = useState(false);
   const [profileId, setProfileId] = useState(null);
+  const [conversionRunId, setConversionRunId] = useState(null);
   const [focusedTarget, setFocusedTarget] = useState("");
 
   const inputRef = useRef(null);
@@ -357,8 +359,38 @@ const ConvertPage = () => {
     setValidationReport(null);
     setAcknowledgeWarnings(false);
     setProfileId(null);
+    setConversionRunId(null);
   };
 
+
+  const createConversionRunLog = async (file, templateId) => {
+    if (!localStorage.getItem("token")) return null;
+    try {
+      const { data } = await api.post("/conversion-runs", {
+        fileName: file.name,
+        fileSizeBytes: file.size,
+        targetTemplateId: templateId,
+      });
+      const runId = data.run?.id || null;
+      setConversionRunId(runId);
+      return runId;
+    } catch (err) {
+      console.warn("[ConvertPage] Cannot create conversion run log:", err);
+      return null;
+    }
+  };
+
+  const updateConversionRunLog = async (status, payload = {}, runId = conversionRunId) => {
+    if (!runId || !localStorage.getItem("token")) return;
+    try {
+      await api.patch(`/conversion-runs/${runId}/status`, {
+        status,
+        ...payload,
+      });
+    } catch (err) {
+      console.warn("[ConvertPage] Cannot update conversion run log:", err);
+    }
+  };
 
   const clearPreviewAfterMappingChange = () => {
     setPreviewHeaders([]);
@@ -446,6 +478,7 @@ const ConvertPage = () => {
     setConvStatus(STATUS.ANALYZING);
     setErrorMsg("");
     resetAnalysis();
+    const runId = await createConversionRunLog(file, templateId);
     try {
       const result = await analyzeFile(file, templateId);
       const suggestion = result.mapping_suggestion || {};
@@ -458,8 +491,21 @@ const ConvertPage = () => {
       setIssues(result.issues || []);
       setProfileId(suggestion.profile_id || null);
       setConvStatus(STATUS.MAPPING);
+      await updateConversionRunLog(
+        "processing",
+        {
+          converterUploadId: result.upload_id,
+          targetTemplateId: result.target_template_id || templateId,
+        },
+        runId,
+      );
     } catch (err) {
       console.error("[ConvertPage] Analyze failed:", err);
+      await updateConversionRunLog(
+        "failed",
+        { errorMessage: err.message || "Không thể phân tích file." },
+        runId,
+      );
       setErrorMsg(err.message || "Không thể phân tích file.");
       setConvStatus(STATUS.ERROR);
     }
@@ -521,6 +567,7 @@ const ConvertPage = () => {
     if (!analyzePayload?.upload_id) return;
     setConvStatus(STATUS.DOWNLOADING);
     setErrorMsg("");
+    let exportStarted = false;
     try {
       const report = validationReport || (await runValidation());
       const summary = report?.summary || {};
@@ -537,6 +584,7 @@ const ConvertPage = () => {
         }
       }
       const savedProfileId = await saveProfileIfNeeded();
+      exportStarted = true;
       const { blob, filename } = await exportConfirmed(
         analyzePayload.upload_id,
         savedProfileId,
@@ -553,9 +601,20 @@ const ConvertPage = () => {
       a.click();
       a.remove();
       window.URL.revokeObjectURL(url);
+      await updateConversionRunLog("completed", {
+        converterUploadId: analyzePayload.upload_id,
+        targetTemplateId,
+      });
       setConvStatus(STATUS.SUCCESS);
     } catch (err) {
       console.error("[ConvertPage] Download failed:", err);
+      if (exportStarted) {
+        await updateConversionRunLog("failed", {
+          converterUploadId: analyzePayload.upload_id,
+          targetTemplateId,
+          errorMessage: err.message || "Không thể tải file MISA.",
+        });
+      }
       setErrorMsg(err.message || "Không thể tải file MISA.");
       setConvStatus(previewRows.length ? STATUS.PREVIEW : STATUS.MAPPING);
     }
