@@ -1,28 +1,9 @@
-const nodemailer = require("nodemailer");
+// Gửi email qua SendGrid HTTP API (https, port 443) thay vì SMTP —
+// vì Render chặn outbound SMTP (port 25/465/587).
+const SENDGRID_ENDPOINT = "https://api.sendgrid.com/v3/mail/send";
 
-let transporter = null;
-
-// Đã cấu hình SMTP đủ để gửi thật?
 function isEmailConfigured() {
-  return Boolean(process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS);
-}
-
-function getTransporter() {
-  if (transporter) return transporter;
-  transporter = nodemailer.createTransport({
-    host: process.env.SMTP_HOST,
-    port: Number(process.env.SMTP_PORT || 587),
-    secure: String(process.env.SMTP_SECURE || "false") === "true",
-    auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
-    // Ép IPv4: Render (và nhiều PaaS) không có route IPv6 -> nếu để mặc định,
-    // smtp.gmail.com resolve ra IPv6 gây "ENETUNREACH". family:4 buộc dùng IPv4.
-    family: 4,
-    // Tránh treo vô hạn khi SMTP sai/bị chặn -> fail trong ~10-15s.
-    connectionTimeout: 10000,
-    greetingTimeout: 10000,
-    socketTimeout: 15000,
-  });
-  return transporter;
+  return Boolean(process.env.SENDGRID_API_KEY && process.env.SENDER_EMAIL);
 }
 
 function buildResetEmailHtml(resetUrl, name) {
@@ -42,36 +23,68 @@ function buildResetEmailHtml(resetUrl, name) {
   </div>`;
 }
 
+// fetch kèm timeout để không treo nếu SendGrid chậm.
+async function fetchWithTimeout(url, options, timeoutMs = 15000) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function sendPasswordResetEmail(to, resetUrl, name = "") {
   if (!isEmailConfigured()) {
-    // Dev fallback: SMTP chưa cấu hình -> log link ra console để test thủ công.
     console.warn(
-      `[emailService] SMTP CHƯA cấu hình (thiếu SMTP_HOST/SMTP_USER/SMTP_PASS). ` +
+      `[emailService] SendGrid CHƯA cấu hình (thiếu SENDGRID_API_KEY/SENDER_EMAIL). ` +
         `Email KHÔNG được gửi. Reset link cho ${to}:\n${resetUrl}`,
     );
     return { sent: false, reason: "not_configured" };
   }
-  const from = process.env.EMAIL_FROM || process.env.SMTP_USER;
+
   try {
-    await getTransporter().sendMail({
-      from,
-      to,
-      subject: "Đặt lại mật khẩu EzFormat",
-      html: buildResetEmailHtml(resetUrl, name),
+    const res = await fetchWithTimeout(SENDGRID_ENDPOINT, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${process.env.SENDGRID_API_KEY}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        personalizations: [{ to: [{ email: to }] }],
+        from: {
+          email: process.env.SENDER_EMAIL,
+          name: process.env.SENDER_NAME || "EzFormat",
+        },
+        subject: "Đặt lại mật khẩu EzFormat",
+        content: [{ type: "text/html", value: buildResetEmailHtml(resetUrl, name) }],
+      }),
     });
+
+    // SendGrid trả 202 Accepted khi nhận thành công.
+    if (res.status !== 202) {
+      const detail = await res.text().catch(() => "");
+      console.error(
+        `[emailService] SendGrid trả lỗi ${res.status} khi gửi tới ${to}: ${detail}`,
+      );
+      return { sent: false, reason: "send_failed", status: res.status };
+    }
     return { sent: true };
   } catch (err) {
-    // Log lỗi SMTP thật để debug (sai app password, sai host/port, bị chặn...).
     console.error(`[emailService] Gửi email thất bại tới ${to}:`, err.message);
     return { sent: false, reason: "send_failed", error: err.message };
   }
 }
 
-// Kiểm tra kết nối SMTP (gọi thủ công khi debug). Trả về { ok, error }.
+// Kiểm tra API key SendGrid (gọi thủ công khi debug). Trả về { ok, error }.
 async function verifyEmailTransport() {
   if (!isEmailConfigured()) return { ok: false, error: "not_configured" };
   try {
-    await getTransporter().verify();
+    const res = await fetchWithTimeout("https://api.sendgrid.com/v3/scopes", {
+      method: "GET",
+      headers: { Authorization: `Bearer ${process.env.SENDGRID_API_KEY}` },
+    });
+    if (!res.ok) return { ok: false, error: `HTTP ${res.status}` };
     return { ok: true };
   } catch (err) {
     return { ok: false, error: err.message };
