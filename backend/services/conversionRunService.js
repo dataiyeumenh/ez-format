@@ -1,4 +1,7 @@
-const VALID_STATUSES = new Set(["processing", "completed", "failed"]);
+const VALID_STATUSES = new Set(["processing", "completed", "failed", "cancelled"]);
+
+// Run "processing" quá ngưỡng này mà chưa hoàn tất -> coi như user đã hủy.
+const STALE_PROCESSING_MS = 5 * 60 * 60 * 1000; // 5 giờ
 
 function formatBytes(bytes) {
   const value = Number(bytes) || 0;
@@ -83,14 +86,16 @@ function summarizeConversionRuns(runs) {
       if (run.status === "completed") stats.completed += 1;
       else if (run.status === "failed") stats.failed += 1;
       else if (run.status === "processing") stats.processing += 1;
+      else if (run.status === "cancelled") stats.cancelled += 1;
       return stats;
     },
-    { total: 0, completed: 0, failed: 0, processing: 0 },
+    { total: 0, completed: 0, failed: 0, processing: 0, cancelled: 0 },
   );
 }
 
 module.exports = {
   VALID_STATUSES,
+  STALE_PROCESSING_MS,
   buildConversionRunFilter,
   formatBytes,
   serializeConversionRun,

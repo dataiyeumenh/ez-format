@@ -7,12 +7,14 @@ const statusLabels = {
   completed: "Hoàn thành",
   processing: "Đang xử lý",
   failed: "Lỗi",
+  cancelled: "Đã hủy",
 };
 
 const statusStyle = {
   completed: "bg-green-100 text-green-700",
   processing: "bg-yellow-100 text-yellow-700",
   failed: "bg-red-100 text-red-700",
+  cancelled: "bg-gray-200 text-gray-600",
 };
 
 const avatarColors = [
@@ -65,7 +67,7 @@ const FilesPage = () => {
   const [currentPage, setCurrentPage] = useState(1);
   const [status, setStatus] = useState("");
   const [runs, setRuns] = useState([]);
-  const [stats, setStats] = useState({ total: 0, completed: 0, failed: 0, processing: 0 });
+  const [stats, setStats] = useState({ total: 0, completed: 0, failed: 0, processing: 0, cancelled: 0 });
   const [totalPages, setTotalPages] = useState(1);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -82,7 +84,7 @@ const FilesPage = () => {
         },
       });
       setRuns(data.runs || []);
-      setStats(data.stats || { total: 0, completed: 0, failed: 0, processing: 0 });
+      setStats(data.stats || { total: 0, completed: 0, failed: 0, processing: 0, cancelled: 0 });
       setTotalPages(data.totalPages || 1);
     } catch (err) {
       setError(err.response?.data?.message || err.message || "Không thể tải lịch sử chuyển đổi.");
@@ -126,6 +128,13 @@ const FilesPage = () => {
         icon: "⟳",
         color: "text-yellow-600 bg-yellow-50",
       },
+      {
+        label: "Đã hủy",
+        value: stats.cancelled || 0,
+        change: "Quá 5 giờ chưa tải file",
+        icon: "⊘",
+        color: "text-gray-600 bg-gray-100",
+      },
     ],
     [stats],
   );
@@ -167,7 +176,7 @@ const FilesPage = () => {
           </button>
         </div>
 
-        <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+        <div className="grid grid-cols-2 lg:grid-cols-5 gap-4">
           {statCards.map((s) => (
             <div key={s.label} className="bg-white rounded-xl p-4 border border-gray-100">
               <div className="flex items-center justify-between mb-2">
@@ -197,6 +206,7 @@ const FilesPage = () => {
               <option value="completed">Hoàn thành</option>
               <option value="processing">Đang xử lý</option>
               <option value="failed">Lỗi</option>
+              <option value="cancelled">Đã hủy</option>
             </select>
             <button
               onClick={fetchRuns}

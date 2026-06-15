@@ -70,13 +70,15 @@ test("conversion run stats count statuses", () => {
     { status: "completed" },
     { status: "failed" },
     { status: "processing" },
+    { status: "cancelled" },
   ]);
 
   assert.deepEqual(stats, {
-    total: 4,
+    total: 5,
     completed: 2,
     failed: 1,
     processing: 1,
+    cancelled: 1,
   });
 });
 

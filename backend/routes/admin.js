@@ -13,6 +13,7 @@ const {
 } = require("../controllers/adminController");
 const { getAdminConversionRuns } = require("../controllers/conversionRunController");
 const { getAdminFeedback } = require("../controllers/feedbackController");
+const { getDashboard } = require("../controllers/dashboardController");
 const {
   getAdminPlans,
   createPlan,
@@ -28,5 +29,6 @@ router.route("/plans/:id").put(updatePlan);
 router.get("/revenue", getRevenue);
 router.get("/conversion-runs", getAdminConversionRuns);
 router.get("/feedback", getAdminFeedback);
+router.get("/dashboard", getDashboard);
 
 module.exports = router;

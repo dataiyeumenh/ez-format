@@ -58,9 +58,28 @@ const userSchema = new mongoose.Schema(
       default: 0,
       min: [0, "Số lượt file không được âm"],
     },
+    dailyFileCredit: {
+      type: Number,
+      default: 1,
+      min: [0, "Lượt miễn phí mỗi ngày không được âm"],
+    },
+    dailyFileCreditDate: {
+      type: String,
+      default: "",
+    },
     avatar: {
       type: String,
       default: "",
+    },
+    resetPasswordTokenHash: {
+      type: String,
+      default: null,
+      select: false,
+    },
+    resetPasswordExpires: {
+      type: Date,
+      default: null,
+      select: false,
     },
     isActive: {
       type: Boolean,

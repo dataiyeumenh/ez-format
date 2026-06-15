@@ -4,6 +4,11 @@ const User = require("../models/User");
 const { verifyGoogleCredential } = require("../services/googleAuth");
 const { normalizeSubscriptionState } = require("../services/subscriptionService");
 const { getDefaultFreePlan, serializePlan } = require("../services/planService");
+const {
+  generateResetToken,
+  hashToken,
+} = require("../services/passwordResetService");
+const { sendPasswordResetEmail } = require("../services/emailService");
 
 // Generate JWT
 const generateToken = (id, role) => {
@@ -21,8 +26,10 @@ const serializeUser = (user) => ({
   planStartedAt: user.planStartedAt,
   planExpiresAt: user.planExpiresAt,
   fileCredits: user.fileCredits,
+  dailyFileCredit: user.dailyFileCredit,
   avatar: user.avatar,
   authProvider: user.authProvider,
+  hasPassword: Boolean(user.password),
 });
 
 // @desc    Register user
@@ -105,6 +112,8 @@ const login = async (req, res) => {
     if (
       user.isModified("plan") ||
       user.isModified("fileCredits") ||
+      user.isModified("dailyFileCredit") ||
+      user.isModified("dailyFileCreditDate") ||
       user.isModified("planStartedAt") ||
       user.isModified("planExpiresAt")
     ) {
@@ -136,7 +145,7 @@ const googleLogin = async (req, res) => {
 
     let user = await User.findOne({
       $or: [{ googleId: googleProfile.googleId }, { email: googleProfile.email }],
-    });
+    }).select("+password");
 
     if (user) {
       if (!user.googleId) {
@@ -173,6 +182,8 @@ const googleLogin = async (req, res) => {
     if (
       user.isModified("plan") ||
       user.isModified("fileCredits") ||
+      user.isModified("dailyFileCredit") ||
+      user.isModified("dailyFileCreditDate") ||
       user.isModified("planStartedAt") ||
       user.isModified("planExpiresAt")
     ) {
@@ -202,12 +213,14 @@ const googleLogin = async (req, res) => {
 // @access  Private
 const getMe = async (req, res) => {
   try {
-    const user = await User.findById(req.user.id).populate("plan");
+    const user = await User.findById(req.user.id).select("+password").populate("plan");
     normalizeSubscriptionState(user);
     if (!user.plan) user.plan = (await getDefaultFreePlan())._id;
     if (
       user.isModified("plan") ||
       user.isModified("fileCredits") ||
+      user.isModified("dailyFileCredit") ||
+      user.isModified("dailyFileCreditDate") ||
       user.isModified("planStartedAt") ||
       user.isModified("planExpiresAt")
     ) {
@@ -228,4 +241,173 @@ const getMe = async (req, res) => {
   }
 };
 
-module.exports = { register, login, googleLogin, getMe };
+// Base URL của frontend để dựng link reset.
+// Ưu tiên Origin của request (nếu nằm trong allowlist) -> cùng 1 .env chạy được cả
+// local lẫn prod: gọi từ localhost -> link localhost, gọi từ prod -> link prod.
+function resolveFrontendBase(req) {
+  const allowed = [
+    process.env.FRONTEND_URL,
+    process.env.FRONTEND_URL_WWW,
+    "http://localhost:5173",
+    "http://localhost:3000",
+  ]
+    .filter(Boolean)
+    .map((u) => u.replace(/\/+$/, ""));
+
+  const origin = String(req.headers.origin || "").replace(/\/+$/, "");
+  if (origin && allowed.includes(origin)) return origin;
+
+  return String(process.env.FRONTEND_URL || "http://localhost:5173").replace(/\/+$/, "");
+}
+
+// @desc    Gửi email đặt lại mật khẩu
+// @route   POST /api/auth/forgot-password
+// @access  Public
+const forgotPassword = async (req, res) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) {
+    return res.status(400).json({ success: false, errors: errors.array() });
+  }
+
+  // Phản hồi chung — không tiết lộ email có tồn tại hay không (chống dò tài khoản).
+  const genericMessage =
+    "Nếu email tồn tại trong hệ thống, chúng tôi đã gửi hướng dẫn đặt lại mật khẩu.";
+
+  try {
+    const email = String(req.body.email || "").toLowerCase();
+    const user = await User.findOne({ email }).select("+password");
+
+    // Chỉ gửi cho tài khoản local có mật khẩu (tài khoản Google không áp dụng).
+    if (user && user.password) {
+      const { token, tokenHash, expiresAt } = generateResetToken();
+      user.resetPasswordTokenHash = tokenHash;
+      user.resetPasswordExpires = expiresAt;
+      await user.save({ validateBeforeSave: false });
+
+      const resetUrl = `${resolveFrontendBase(req)}/reset-password?token=${token}`;
+      await sendPasswordResetEmail(user.email, resetUrl, user.name);
+    }
+
+    return res.json({ success: true, message: genericMessage });
+  } catch (error) {
+    return res
+      .status(500)
+      .json({ success: false, message: "Lỗi server", error: error.message });
+  }
+};
+
+// @desc    Kiểm tra token đặt lại còn hợp lệ (cho trang reset hiển thị trạng thái)
+// @route   GET /api/auth/reset-password/validate
+// @access  Public
+const validateResetToken = async (req, res) => {
+  try {
+    const token = req.query.token;
+    if (!token) return res.json({ success: true, valid: false });
+    const user = await User.findOne({
+      resetPasswordTokenHash: hashToken(token),
+      resetPasswordExpires: { $gt: new Date() },
+    });
+    return res.json({ success: true, valid: Boolean(user) });
+  } catch (error) {
+    return res
+      .status(500)
+      .json({ success: false, message: "Lỗi server", error: error.message });
+  }
+};
+
+// @desc    Đặt lại mật khẩu bằng token
+// @route   POST /api/auth/reset-password
+// @access  Public
+const resetPassword = async (req, res) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) {
+    return res.status(400).json({ success: false, errors: errors.array() });
+  }
+
+  try {
+    const { token, password } = req.body;
+    if (!token) {
+      return res.status(400).json({ success: false, message: "Token không hợp lệ" });
+    }
+
+    const user = await User.findOne({
+      resetPasswordTokenHash: hashToken(token),
+      resetPasswordExpires: { $gt: new Date() },
+    }).select("+password");
+
+    if (!user) {
+      return res.status(400).json({
+        success: false,
+        message: "Liên kết đặt lại không hợp lệ hoặc đã hết hạn.",
+      });
+    }
+
+    user.password = password; // pre-save hook sẽ hash
+    user.resetPasswordTokenHash = undefined;
+    user.resetPasswordExpires = undefined;
+    await user.save();
+
+    return res.json({
+      success: true,
+      message: "Đặt lại mật khẩu thành công. Vui lòng đăng nhập lại.",
+    });
+  } catch (error) {
+    return res
+      .status(500)
+      .json({ success: false, message: "Lỗi server", error: error.message });
+  }
+};
+
+// @desc    Đổi mật khẩu (user đã đăng nhập)
+// @route   PUT /api/auth/change-password
+// @access  Private
+const changePassword = async (req, res) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) {
+    return res.status(400).json({ success: false, errors: errors.array() });
+  }
+
+  try {
+    const { currentPassword, newPassword } = req.body;
+    const user = await User.findById(req.user._id).select("+password");
+    if (!user) {
+      return res.status(404).json({ success: false, message: "Không tìm thấy người dùng" });
+    }
+
+    // Đã có mật khẩu (local, hoặc Google đã từng đặt) -> bắt buộc xác minh mật khẩu cũ.
+    // Chưa có mật khẩu (Google lần đầu) -> cho phép đặt mới mà không cần mật khẩu cũ.
+    if (user.password) {
+      if (!currentPassword) {
+        return res
+          .status(400)
+          .json({ success: false, message: "Vui lòng nhập mật khẩu hiện tại." });
+      }
+      const isMatch = await user.matchPassword(currentPassword);
+      if (!isMatch) {
+        return res
+          .status(400)
+          .json({ success: false, message: "Mật khẩu hiện tại không đúng." });
+      }
+    }
+
+    user.password = newPassword; // pre-save hook sẽ hash
+    await user.save();
+
+    return res.json({ success: true, message: "Đổi mật khẩu thành công." });
+  } catch (error) {
+    return res
+      .status(500)
+      .json({ success: false, message: "Lỗi server", error: error.message });
+  }
+};
+
+module.exports = {
+  register,
+  login,
+  googleLogin,
+  getMe,
+  forgotPassword,
+  validateResetToken,
+  resetPassword,
+  changePassword,
+};

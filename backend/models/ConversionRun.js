@@ -37,7 +37,7 @@ const conversionRunSchema = new mongoose.Schema(
     },
     status: {
       type: String,
-      enum: ["processing", "completed", "failed"],
+      enum: ["processing", "completed", "failed", "cancelled"],
       default: "processing",
       index: true,
     },

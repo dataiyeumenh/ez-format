@@ -1,9 +1,40 @@
 const ConversionRun = require("../models/ConversionRun");
+const User = require("../models/User");
 const {
   VALID_STATUSES,
+  STALE_PROCESSING_MS,
   buildConversionRunFilter,
   serializeConversionRun,
 } = require("../services/conversionRunService");
+const {
+  normalizeDailyFileCredit,
+  deductConversionCredit,
+} = require("../services/subscriptionService");
+
+// Trừ 1 lượt chuyển đổi của chủ run khi run hoàn tất (download thành công).
+async function deductCreditForCompletedRun(userId) {
+  const user = await User.findById(userId).populate("plan");
+  if (!user) return;
+  normalizeDailyFileCredit(user);
+  deductConversionCredit(user);
+  await user.save();
+}
+
+// Quét các run "processing" quá 5 giờ -> chuyển sang "cancelled"
+// (user upload nhưng không tải xuống nên không bao giờ completed).
+async function cancelStaleProcessingRuns() {
+  const cutoff = new Date(Date.now() - STALE_PROCESSING_MS);
+  await ConversionRun.updateMany(
+    { status: "processing", startedAt: { $lt: cutoff } },
+    {
+      $set: {
+        status: "cancelled",
+        completedAt: new Date(),
+        errorMessage: "Tự động hủy: quá 5 giờ chưa tải file MISA.",
+      },
+    },
+  );
+}
 
 function cleanFileName(fileName) {
   return String(fileName || "")
@@ -60,15 +91,26 @@ async function updateConversionRunStatus(req, res) {
       return res.status(403).json({ success: false, message: "Không có quyền cập nhật lịch sử này" });
     }
 
+    const wasCompleted = run.status === "completed";
     run.status = String(status);
     if (converterUploadId !== undefined) run.converterUploadId = String(converterUploadId || "");
     if (targetTemplateId !== undefined) run.targetTemplateId = String(targetTemplateId || "");
     if (errorMessage !== undefined) run.errorMessage = String(errorMessage || "").slice(0, 1000);
-    if (run.status === "completed" || run.status === "failed") {
+    if (
+      run.status === "completed" ||
+      run.status === "failed" ||
+      run.status === "cancelled"
+    ) {
       run.completedAt = new Date();
     }
 
     await run.save();
+
+    // Chỉ trừ lượt khi run chuyển sang "completed" lần đầu (tránh trừ lặp).
+    if (run.status === "completed" && !wasCompleted) {
+      await deductCreditForCompletedRun(run.user);
+    }
+
     await run.populate("user", "name email");
 
     res.json({ success: true, run: serializeConversionRun(run) });
@@ -79,6 +121,8 @@ async function updateConversionRunStatus(req, res) {
 
 async function getAdminConversionRuns(req, res) {
   try {
+    await cancelStaleProcessingRuns();
+
     const page = Math.max(1, parseInt(req.query.page, 10) || 1);
     const limit = Math.min(100, Math.max(1, parseInt(req.query.limit, 10) || 20));
     const skip = (page - 1) * limit;
@@ -89,18 +133,20 @@ async function getAdminConversionRuns(req, res) {
       to: req.query.to,
     });
 
-    const [total, runs, totalAll, completed, failed, processing] = await Promise.all([
-      ConversionRun.countDocuments(filter),
-      ConversionRun.find(filter)
-        .populate("user", "name email")
-        .sort({ createdAt: -1 })
-        .skip(skip)
-        .limit(limit),
-      ConversionRun.countDocuments(statsFilter),
-      ConversionRun.countDocuments({ ...statsFilter, status: "completed" }),
-      ConversionRun.countDocuments({ ...statsFilter, status: "failed" }),
-      ConversionRun.countDocuments({ ...statsFilter, status: "processing" }),
-    ]);
+    const [total, runs, totalAll, completed, failed, processing, cancelled] =
+      await Promise.all([
+        ConversionRun.countDocuments(filter),
+        ConversionRun.find(filter)
+          .populate("user", "name email")
+          .sort({ createdAt: -1 })
+          .skip(skip)
+          .limit(limit),
+        ConversionRun.countDocuments(statsFilter),
+        ConversionRun.countDocuments({ ...statsFilter, status: "completed" }),
+        ConversionRun.countDocuments({ ...statsFilter, status: "failed" }),
+        ConversionRun.countDocuments({ ...statsFilter, status: "processing" }),
+        ConversionRun.countDocuments({ ...statsFilter, status: "cancelled" }),
+      ]);
 
     res.json({
       success: true,
@@ -113,6 +159,7 @@ async function getAdminConversionRuns(req, res) {
         completed,
         failed,
         processing,
+        cancelled,
       },
       runs: runs.map(serializeConversionRun),
     });
