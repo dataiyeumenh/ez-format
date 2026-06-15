@@ -6,7 +6,7 @@ import {
   FileText,
   Package,
   BarChart2,
-  Activity,
+  MessageSquare,
   Settings,
   Bell,
   Search,
@@ -23,7 +23,7 @@ const navItems = [
   { icon: FileText, label: "Chuyển đổi file", path: "/admin/files" },
   { icon: Package, label: "Gói dịch vụ", path: "/admin/plans" },
   { icon: BarChart2, label: "Phân tích doanh thu", path: "/admin/revenue" },
-  { icon: Activity, label: "Nhật ký hoạt động", path: "/admin/logs" },
+  { icon: MessageSquare, label: "Góp ý", path: "/admin/logs" },
 ];
 
 const AdminLayout = ({ children, title: _title }) => {

@@ -1,9 +1,10 @@
 import { useState } from "react";
 import { Link, NavLink, useNavigate } from "react-router-dom";
 import { useAuth } from "../context/AuthContext";
-import { LogOut, Menu, X } from "lucide-react";
+import { LogOut, Menu, X, MessageSquarePlus } from "lucide-react";
 import ezFormatLogo from "../assets/ezformat-main-logo.png";
 import UserPlanBadge from "./UserPlanBadge";
+import FeedbackModal from "./FeedbackModal";
 
 const Logo = () => (
   <Link to="/" className="flex items-center gap-2.5 group">
@@ -29,6 +30,7 @@ const Navbar = () => {
   const [mobileOpen, setMobileOpen] = useState(false);
   const [userMenuOpen, setUserMenuOpen] = useState(false);
   const [logoutConfirmOpen, setLogoutConfirmOpen] = useState(false);
+  const [feedbackOpen, setFeedbackOpen] = useState(false);
 
   const closeMobile = () => setMobileOpen(false);
   const closeUserMenu = () => setUserMenuOpen(false);
@@ -132,6 +134,17 @@ const Navbar = () => {
                       >
                         Xem / nâng cấp gói
                       </Link>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          closeUserMenu();
+                          setFeedbackOpen(true);
+                        }}
+                        className="mt-1 flex w-full items-center gap-2 rounded-xl px-3 py-2 text-left text-sm font-semibold text-gray-700 hover:bg-gray-50"
+                      >
+                        <MessageSquarePlus size={16} className="text-gray-400" />
+                        Góp ý
+                      </button>
                     </div>
                   )}
                 </div>
@@ -216,6 +229,18 @@ const Navbar = () => {
                     >
                       Xem / nâng cấp gói
                     </Link>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        closeUserMenu();
+                        closeMobile();
+                        setFeedbackOpen(true);
+                      }}
+                      className="mt-1 flex w-full items-center gap-2 rounded-xl px-3 py-2 text-left text-sm font-semibold text-gray-700 hover:bg-gray-50"
+                    >
+                      <MessageSquarePlus size={16} className="text-gray-400" />
+                      Góp ý
+                    </button>
                   </div>
                 )}
               </div>
@@ -250,6 +275,8 @@ const Navbar = () => {
           )}
         </div>
       )}
+
+      <FeedbackModal open={feedbackOpen} onClose={() => setFeedbackOpen(false)} />
     </nav>
   );
 };
