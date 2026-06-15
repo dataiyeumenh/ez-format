@@ -14,6 +14,9 @@ function getTransporter() {
     port: Number(process.env.SMTP_PORT || 587),
     secure: String(process.env.SMTP_SECURE || "false") === "true",
     auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
+    // Ép IPv4: Render (và nhiều PaaS) không có route IPv6 -> nếu để mặc định,
+    // smtp.gmail.com resolve ra IPv6 gây "ENETUNREACH". family:4 buộc dùng IPv4.
+    family: 4,
     // Tránh treo vô hạn khi SMTP sai/bị chặn -> fail trong ~10-15s.
     connectionTimeout: 10000,
     greetingTimeout: 10000,
