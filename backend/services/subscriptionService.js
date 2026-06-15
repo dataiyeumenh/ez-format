@@ -139,9 +139,56 @@ function normalizeExpiredTimePlan(user, now = new Date()) {
   return user;
 }
 
+const VN_OFFSET_MS = 7 * 60 * 60 * 1000; // Việt Nam = UTC+7 (không có DST)
+
+// Ngày hiện tại theo giờ Việt Nam dưới dạng "YYYY-MM-DD".
+function vnDateString(date = new Date()) {
+  return new Date(date.getTime() + VN_OFFSET_MS).toISOString().slice(0, 10);
+}
+
+// Reset lượt miễn phí hằng ngày khi sang ngày mới (giờ VN).
+function normalizeDailyFileCredit(user, now = new Date()) {
+  if (!user) return user;
+  const today = vnDateString(now);
+  if (user.dailyFileCreditDate !== today) {
+    user.dailyFileCredit = 1;
+    user.dailyFileCreditDate = today;
+  }
+  return user;
+}
+
+function getUserPlanCode(user) {
+  const raw = user?.plan?.code ?? user?.plan;
+  return String(raw || "free").trim().toLowerCase();
+}
+
+// Trừ 1 lượt khi convert + tải thành công.
+// Free: trừ dailyFileCredit. PerFile: ưu tiên dailyFileCredit rồi tới fileCredits.
+// Plan khác (monthly/yearly): không trừ. Trả về true nếu plan thuộc diện quản lý lượt.
+function deductConversionCredit(user) {
+  const planCode = getUserPlanCode(user);
+  if (planCode === "perfile") {
+    if (Number(user.dailyFileCredit || 0) > 0) {
+      user.dailyFileCredit = Number(user.dailyFileCredit) - 1;
+    } else if (Number(user.fileCredits || 0) > 0) {
+      user.fileCredits = Number(user.fileCredits) - 1;
+      normalizeDepletedPerFilePlan(user);
+    }
+    return true;
+  }
+  if (planCode === "free") {
+    if (Number(user.dailyFileCredit || 0) > 0) {
+      user.dailyFileCredit = Number(user.dailyFileCredit) - 1;
+    }
+    return true;
+  }
+  return false;
+}
+
 function normalizeSubscriptionState(user, now = new Date()) {
   normalizeDepletedPerFilePlan(user);
   normalizeExpiredTimePlan(user, now);
+  normalizeDailyFileCredit(user, now);
   return user;
 }
 
@@ -151,5 +198,9 @@ module.exports = {
   normalizeDepletedPerFilePlan,
   normalizeExpiredTimePlan,
   normalizeSubscriptionState,
+  normalizeDailyFileCredit,
+  deductConversionCredit,
+  getUserPlanCode,
+  vnDateString,
   addDays,
 };

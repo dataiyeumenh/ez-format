@@ -17,6 +17,7 @@ from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.encoders import jsonable_encoder
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
+from starlette.concurrency import run_in_threadpool
 
 from app.ai_assistant import explain_validation_report, suggest_mapping_for_file
 from app.calculation_rules import allow_calculation_warnings, has_calculation_warnings
@@ -116,9 +117,11 @@ async def analyze_raw_upload(
     target_template_id: Annotated[str | None, Form()] = None,
 ) -> JSONResponse:
     try:
-        payload = analyze_upload(
+        content = await file.read()
+        payload = await run_in_threadpool(
+            analyze_upload,
             filename=file.filename or "upload.xlsx",
-            content=await file.read(),
+            content=content,
             requested_target_template_id=target_template_id,
         )
         return JSONResponse(jsonable_encoder(payload))
@@ -129,7 +132,8 @@ async def analyze_raw_upload(
 @app.post("/api/v1/mappings/preview")
 async def preview_misa_mapping(body: dict) -> JSONResponse:
     try:
-        payload = preview_mapping(
+        payload = await run_in_threadpool(
+            preview_mapping,
             upload_id=str(body["upload_id"]),
             target_template_id=str(body["target_template_id"]),
             mapping=body.get("mapping") or {},
@@ -146,7 +150,8 @@ async def preview_misa_mapping(body: dict) -> JSONResponse:
 @app.post("/api/v1/mappings/confirm")
 async def confirm_misa_mapping(body: dict) -> JSONResponse:
     try:
-        payload = confirm_mapping(
+        payload = await run_in_threadpool(
+            confirm_mapping,
             upload_id=str(body["upload_id"]),
             target_template_id=str(body["target_template_id"]),
             mapping=body.get("mapping") or {},
@@ -171,7 +176,7 @@ async def validate_conversion(
     workdir = _create_workdir()
     try:
         input_path = await _save_upload(file, workdir)
-        report = validate_file(input_path, conversion_type, option_payload)
+        report = await run_in_threadpool(validate_file, input_path, conversion_type, option_payload)
         return JSONResponse(report.model_dump(mode="json"))
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
@@ -188,7 +193,12 @@ async def preview_conversion(
     workdir = _create_workdir()
     try:
         input_path = await _save_upload(file, workdir)
-        headers, rows, report = preview_file(input_path, conversion_type, option_payload)
+        headers, rows, report = await run_in_threadpool(
+            preview_file,
+            input_path,
+            conversion_type,
+            option_payload,
+        )
         if not report.ok:
             return JSONResponse(status_code=422, content=report.model_dump(mode="json"))
         if has_calculation_warnings(report) and not allow_calculation_warnings(option_payload):
@@ -204,7 +214,8 @@ async def preview_conversion(
 async def export_conversion_rows(body: dict) -> Response:
     if "upload_id" in body and "profile_id" in body:
         try:
-            content, filename = export_confirmed_profile(
+            content, filename = await run_in_threadpool(
+                export_confirmed_profile,
                 upload_id=str(body["upload_id"]),
                 profile_id=str(body["profile_id"]),
             )
@@ -222,7 +233,8 @@ async def export_conversion_rows(body: dict) -> Response:
     workdir = _create_workdir()
     try:
         output_path = workdir / f"{legacy_body.conversion_type}_import.xls"
-        export_rows(
+        await run_in_threadpool(
+            export_rows,
             legacy_body.conversion_type,
             legacy_body.rows,
             output_path,
@@ -254,7 +266,12 @@ async def convert_conversion(
     try:
         input_path = await _save_upload(file, workdir)
         if option_payload.get("strict"):
-            strict_report = check_file_for_errors(input_path, conversion_type, option_payload)
+            strict_report = await run_in_threadpool(
+                check_file_for_errors,
+                input_path,
+                conversion_type,
+                option_payload,
+            )
             if strict_report.strict_blocked:
                 return JSONResponse(
                     status_code=422,
@@ -264,7 +281,13 @@ async def convert_conversion(
             option_payload["allow_calculation_warnings"] = True
 
         output_path = workdir / f"{conversion_type}_import.xls"
-        report = convert_file(input_path, conversion_type, output_path, option_payload)
+        report = await run_in_threadpool(
+            convert_file,
+            input_path,
+            conversion_type,
+            output_path,
+            option_payload,
+        )
         if not report.ok:
             return JSONResponse(status_code=422, content=report.model_dump(mode="json"))
         if has_calculation_warnings(report) and not allow_calculation_warnings(option_payload):
@@ -291,7 +314,12 @@ async def ai_mapping_suggestions(
     workdir = _create_workdir()
     try:
         input_path = await _save_upload(file, workdir)
-        response = suggest_mapping_for_file(input_path, conversion_type, option_payload)
+        response = await run_in_threadpool(
+            suggest_mapping_for_file,
+            input_path,
+            conversion_type,
+            option_payload,
+        )
         return JSONResponse(response.model_dump(mode="json"))
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
@@ -300,7 +328,7 @@ async def ai_mapping_suggestions(
 
 @app.post("/api/v1/ai/explain-validation")
 async def ai_explain_validation(report: ValidationReport) -> JSONResponse:
-    response = explain_validation_report(report)
+    response = await run_in_threadpool(explain_validation_report, report)
     return JSONResponse(response.model_dump(mode="json"))
 
 
@@ -314,7 +342,12 @@ async def ai_error_check(
     workdir = _create_workdir()
     try:
         input_path = await _save_upload(file, workdir)
-        response = check_file_for_errors(input_path, conversion_type, option_payload)
+        response = await run_in_threadpool(
+            check_file_for_errors,
+            input_path,
+            conversion_type,
+            option_payload,
+        )
         return JSONResponse(response.model_dump(mode="json"))
     finally:
         shutil.rmtree(workdir, ignore_errors=True)

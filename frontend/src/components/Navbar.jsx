@@ -1,9 +1,11 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Link, NavLink, useNavigate } from "react-router-dom";
 import { useAuth } from "../context/AuthContext";
 import { LogOut, Menu, X } from "lucide-react";
 import ezFormatLogo from "../assets/ezformat-main-logo.png";
 import UserPlanBadge from "./UserPlanBadge";
+import FeedbackModal from "./FeedbackModal";
+import ChangePasswordModal from "./ChangePasswordModal";
 
 const Logo = () => (
   <Link to="/" className="flex items-center gap-2.5 group">
@@ -29,13 +31,36 @@ const Navbar = () => {
   const [mobileOpen, setMobileOpen] = useState(false);
   const [userMenuOpen, setUserMenuOpen] = useState(false);
   const [logoutConfirmOpen, setLogoutConfirmOpen] = useState(false);
+  const [feedbackOpen, setFeedbackOpen] = useState(false);
+  const [changePwOpen, setChangePwOpen] = useState(false);
+  const menuRef = useRef(null);
 
   const closeMobile = () => setMobileOpen(false);
   const closeUserMenu = () => setUserMenuOpen(false);
 
-  const requestLogout = () => {
-    setLogoutConfirmOpen(true);
+  // 1 lúc chỉ 1 dropdown: mở user menu thì đóng popover đăng xuất và ngược lại.
+  const toggleUserMenu = () => {
+    setLogoutConfirmOpen(false);
+    setUserMenuOpen((open) => !open);
   };
+
+  const requestLogout = () => {
+    setUserMenuOpen(false);
+    setLogoutConfirmOpen((open) => !open);
+  };
+
+  // Click ra ngoài cụm menu desktop -> đóng mọi dropdown đang mở.
+  useEffect(() => {
+    if (!userMenuOpen && !logoutConfirmOpen) return undefined;
+    const handleClickOutside = (event) => {
+      if (menuRef.current && !menuRef.current.contains(event.target)) {
+        setUserMenuOpen(false);
+        setLogoutConfirmOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, [userMenuOpen, logoutConfirmOpen]);
 
   const handleLogout = () => {
     logout();
@@ -102,7 +127,7 @@ const Navbar = () => {
             </NavLink>
           </div>
 
-          <div className="hidden md:flex items-center gap-3">
+          <div className="hidden md:flex items-center gap-3" ref={menuRef}>
             {user ? (
               <>
                 {isAdmin() && (
@@ -113,7 +138,7 @@ const Navbar = () => {
                 <div className="relative">
                   <button
                     type="button"
-                    onClick={() => setUserMenuOpen((open) => !open)}
+                    onClick={toggleUserMenu}
                     className="max-w-[150px] truncate rounded-xl px-3 py-2 text-base font-medium text-gray-600 transition-colors hover:bg-gray-50 hover:text-gray-900"
                     aria-expanded={userMenuOpen}
                   >
@@ -132,6 +157,26 @@ const Navbar = () => {
                       >
                         Xem / nâng cấp gói
                       </Link>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          closeUserMenu();
+                          setChangePwOpen(true);
+                        }}
+                        className="mt-1 block w-full rounded-xl px-3 py-2 text-left text-sm font-semibold text-gray-700 hover:bg-gray-50"
+                      >
+                        Đổi mật khẩu
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          closeUserMenu();
+                          setFeedbackOpen(true);
+                        }}
+                        className="mt-1 block w-full rounded-xl px-3 py-2 text-left text-sm font-semibold text-gray-700 hover:bg-gray-50"
+                      >
+                        Góp ý
+                      </button>
                     </div>
                   )}
                 </div>
@@ -197,7 +242,7 @@ const Navbar = () => {
               <div className="py-2">
                 <button
                   type="button"
-                  onClick={() => setUserMenuOpen((open) => !open)}
+                  onClick={toggleUserMenu}
                   className="mb-2 w-full rounded-xl px-3 py-2 text-left text-sm font-semibold text-gray-700 hover:bg-gray-50"
                   aria-expanded={userMenuOpen}
                 >
@@ -216,6 +261,28 @@ const Navbar = () => {
                     >
                       Xem / nâng cấp gói
                     </Link>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        closeUserMenu();
+                        closeMobile();
+                        setChangePwOpen(true);
+                      }}
+                      className="mt-1 block w-full rounded-xl px-3 py-2 text-left text-sm font-semibold text-gray-700 hover:bg-gray-50"
+                    >
+                      Đổi mật khẩu
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        closeUserMenu();
+                        closeMobile();
+                        setFeedbackOpen(true);
+                      }}
+                      className="mt-1 block w-full rounded-xl px-3 py-2 text-left text-sm font-semibold text-gray-700 hover:bg-gray-50"
+                    >
+                      Góp ý
+                    </button>
                   </div>
                 )}
               </div>
@@ -250,6 +317,9 @@ const Navbar = () => {
           )}
         </div>
       )}
+
+      <FeedbackModal open={feedbackOpen} onClose={() => setFeedbackOpen(false)} />
+      <ChangePasswordModal open={changePwOpen} onClose={() => setChangePwOpen(false)} />
     </nav>
   );
 };

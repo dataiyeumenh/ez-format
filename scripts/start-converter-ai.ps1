@@ -20,7 +20,7 @@ $env:MAPPING_DB_PATH = Join-Path $RepoRoot "converter\data\mapping_profiles.sqli
 $env:AI_PROVIDER = "remote_http"
 $env:AI_BASE_URL = $AiBaseUrl
 $env:AI_TOKEN = (Get-Content -LiteralPath $TokenPath -Raw).Trim()
-$env:AI_TIMEOUT_SECONDS = "120"
+$env:AI_MAPPING_TIMEOUT_SECONDS = "15"
 $env:AI_REQUIRED = "false"
 
 Push-Location (Join-Path $RepoRoot "converter")

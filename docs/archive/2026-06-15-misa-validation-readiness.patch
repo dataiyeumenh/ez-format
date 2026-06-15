@@ -1,0 +1,3143 @@
+From de841674c2cf4335cddc0d24098cb157ec43da60 Mon Sep 17 00:00:00 2001
+From: Nguyen Tran Minh Quan <quanntm1206@gmail.com>
+Date: Mon, 15 Jun 2026 22:21:39 +0700
+Subject: [PATCH] feat(converter): add MISA validation readiness
+
+---
+ converter/app/excel_io.py                     |  166 ++-
+ converter/app/main.py                         |   60 +-
+ converter/app/misa_readiness.py               | 1092 +++++++++++++++++
+ converter/app/misa_workflow.py                |   57 +
+ converter/app/models.py                       |   92 +-
+ converter/app/rule_normalizers.py             |  124 ++
+ converter/app/rule_sources.py                 |   80 ++
+ converter/tests/test_e2e_extreme.py           |    4 +-
+ converter/tests/test_misa_profile_api.py      |    6 +-
+ converter/tests/test_misa_readiness.py        |  384 ++++++
+ converter/tests/test_misa_validate_api.py     |   97 ++
+ frontend/src/components/PreviewTable.jsx      |   58 +-
+ .../src/components/ReconciliationPanel.jsx    |   34 +
+ .../src/components/ValidationIssueTable.jsx   |   85 ++
+ .../components/ValidationReadinessCard.jsx    |   99 ++
+ frontend/src/hooks/useConverterApi.js         |   19 +-
+ frontend/src/pages/ConvertPage.jsx            |  155 ++-
+ 17 files changed, 2501 insertions(+), 111 deletions(-)
+ create mode 100644 converter/app/misa_readiness.py
+ create mode 100644 converter/app/rule_normalizers.py
+ create mode 100644 converter/app/rule_sources.py
+ create mode 100644 converter/tests/test_misa_readiness.py
+ create mode 100644 converter/tests/test_misa_validate_api.py
+ create mode 100644 frontend/src/components/ReconciliationPanel.jsx
+ create mode 100644 frontend/src/components/ValidationIssueTable.jsx
+ create mode 100644 frontend/src/components/ValidationReadinessCard.jsx
+
+diff --git a/converter/app/excel_io.py b/converter/app/excel_io.py
+index 7d6e513..676b58a 100644
+--- a/converter/app/excel_io.py
++++ b/converter/app/excel_io.py
+@@ -1,12 +1,14 @@
+ from __future__ import annotations
+ 
+-from dataclasses import dataclass
++from dataclasses import dataclass, field
+ from datetime import date, datetime
+ from itertools import islice
+ from pathlib import Path
+ from typing import Any
++import struct
+ 
+ import openpyxl
++from openpyxl.utils import get_column_letter
+ import xlrd
+ import xlwt
+ from xlutils.filter import XLWTWriter
+@@ -29,6 +31,9 @@ class InputTable:
+     rows: list[dict[str, Any]]
+     sheet_name: str | None = None
+     header_row_index: int = 0
++    hidden_rows: list[int] = field(default_factory=list)
++    formula_cells: list[str] = field(default_factory=list)
++    blank_rows_ignored: int = 0
+ 
+ 
+ @dataclass(frozen=True)
+@@ -154,15 +159,19 @@ def _read_xlsx(path: Path) -> InputTable:
+         headers = [
+             "" if value is None else str(value).strip() for value in header_row
+         ]
+-        records = _rows_to_records(
++        records, blank_rows_ignored = _rows_to_records(
+             headers,
+             sheet.iter_rows(min_row=best_header_idx + 2, values_only=True),
+         )
++        hidden_rows, formula_cells = _xlsx_sheet_warnings(path, best_name, best_header_idx)
+         return InputTable(
+             headers=headers,
+             rows=records,
+             sheet_name=best_name,
+             header_row_index=best_header_idx,
++            hidden_rows=hidden_rows,
++            formula_cells=formula_cells,
++            blank_rows_ignored=blank_rows_ignored,
+         )
+     finally:
+         workbook.close()
+@@ -170,58 +179,71 @@ def _read_xlsx(path: Path) -> InputTable:
+ 
+ def _read_xls(path: Path) -> InputTable:
+     try:
+-        book = xlrd.open_workbook(str(path), formatting_info=False)
++        book = xlrd.open_workbook(str(path), formatting_info=True, on_demand=True)
+     except xlrd.XLRDError as exc:
+         raise InputReadError("corrupt_xls", f"Corrupt or unsupported .xls file: {exc}") from exc
+     except Exception as exc:
+         raise InputReadError("corrupt_xls", f"Cannot read .xls file: {exc}") from exc
+ 
+-    best_name: str | None = None
+-    best_sheet: xlrd.sheet.Sheet | None = None
+-    best_score = (-1, -1)
+-    best_header_idx = 0
+-
+-    for sheet in book.sheets():
+-        rows = [
+-            [sheet.cell_value(row, col) for col in range(sheet.ncols)]
+-            for row in range(min(sheet.nrows, 30))
+-        ]
+-        if not rows:
+-            continue
+-        header_idx, score = score_header_rows(rows)
+-        if score > best_score:
+-            best_score = score
+-            best_name = sheet.name
+-            best_sheet = sheet
+-            best_header_idx = header_idx
++    try:
++        best_name: str | None = None
++        best_sheet: xlrd.sheet.Sheet | None = None
++        best_score = (-1, -1)
++        best_header_idx = 0
+ 
+-    if best_sheet is None:
+-        return InputTable(headers=[], rows=[], sheet_name=None, header_row_index=0)
++        for sheet in book.sheets():
++            rows = [
++                [sheet.cell_value(row, col) for col in range(sheet.ncols)]
++                for row in range(min(sheet.nrows, 30))
++            ]
++            if not rows:
++                continue
++            header_idx, score = score_header_rows(rows)
++            if score > best_score:
++                best_score = score
++                best_name = sheet.name
++                best_sheet = sheet
++                best_header_idx = header_idx
+ 
+-    headers = [
+-        "" if value is None else str(value).strip()
+-        for value in best_sheet.row_values(best_header_idx)
+-    ]
+-    records = _rows_to_records(
+-        headers,
+-        (
+-            [best_sheet.cell_value(row, col) for col in range(best_sheet.ncols)]
+-            for row in range(best_header_idx + 1, best_sheet.nrows)
+-        ),
+-    )
+-    return InputTable(
+-        headers=headers,
+-        rows=records,
+-        sheet_name=best_name,
+-        header_row_index=best_header_idx,
+-    )
++        if best_sheet is None:
++            return InputTable(headers=[], rows=[], sheet_name=None, header_row_index=0)
+ 
++        headers = [
++            "" if value is None else str(value).strip()
++            for value in best_sheet.row_values(best_header_idx)
++        ]
++        records, blank_rows_ignored = _rows_to_records(
++            headers,
++            (
++                [best_sheet.cell_value(row, col) for col in range(best_sheet.ncols)]
++                for row in range(best_header_idx + 1, best_sheet.nrows)
++            ),
++        )
++        hidden_rows = [
++            row_idx - best_header_idx
++            for row_idx, row_info in getattr(best_sheet, "rowinfo_map", {}).items()
++            if row_idx > best_header_idx and getattr(row_info, "hidden", 0)
++        ]
++        formula_cells = _xls_formula_cells(book, best_sheet, best_header_idx)
++        return InputTable(
++            headers=headers,
++            rows=records,
++            sheet_name=best_name,
++            header_row_index=best_header_idx,
++            hidden_rows=hidden_rows,
++            formula_cells=formula_cells,
++            blank_rows_ignored=blank_rows_ignored,
++        )
++    finally:
++        book.release_resources()
+ 
+-def _rows_to_records(headers: list[str], rows: list[Any]) -> list[dict[str, Any]]:
++def _rows_to_records(headers: list[str], rows: list[Any]) -> tuple[list[dict[str, Any]], int]:
+     records: list[dict[str, Any]] = []
++    blank_rows_ignored = 0
+     for row in rows:
+         values = list(row)
+         if all(is_blank(value) for value in values):
++            blank_rows_ignored += 1
+             continue
+         record: dict[str, Any] = {}
+         for idx, header in enumerate(headers):
+@@ -230,7 +252,67 @@ def _rows_to_records(headers: list[str], rows: list[Any]) -> list[dict[str, Any]
+             record[header] = values[idx] if idx < len(values) else None
+         if any(not is_blank(value) for value in record.values()):
+             records.append(record)
+-    return records
++    return records, blank_rows_ignored
++
++
++def _xlsx_sheet_warnings(path: Path, sheet_name: str, header_row_index: int) -> tuple[list[int], list[str]]:
++    workbook = None
++    try:
++        workbook = openpyxl.load_workbook(path, read_only=False, data_only=False)
++        sheet = workbook[sheet_name]
++        data_start_excel_row = header_row_index + 2
++        hidden_rows = [
++            row_idx - header_row_index - 1
++            for row_idx, row_info in sheet.row_dimensions.items()
++            if row_idx >= data_start_excel_row and getattr(row_info, "hidden", False)
++        ]
++        formula_cells: list[str] = []
++        for row in sheet.iter_rows(min_row=data_start_excel_row):
++            for cell in row:
++                if cell.data_type == "f" or (
++                    isinstance(cell.value, str) and cell.value.startswith("=")
++                ):
++                    formula_cells.append(f"{get_column_letter(cell.column)}{cell.row}")
++                    if len(formula_cells) >= 25:
++                        return hidden_rows, formula_cells
++        return hidden_rows, formula_cells
++    except Exception:
++        return [], []
++    finally:
++        if workbook is not None:
++            workbook.close()
++
++
++def _xls_formula_cells(
++    book: xlrd.book.Book,
++    sheet: xlrd.sheet.Sheet,
++    header_row_index: int,
++) -> list[str]:
++    data = getattr(book, "filestr", None) or getattr(book, "mem", None)
++    if data is None:
++        return []
++
++    pos = getattr(sheet, "_position", None)
++    if pos is None:
++        return []
++
++    formula_cells: list[str] = []
++    try:
++        while pos + 4 <= len(data):
++            record_id, size = struct.unpack_from("<HH", data, pos)
++            pos += 4
++            if record_id == 0x0006 and size >= 20:  # BIFF FORMULA record
++                row_idx, col_idx, _xf_idx = struct.unpack_from("<HHH", data, pos)
++                if row_idx > header_row_index:
++                    formula_cells.append(f"{get_column_letter(col_idx + 1)}{row_idx + 1}")
++                    if len(formula_cells) >= 25:
++                        return formula_cells
++            pos += size
++            if record_id == 0x000A:  # EOF record for this sheet substream
++                break
++    except Exception:
++        return []
++    return formula_cells
+ 
+ 
+ def write_xls_from_template(
+diff --git a/converter/app/main.py b/converter/app/main.py
+index 288cfaf..5c66cd1 100644
+--- a/converter/app/main.py
++++ b/converter/app/main.py
+@@ -17,6 +17,7 @@ from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+ from fastapi.encoders import jsonable_encoder
+ from fastapi.middleware.cors import CORSMiddleware
+ from fastapi.responses import JSONResponse, Response
++from pydantic import ValidationError
+ from starlette.concurrency import run_in_threadpool
+ 
+ from app.ai_assistant import explain_validation_report, suggest_mapping_for_file
+@@ -31,8 +32,16 @@ from app.misa_workflow import (
+     export_confirmed_profile,
+     preview_mapping,
+     templates_payload,
++    validate_confirmed_profile,
++    validate_current_mapping,
++)
++from app.models import (
++    ExportConfirmedProfileRequest,
++    ExportRowsRequest,
++    MappingValidateRequest,
++    PreviewResponse,
++    ValidationReport,
+ )
+-from app.models import ExportRowsRequest, PreviewResponse, ValidationReport
+ 
+ 
+ app = FastAPI(title="EzFormat Converter API")
+@@ -166,6 +175,30 @@ async def confirm_misa_mapping(body: dict) -> JSONResponse:
+         raise HTTPException(status_code=400, detail=str(exc)) from exc
+ 
+ 
++@app.post("/api/v1/mappings/validate")
++async def validate_misa_mapping(body: dict) -> JSONResponse:
++    try:
++        request = MappingValidateRequest.model_validate(body)
++        report = await run_in_threadpool(
++            validate_current_mapping,
++            upload_id=request.upload_id,
++            target_template_id=request.target_template_id,
++            mapping=request.mapping,
++            defaults=request.defaults,
++            formulas=request.formulas,
++            accounting_regime=request.accounting_regime,
++            fiscal_year_start=request.fiscal_year_start,
++            vat_policy=request.vat_policy,
++        )
++        return JSONResponse(jsonable_encoder(report))
++    except KeyError as exc:
++        raise HTTPException(status_code=404, detail=str(exc)) from exc
++    except ValidationError as exc:
++        raise HTTPException(status_code=422, detail=exc.errors()) from exc
++    except ValueError as exc:
++        raise HTTPException(status_code=400, detail=str(exc)) from exc
++
++
+ @app.post("/api/v1/conversions/validate")
+ async def validate_conversion(
+     conversion_type: Annotated[str, Form()],
+@@ -214,13 +247,34 @@ async def preview_conversion(
+ async def export_conversion_rows(body: dict) -> Response:
+     if "upload_id" in body and "profile_id" in body:
+         try:
++            request = ExportConfirmedProfileRequest.model_validate(body)
++            report = await run_in_threadpool(
++                validate_confirmed_profile,
++                request.upload_id,
++                request.profile_id,
++                accounting_regime=request.accounting_regime,
++                fiscal_year_start=request.fiscal_year_start,
++                vat_policy=request.vat_policy,
++            )
++            if report.summary.fatal or report.summary.blocker:
++                return JSONResponse(
++                    status_code=422,
++                    content={"detail": jsonable_encoder(report)},
++                )
++            if report.summary.warning and not request.acknowledge_warnings:
++                return JSONResponse(
++                    status_code=422,
++                    content={"detail": jsonable_encoder(report)},
++                )
+             content, filename = await run_in_threadpool(
+                 export_confirmed_profile,
+-                upload_id=str(body["upload_id"]),
+-                profile_id=str(body["profile_id"]),
++                upload_id=request.upload_id,
++                profile_id=request.profile_id,
+             )
+         except KeyError as exc:
+             raise HTTPException(status_code=404, detail=str(exc)) from exc
++        except ValidationError as exc:
++            raise HTTPException(status_code=422, detail=exc.errors()) from exc
+         except ValueError as exc:
+             raise HTTPException(status_code=400, detail=str(exc)) from exc
+         return Response(
+diff --git a/converter/app/misa_readiness.py b/converter/app/misa_readiness.py
+new file mode 100644
+index 0000000..562283c
+--- /dev/null
++++ b/converter/app/misa_readiness.py
+@@ -0,0 +1,1092 @@
++from __future__ import annotations
++
++from dataclasses import dataclass
++from datetime import date
++from decimal import Decimal
++from typing import Any
++import uuid
++import re
++
++from app.conversion_types import CONVERSION_TYPES
++from app.models import (
++    IssueExplanation,
++    MisaReadinessReport,
++    MisaValidationIssue,
++    MisaValidationSummary,
++    ReconciliationReport,
++    VatPolicy,
++)
++from app.rule_normalizers import (
++    is_blank_value,
++    normalize_key,
++    normalize_text,
++    parse_decimal_value,
++    parse_vat_rate,
++    parse_vietnamese_date,
++    round_money,
++)
++from app.rule_sources import LEGAL_DISCLAIMER, MISA_IMPORT_REQUIRED, VAT_8_WINDOW, VAT_LAW
++
++
++MONEY_TOLERANCE = Decimal("1")
++MAX_REPORTED_ISSUES = 250
++SUPPORTED_VAT_RATES = {Decimal("0"), Decimal("0.05"), Decimal("0.08"), Decimal("0.10")}
++
++
++@dataclass
++class _IssueCollector:
++    counts: dict[str, int]
++    issues: list[MisaValidationIssue]
++
++    def add(self, issue: MisaValidationIssue) -> None:
++        self.counts[issue.severity] += 1
++        if len(self.issues) < MAX_REPORTED_ISSUES:
++            self.issues.append(issue)
++
++
++def validate_misa_readiness(
++    *,
++    input_rows: int,
++    target_template_id: str,
++    target_headers: list[str],
++    mapping: dict[str, Any],
++    defaults: dict[str, Any] | None,
++    formulas: dict[str, str] | None,
++    output_rows: list[dict[str, Any]],
++    source_headers: list[str] | None = None,
++    hidden_rows: list[int] | None = None,
++    formula_cells: list[str] | None = None,
++    blank_rows_ignored: int = 0,
++    accounting_regime: str | None = None,
++    fiscal_year_start: str | None = None,
++    vat_policy: VatPolicy | dict[str, Any] | None = None,
++) -> MisaReadinessReport:
++    del accounting_regime, fiscal_year_start  # reserved for later COA/regime rules
++    defaults = defaults or {}
++    formulas = formulas or {}
++    policy = _coerce_vat_policy(vat_policy)
++    collector = _IssueCollector(
++        counts={"fatal": 0, "blocker": 0, "warning": 0, "info": 0},
++        issues=[],
++    )
++
++    required_headers = _required_headers(target_template_id, target_headers)
++    mapped_targets = _mapped_targets(mapping)
++    for header in required_headers:
++        if header not in mapped_targets and header not in defaults and header not in formulas:
++            collector.add(
++                _issue(
++                    severity="blocker",
++                    category="template",
++                    code="required_mapping_missing",
++                    message=f"Thiếu thiết lập cho cột bắt buộc '{header}'.",
++                    field=header,
++                    source_url=MISA_IMPORT_REQUIRED.url,
++                    explanation=IssueExplanation(
++                        why="Trong template MISA, cột có (*) hoặc cột bắt buộc phải có nguồn dữ liệu.",
++                        impact="Nếu thiếu, file import có thể bị MISA từ chối hoặc sai chứng từ.",
++                        fix="Chọn cột raw, nhập default hoặc công thức cho cột bắt buộc này.",
++                    ),
++                )
++            )
++
++    active_rows = [
++        (index, row)
++        for index, row in enumerate(output_rows, start=1)
++        if any(not is_blank_value(value) for value in row.values())
++    ]
++
++    for row_number, row in active_rows:
++        for header in required_headers:
++            if is_blank_value(row.get(header)):
++                collector.add(
++                    _issue(
++                        severity="blocker",
++                        category="template",
++                        code="required_value_blank",
++                        message=f"Dòng {row_number} thiếu giá trị cho cột bắt buộc '{header}'.",
++                        row=row_number,
++                        field=header,
++                        invoice=_invoice(row, target_headers),
++                        source_url=MISA_IMPORT_REQUIRED.url,
++                        explanation=IssueExplanation(
++                            why="Cột bắt buộc của MISA không được để trống ở dòng dữ liệu đang import.",
++                            impact="MISA có thể chặn import hoặc tạo chứng từ thiếu thông tin.",
++                            fix="Bổ sung mapping/default/formula hoặc sửa dữ liệu nguồn cho dòng này.",
++                        ),
++                    )
++                )
++
++    _check_workbook_warnings(
++        collector,
++        hidden_rows=hidden_rows or [],
++        formula_cells=formula_cells or [],
++        blank_rows_ignored=blank_rows_ignored,
++    )
++    _check_normalization_infos(collector, active_rows, target_headers)
++    _check_row_values(collector, active_rows, target_headers, policy)
++    reconciliation = _reconcile(
++        input_rows=input_rows,
++        output_rows=output_rows,
++        target_headers=target_headers,
++        source_headers=source_headers or [],
++        mapping=mapping,
++    )
++    summary = MisaValidationSummary(**collector.counts)
++    status = _status(summary)
++    if reconciliation.unmapped_columns:
++        collector.add(
++            _issue(
++                severity="warning",
++                category="mapping",
++                code="unused_source_columns",
++                message="Một số cột nguồn chưa được dùng trong mapping.",
++                actual=len(reconciliation.unmapped_columns),
++                explanation=IssueExplanation(
++                    why="File nguồn có cột không được đưa vào template MISA.",
++                    impact="Có thể bình thường, nhưng cũng có thể bỏ sót thông tin quan trọng.",
++                    fix="Kiểm tra danh sách cột chưa dùng trong phần đối chiếu nhanh.",
++                ),
++            )
++        )
++        summary = MisaValidationSummary(**collector.counts)
++        status = _status(summary)
++
++    return MisaReadinessReport(
++        validation_run_id=str(uuid.uuid4()),
++        ok=status == "ready",
++        status=status,
++        score=_score(summary),
++        summary=summary,
++        issues=collector.issues,
++        reconciliation=reconciliation,
++        legal_disclaimer=LEGAL_DISCLAIMER,
++    )
++
++
++def _check_row_values(
++    collector: _IssueCollector,
++    active_rows: list[tuple[int, dict[str, Any]]],
++    target_headers: list[str],
++    vat_policy: VatPolicy,
++) -> None:
++    header = _header_lookup(target_headers)
++    date_header = _first_header(header, "ngay_chung_tu", "ngay_hach_toan", "ngay_hoa_don")
++    quantity_header = _first_header(header, "so_luong")
++    unit_price_header = _first_header(header, "don_gia")
++    discount_header = _first_header(header, "tien_chiet_khau", "chiet_khau")
++    amount_header = _first_header(header, "thanh_tien")
++    vat_rate_header = _first_header(
++        header,
++        "thue_suat_gtgt",
++        "thue_gtgt",
++        "percent_thue_gtgt",
++        "vat_percent",
++        "vat",
++    )
++    vat_amount_header = _first_header(header, "tien_thue_gtgt", "tien_thue")
++    total_header = _first_header(header, "tong_tien_thanh_toan", "tong_tien", "khach_can_tra")
++    buyer_tax_header = _first_header(header, "ma_so_thue", "mst", "ma_so_thue_nguoi_mua")
++    vat8_warning_added = False
++    vat5_warning_added = False
++    buyer_tax_warning_added = False
++    negative_warning_added = False
++    zero_price_warning_added = False
++    account_pattern_warning_added = False
++
++    for row_number, row in active_rows:
++        invoice = _invoice(row, target_headers)
++        _check_dates(collector, row_number, row, invoice, target_headers)
++
++        quantity = _parse_number_cell(collector, row_number, row, quantity_header, invoice)
++        unit_price = _parse_number_cell(collector, row_number, row, unit_price_header, invoice)
++        discount = _parse_number_cell(collector, row_number, row, discount_header, invoice) or Decimal("0")
++        amount = _parse_number_cell(collector, row_number, row, amount_header, invoice)
++        vat_amount = _parse_number_cell(collector, row_number, row, vat_amount_header, invoice)
++        total = _parse_number_cell(collector, row_number, row, total_header, invoice)
++
++        if quantity is not None and unit_price is not None and amount is not None:
++            gross_amount = round_money(quantity * unit_price)
++            net_amount = round_money(quantity * unit_price - discount)
++            if _outside_tolerance(gross_amount, amount) and _outside_tolerance(net_amount, amount):
++                collector.add(
++                    _issue(
++                        severity="blocker",
++                        category="calculation",
++                        code="line_amount_mismatch",
++                        message="Thành tiền không khớp với Số lượng × Đơn giá - Chiết khấu.",
++                        row=row_number,
++                        field=amount_header,
++                        invoice=invoice,
++                        expected=_fmt(net_amount if discount else gross_amount),
++                        actual=_fmt(amount),
++                        delta=_fmt(amount - (net_amount if discount else gross_amount)),
++                        explanation=IssueExplanation(
++                            why="Đây là kiểm tra toán học quyết định, không phụ thuộc phán đoán nghiệp vụ.",
++                            impact="Nếu giữ nguyên, tổng tiền hoặc thuế có thể bị sai.",
++                            fix="Kiểm tra lại Số lượng, Đơn giá, Chiết khấu hoặc Thành tiền.",
++                        ),
++                    )
++                )
++
++        numeric_values = [
++            (quantity_header, quantity),
++            (unit_price_header, unit_price),
++            (discount_header, discount if discount != 0 else None),
++            (amount_header, amount),
++            (vat_amount_header, vat_amount),
++            (total_header, total),
++        ]
++        if not negative_warning_added:
++            negative = next(((field, value) for field, value in numeric_values if value is not None and value < 0), None)
++            if negative:
++                negative_warning_added = True
++                collector.add(
++                    _issue(
++                        severity="warning",
++                        category="business",
++                        code="negative_amount_context_unclear",
++                        message="Có giá trị âm, cần kiểm tra đây là hàng trả/giảm trừ hay lỗi dữ liệu.",
++                        row=row_number,
++                        field=negative[0],
++                        invoice=invoice,
++                        actual=_fmt(negative[1]),
++                        explanation=IssueExplanation(
++                            why="Giá trị âm có thể hợp lệ trong nghiệp vụ điều chỉnh, nhưng không thể tự kết luận.",
++                            impact="Nếu âm sai ngữ cảnh, doanh thu/tồn kho/thuế có thể bị đảo dấu.",
++                            fix="Kiểm tra loại chứng từ và nghiệp vụ phát sinh.",
++                        ),
++                    )
++                )
++        if (
++            not zero_price_warning_added
++            and quantity is not None
++            and quantity > 0
++            and ((unit_price is not None and unit_price == 0) or (amount is not None and amount == 0))
++        ):
++            zero_price_warning_added = True
++            collector.add(
++                _issue(
++                    severity="warning",
++                    category="business",
++                    code="zero_price_promotion_unclear",
++                    message="Có dòng số lượng > 0 nhưng đơn giá/thành tiền bằng 0.",
++                    row=row_number,
++                    field=unit_price_header or amount_header,
++                    invoice=invoice,
++                    explanation=IssueExplanation(
++                        why="Dòng giá 0 có thể là hàng khuyến mại hoặc lỗi mapping/đơn giá.",
++                        impact="Nếu không đúng nghiệp vụ, doanh thu và giá vốn có thể lệch.",
++                        fix="Xác nhận đây là hàng khuyến mại hoặc sửa lại đơn giá/thành tiền.",
++                    ),
++                )
++            )
++
++        if (
++            buyer_tax_header
++            and not buyer_tax_warning_added
++            and is_blank_value(row.get(buyer_tax_header))
++        ):
++            buyer_tax_warning_added = True
++            collector.add(
++                _issue(
++                    severity="warning",
++                    category="tax",
++                    code="buyer_tax_code_missing_optional",
++                    message="Mã số thuế người mua đang trống, cần kiểm tra nếu xuất hóa đơn cho doanh nghiệp.",
++                    row=row_number,
++                    field=buyer_tax_header,
++                    invoice=invoice,
++                    explanation=IssueExplanation(
++                        why="Mã số thuế có thể không bắt buộc với khách lẻ, nhưng quan trọng với khách doanh nghiệp.",
++                        impact="Thiếu MST có thể làm hóa đơn/đối soát khách hàng chưa đủ thông tin.",
++                        fix="Bổ sung MST nếu người mua là tổ chức/doanh nghiệp.",
++                    ),
++                )
++            )
++
++        transaction_date = parse_vietnamese_date(row.get(date_header)) if date_header else None
++        vat_rate = _parse_vat_cell(collector, row_number, row, vat_rate_header, invoice)
++        if vat_rate == "NON_TAXABLE":
++            if vat_amount is not None and vat_amount != 0:
++                _add_vat_mismatch(
++                    collector, row_number, vat_amount_header, invoice, Decimal("0"), vat_amount
++                )
++        elif isinstance(vat_rate, Decimal):
++            if vat_rate not in SUPPORTED_VAT_RATES:
++                collector.add(
++                    _issue(
++                        severity="blocker",
++                        category="vat",
++                        code="vat_rate_unsupported",
++                        message="Thuế suất GTGT không thuộc nhóm hỗ trợ: 0%, 5%, 8%, 10% hoặc KCT.",
++                        row=row_number,
++                        field=vat_rate_header,
++                        invoice=invoice,
++                        expected="0%, 5%, 8%, 10%, KCT",
++                        actual=str(row.get(vat_rate_header)),
++                        source_url=VAT_LAW.url,
++                        explanation=IssueExplanation(
++                            why="MVP chỉ cho phép các thuế suất GTGT phổ biến đã cấu hình.",
++                            impact="Thuế suất lạ có thể làm sai tiền thuế hoặc cần rule riêng.",
++                            fix="Kiểm tra lại cột thuế suất hoặc cấu hình thêm rule nếu doanh nghiệp có trường hợp đặc biệt.",
++                        ),
++                    )
++                )
++            elif vat_rate == Decimal("0.08"):
++                if not vat_policy.allow_8_percent:
++                    collector.add(
++                        _issue(
++                            severity="blocker",
++                            category="vat",
++                            code="vat_8_not_allowed_by_policy",
++                            message="Thuế suất 8% không được bật trong cấu hình kiểm tra hiện tại.",
++                            row=row_number,
++                            field=vat_rate_header,
++                            invoice=invoice,
++                            source_url=VAT_8_WINDOW.url,
++                            explanation=IssueExplanation(
++                                why="Cấu hình vat_policy.allow_8_percent=false nghĩa là không cho phép dùng chính sách 8%.",
++                                impact="Export có thể dùng thuế suất không phù hợp với cấu hình doanh nghiệp.",
++                                fix="Bật allow_8_percent nếu doanh nghiệp áp dụng chính sách giảm thuế, hoặc sửa thuế suất.",
++                            ),
++                        )
++                    )
++                elif _date_outside_policy(transaction_date, vat_policy):
++                    collector.add(
++                        _issue(
++                            severity="blocker",
++                            category="vat",
++                            code="vat_8_outside_policy_window",
++                            message="Thuế suất 8% nằm ngoài thời gian chính sách giảm thuế đã cấu hình.",
++                            row=row_number,
++                            field=vat_rate_header,
++                            invoice=invoice,
++                            source_url=VAT_8_WINDOW.url,
++                            explanation=IssueExplanation(
++                                why="MVP chỉ chấp nhận 8% trong khoảng hiệu lực đã cấu hình.",
++                                impact="Có rủi ro dùng sai thuế suất theo ngày chứng từ.",
++                                fix="Kiểm tra ngày chứng từ hoặc cấu hình vat_policy.",
++                            ),
++                        )
++                    )
++                elif vat_policy.allow_8_percent and not vat8_warning_added:
++                    vat8_warning_added = True
++                    collector.add(
++                        _issue(
++                            severity="warning",
++                            category="vat",
++                            code="vat_8_eligibility_uncertain",
++                            message="Thuế suất 8% cần kiểm tra điều kiện hàng hóa/dịch vụ được giảm thuế.",
++                            row=row_number,
++                            field=vat_rate_header,
++                            invoice=invoice,
++                            source_url=VAT_8_WINDOW.url,
++                            explanation=IssueExplanation(
++                                why="8% là chính sách giảm từ 10% cho nhóm đủ điều kiện, app không tự phân loại mặt hàng.",
++                                impact="Nếu mặt hàng không đủ điều kiện, doanh nghiệp có thể kê khai sai thuế suất.",
++                                fix="Kế toán kiểm tra nhóm hàng hóa/dịch vụ trước khi xác nhận cảnh báo.",
++                            ),
++                        )
++                    )
++            elif vat_rate == Decimal("0.05") and not vat5_warning_added:
++                vat5_warning_added = True
++                collector.add(
++                    _issue(
++                        severity="warning",
++                        category="vat",
++                        code="vat_5_category_uncertain",
++                        message="Thuế suất 5% cần kiểm tra nhóm hàng hóa/dịch vụ áp dụng.",
++                        row=row_number,
++                        field=vat_rate_header,
++                        invoice=invoice,
++                        source_url=VAT_LAW.url,
++                        explanation=IssueExplanation(
++                            why="App không tự phân loại hàng hóa/dịch vụ để kết luận chắc chắn thuế suất 5%.",
++                            impact="Nếu mặt hàng không thuộc nhóm 5%, kê khai thuế có thể sai.",
++                            fix="Kế toán kiểm tra danh mục hàng hóa/dịch vụ và quy định thuế trước khi xác nhận.",
++                        ),
++                    )
++                )
++            if amount is not None and vat_amount is not None:
++                expected_vat = round_money(amount * vat_rate)
++                if _outside_tolerance(expected_vat, vat_amount):
++                    _add_vat_mismatch(
++                        collector, row_number, vat_amount_header, invoice, expected_vat, vat_amount
++                    )
++
++        if amount is not None and vat_amount is not None and total is not None:
++            expected_total = round_money(amount + vat_amount)
++            if _outside_tolerance(expected_total, total):
++                collector.add(
++                    _issue(
++                        severity="blocker",
++                        category="calculation",
++                        code="total_amount_mismatch",
++                        message="Tổng tiền thanh toán không khớp với Thành tiền + Tiền thuế GTGT.",
++                        row=row_number,
++                        field=total_header,
++                        invoice=invoice,
++                        expected=_fmt(expected_total),
++                        actual=_fmt(total),
++                        delta=_fmt(total - expected_total),
++                        explanation=IssueExplanation(
++                            why="Đây là đối chiếu tổng tiền theo các cột đã có trong file.",
++                            impact="Số tiền phải thu/phải trả có thể sai.",
++                            fix="Kiểm tra Thành tiền, Tiền thuế GTGT hoặc Tổng tiền.",
++                        ),
++                    )
++                )
++
++        if not account_pattern_warning_added:
++            unusual_account = _first_unusual_account(row, target_headers)
++            if unusual_account:
++                account_pattern_warning_added = True
++                account_header, account_value = unusual_account
++                collector.add(
++                    _issue(
++                        severity="warning",
++                        category="accounting",
++                        code="account_pattern_unusual",
++                        message="Tài khoản kế toán có định dạng khác thường.",
++                        row=row_number,
++                        field=account_header,
++                        invoice=invoice,
++                        actual=str(account_value),
++                        explanation=IssueExplanation(
++                            why="MVP chỉ kiểm tra pattern cơ bản vì chưa có danh mục tài khoản doanh nghiệp.",
++                            impact="Có thể là tài khoản nhập sai hoặc tài khoản nội bộ cần cấu hình thêm.",
++                            fix="Kiểm tra lại mã tài khoản hoặc nạp COA/danh mục tài khoản để kiểm tra chặt hơn.",
++                        ),
++                    )
++                )
++
++    _check_invoice_header_conflicts(collector, active_rows, target_headers)
++    _check_mixed_tax_rates(collector, active_rows, target_headers)
++    _check_duplicates(collector, active_rows, target_headers)
++
++
++def _check_workbook_warnings(
++    collector: _IssueCollector,
++    *,
++    hidden_rows: list[int],
++    formula_cells: list[str],
++    blank_rows_ignored: int,
++) -> None:
++    if hidden_rows:
++        collector.add(
++            _issue(
++                severity="warning",
++                category="workbook",
++                code="hidden_rows_detected",
++                message="File nguồn có dòng bị ẩn.",
++                row=hidden_rows[0],
++                actual=len(hidden_rows),
++                explanation=IssueExplanation(
++                    why="Dòng ẩn có thể vẫn được đọc và import nếu có dữ liệu.",
++                    impact="Có thể import cả dữ liệu người dùng không nhìn thấy trên Excel.",
++                    fix="Mở file nguồn và kiểm tra các dòng đang bị ẩn.",
++                ),
++            )
++        )
++    if formula_cells:
++        collector.add(
++            _issue(
++                severity="warning",
++                category="workbook",
++                code="formula_cell_used",
++                message="File nguồn có ô công thức; cần kiểm tra giá trị trước khi import.",
++                field=formula_cells[0],
++                actual=len(formula_cells),
++                explanation=IssueExplanation(
++                    why="Công thức có thể thay đổi khi mở file hoặc khi thiếu workbook liên kết.",
++                    impact="Giá trị import có thể khác với kỳ vọng nếu công thức chưa tính đúng.",
++                    fix="Kiểm tra công thức hoặc paste values trước khi upload.",
++                ),
++            )
++        )
++    if blank_rows_ignored:
++        collector.add(
++            _issue(
++                severity="info",
++                category="workbook",
++                code="blank_row_ignored",
++                message="Đã bỏ qua dòng trống trong file nguồn.",
++                actual=blank_rows_ignored,
++                explanation=IssueExplanation(
++                    why="Dòng trống không tạo dữ liệu MISA.",
++                    impact="Không ảnh hưởng nếu đó là dòng phân cách.",
++                    fix="Không cần sửa nếu số dòng dữ liệu đầu ra khớp kỳ vọng.",
++                ),
++            )
++        )
++
++
++def _check_normalization_infos(
++    collector: _IssueCollector,
++    active_rows: list[tuple[int, dict[str, Any]]],
++    target_headers: list[str],
++) -> None:
++    reported: set[str] = set()
++    date_fields = {
++        header
++        for header in target_headers
++        if "ngay" in normalize_key(header) or "han_su_dung" in normalize_key(header)
++    }
++
++    for row_number, row in active_rows:
++        for field, value in row.items():
++            if not isinstance(value, str):
++                continue
++
++            normalized = normalize_text(value)
++            if normalized != value and "text_trimmed" not in reported:
++                reported.add("text_trimmed")
++                collector.add(
++                    _issue(
++                        severity="info",
++                        category="normalization",
++                        code="text_trimmed",
++                        message="Có giá trị text đã được chuẩn hóa khoảng trắng.",
++                        row=row_number,
++                        field=field,
++                        expected=normalized,
++                        actual=value,
++                        explanation=IssueExplanation(
++                            why="Khoảng trắng thừa có thể làm sai mã hoặc tên khi đối chiếu.",
++                            impact="Không chặn export; chỉ thông báo cách validator hiểu dữ liệu.",
++                            fix="Nếu mã/tên bị sai, sửa lại dữ liệu nguồn hoặc mapping.",
++                        ),
++                    )
++                )
++
++            if field in date_fields:
++                parsed_date = parse_vietnamese_date(value)
++                if (
++                    parsed_date is not None
++                    and normalized != parsed_date.isoformat()
++                    and "date_normalized" not in reported
++                ):
++                    reported.add("date_normalized")
++                    collector.add(
++                        _issue(
++                            severity="info",
++                            category="normalization",
++                            code="date_normalized",
++                            message="Có ngày được đọc và chuẩn hóa để kiểm tra.",
++                            row=row_number,
++                            field=field,
++                            expected=parsed_date.isoformat(),
++                            actual=value,
++                            explanation=IssueExplanation(
++                                why="Validator cần đưa ngày về dạng chuẩn để so sánh kỳ hạn/chính sách.",
++                                impact="Không chặn export; chỉ thông báo cách hệ thống hiểu giá trị ngày.",
++                                fix="Nếu ngày hệ thống hiểu sai, sửa định dạng ngày trong file nguồn.",
++                            ),
++                        )
++                    )
++
++            if _looks_like_number_text(value):
++                parsed_number = parse_decimal_value(value)
++                if (
++                    parsed_number is not None
++                    and normalized != str(parsed_number)
++                    and "number_normalized" not in reported
++                ):
++                    reported.add("number_normalized")
++                    collector.add(
++                        _issue(
++                            severity="info",
++                            category="normalization",
++                            code="number_normalized",
++                            message="Có số được đọc và chuẩn hóa để kiểm tra.",
++                            row=row_number,
++                            field=field,
++                            expected=str(parsed_number),
++                            actual=value,
++                            explanation=IssueExplanation(
++                                why="Validator cần chuẩn hóa dấu phân tách nghìn/thập phân trước khi tính toán.",
++                                impact="Không chặn export; chỉ thông báo cách hệ thống hiểu giá trị số.",
++                                fix="Nếu số hệ thống hiểu sai, sửa định dạng số trong file nguồn.",
++                            ),
++                        )
++                    )
++
++            if {"text_trimmed", "date_normalized", "number_normalized"}.issubset(reported):
++                return
++
++
++def _looks_like_number_text(value: str) -> bool:
++    text = normalize_text(value).lower()
++    return bool(re.fullmatch(r"\(?-?\d[\d\s,.\u00a0]*(\))?(\s*(đ|vnd|vnđ))?", text))
++
++
++def _check_dates(
++    collector: _IssueCollector,
++    row_number: int,
++    row: dict[str, Any],
++    invoice: str | None,
++    target_headers: list[str],
++) -> None:
++    for header in target_headers:
++        key = normalize_key(header)
++        if "ngay" not in key or is_blank_value(row.get(header)):
++            continue
++        parsed_date = parse_vietnamese_date(row.get(header))
++        if parsed_date is None:
++            collector.add(
++                _issue(
++                    severity="blocker",
++                    category="format",
++                    code="date_unparseable",
++                    message=f"Không đọc được ngày ở cột '{header}'.",
++                    row=row_number,
++                    field=header,
++                    invoice=invoice,
++                    actual=str(row.get(header)),
++                    explanation=IssueExplanation(
++                        why="Ngày phải đọc được theo serial Excel, dd/mm/yyyy, dd-mm-yyyy hoặc yyyy-mm-dd.",
++                        impact="Ngày chứng từ/hạch toán sai có thể làm sai kỳ kế toán.",
++                        fix="Sửa lại định dạng ngày trong file nguồn hoặc mapping.",
++                    ),
++                )
++            )
++        elif parsed_date > date.today():
++            collector.add(
++                _issue(
++                    severity="warning",
++                    category="business",
++                    code="future_date",
++                    message=f"Ngày ở cột '{header}' nằm trong tương lai.",
++                    row=row_number,
++                    field=header,
++                    invoice=invoice,
++                    actual=parsed_date.isoformat(),
++                    explanation=IssueExplanation(
++                        why="Ngày tương lai có thể hợp lệ với đơn đặt trước, nhưng thường là lỗi nhập liệu.",
++                        impact="Có thể hạch toán sai kỳ hoặc chưa đến ngày phát sinh.",
++                        fix="Kiểm tra lại ngày chứng từ/hạch toán.",
++                    ),
++                )
++            )
++
++
++def _parse_number_cell(
++    collector: _IssueCollector,
++    row_number: int,
++    row: dict[str, Any],
++    header: str | None,
++    invoice: str | None,
++) -> Decimal | None:
++    if not header or is_blank_value(row.get(header)):
++        return None
++    parsed = parse_decimal_value(row.get(header))
++    if parsed is None:
++        collector.add(
++            _issue(
++                severity="blocker",
++                category="format",
++                code="number_unparseable",
++                message=f"Không đọc được số ở cột '{header}'.",
++                row=row_number,
++                field=header,
++                invoice=invoice,
++                actual=str(row.get(header)),
++                explanation=IssueExplanation(
++                    why="Các cột tiền/số lượng phải chuyển được sang số trước khi tính toán.",
++                    impact="Không thể đối chiếu công thức và có thể export sai số tiền.",
++                    fix="Sửa ký tự lạ hoặc định dạng số trong file nguồn.",
++                ),
++            )
++        )
++    return parsed
++
++
++def _parse_vat_cell(
++    collector: _IssueCollector,
++    row_number: int,
++    row: dict[str, Any],
++    header: str | None,
++    invoice: str | None,
++) -> Decimal | str | None:
++    if not header or is_blank_value(row.get(header)):
++        return None
++    parsed = parse_vat_rate(row.get(header))
++    if parsed is None:
++        collector.add(
++            _issue(
++                severity="blocker",
++                category="vat",
++                code="vat_rate_unsupported",
++                message="Không đọc được thuế suất GTGT.",
++                row=row_number,
++                field=header,
++                invoice=invoice,
++                expected="0%, 5%, 8%, 10%, KCT",
++                actual=str(row.get(header)),
++                source_url=VAT_LAW.url,
++            )
++        )
++    return parsed
++
++
++def _add_vat_mismatch(
++    collector: _IssueCollector,
++    row_number: int,
++    field: str | None,
++    invoice: str | None,
++    expected: Decimal,
++    actual: Decimal,
++) -> None:
++    collector.add(
++        _issue(
++            severity="blocker",
++            category="vat",
++            code="vat_amount_mismatch",
++            message="Tiền thuế GTGT không khớp với Thành tiền × Thuế suất.",
++            row=row_number,
++            field=field,
++            invoice=invoice,
++            expected=_fmt(expected),
++            actual=_fmt(actual),
++            delta=_fmt(actual - expected),
++            source_url=VAT_LAW.url,
++            explanation=IssueExplanation(
++                why="Tiền thuế GTGT phải được tính từ giá tính thuế nhân với thuế suất.",
++                impact="Nếu giữ nguyên, tổng tiền hóa đơn hoặc dữ liệu import có thể sai.",
++                fix="Kiểm tra lại Thành tiền, Thuế suất hoặc Tiền thuế GTGT.",
++            ),
++        )
++    )
++
++
++def _check_duplicates(
++    collector: _IssueCollector,
++    active_rows: list[tuple[int, dict[str, Any]]],
++    target_headers: list[str],
++) -> None:
++    lookup = _header_lookup(target_headers)
++    seller_tax_header = _first_header(lookup, "ma_so_thue_nguoi_ban", "mst_nguoi_ban")
++    symbol_header = _first_header(lookup, "ky_hieu_hoa_don", "mau_so_ky_hieu")
++    invoice_header = _first_header(lookup, "so_hoa_don")
++    strong_key_available = bool(seller_tax_header and symbol_header and invoice_header)
++    if not active_rows:
++        return
++    if not strong_key_available:
++        _check_possible_duplicate_without_strong_key(collector, active_rows)
++        return
++
++    line_fields = [
++        _first_header(lookup, "ma_hang", "ma_hang_hoa"),
++        _first_header(lookup, "ten_hang", "ten_hang_hoa"),
++        _first_header(lookup, "so_luong"),
++        _first_header(lookup, "don_gia"),
++    ]
++    line_fields = [field for field in line_fields if field]
++    amount_fields = [
++        _first_header(lookup, "thanh_tien"),
++        _first_header(lookup, "tien_thue_gtgt", "tien_thue"),
++        _first_header(lookup, "tong_tien_thanh_toan", "tong_tien"),
++    ]
++    amount_fields = [field for field in amount_fields if field]
++    if not line_fields or not amount_fields:
++        return
++
++    seen: dict[str, dict[tuple[str, ...], tuple[int, tuple[str, ...]]]] = {}
++    for row_number, row in active_rows:
++        key_parts = [
++            str(row.get(seller_tax_header) or "").strip(),
++            str(row.get(symbol_header) or "").strip(),
++            str(row.get(invoice_header) or "").strip(),
++        ]
++        if any(not part for part in key_parts):
++            continue
++        invoice = "|".join(key_parts)
++        line_fingerprint = tuple(str(row.get(field) or "").strip() for field in line_fields)
++        amount_fingerprint = tuple(str(row.get(field) or "").strip() for field in amount_fields)
++        previous = seen.setdefault(invoice, {}).get(line_fingerprint)
++        if previous and previous[1] != amount_fingerprint:
++            collector.add(
++                _issue(
++                    severity="blocker",
++                    category="document",
++                    code="duplicate_invoice_key",
++                    message="Trùng khóa chứng từ và dòng hàng nhưng số tiền khác nhau.",
++                    row=row_number,
++                    field=invoice_header,
++                    invoice=invoice,
++                    actual=invoice,
++                    explanation=IssueExplanation(
++                        why="Cùng một khóa chứng từ và cùng dòng hàng xuất hiện với số tiền khác nhau trong một lần import.",
++                        impact="Có thể tạo chứng từ trùng hoặc sai chi tiết.",
++                        fix="Kiểm tra lại số chứng từ hoặc tách/ghép chứng từ đúng nghiệp vụ.",
++                    ),
++                )
++            )
++        else:
++            seen[invoice][line_fingerprint] = (row_number, amount_fingerprint)
++
++
++def _check_possible_duplicate_without_strong_key(
++    collector: _IssueCollector,
++    active_rows: list[tuple[int, dict[str, Any]]],
++) -> None:
++    seen_fingerprints: dict[str, int] = {}
++    for row_number, row in active_rows:
++        fingerprint = repr(
++            sorted((key, str(value)) for key, value in row.items() if not is_blank_value(value))
++        )
++        if fingerprint in seen_fingerprints:
++            collector.add(
++                _issue(
++                    severity="warning",
++                    category="document",
++                    code="possible_duplicate",
++                    message="Có dòng giống nhau nhưng thiếu khóa hóa đơn/chứng từ để kết luận trùng chắc chắn.",
++                    row=row_number,
++                    explanation=IssueExplanation(
++                        why="Không đủ khóa mạnh nên chỉ cảnh báo khả năng trùng.",
++                        impact="Có thể import lặp dòng nếu đây không phải nghiệp vụ hợp lệ.",
++                        fix="Kiểm tra lại dòng trùng hoặc bổ sung số hóa đơn/ký hiệu/MST người bán nếu có.",
++                    ),
++                )
++            )
++            return
++        seen_fingerprints[fingerprint] = row_number
++
++
++def _check_invoice_header_conflicts(
++    collector: _IssueCollector,
++    active_rows: list[tuple[int, dict[str, Any]]],
++    target_headers: list[str],
++) -> None:
++    lookup = _header_lookup(target_headers)
++    invoice_header = _first_header(lookup, "so_chung_tu", "so_hoa_don")
++    if not invoice_header:
++        return
++    header_fields = [
++        _first_header(lookup, "ngay_chung_tu", "ngay_hoa_don"),
++        _first_header(lookup, "ngay_hach_toan"),
++        _first_header(lookup, "ma_khach_hang", "ma_nha_cung_cap"),
++        _first_header(lookup, "ten_khach_hang", "ten_nha_cung_cap"),
++        _first_header(lookup, "ma_so_thue", "mst"),
++    ]
++    header_fields = [field for field in header_fields if field]
++    if not header_fields:
++        return
++    seen: dict[str, tuple[int, tuple[str, ...]]] = {}
++    for row_number, row in active_rows:
++        invoice = str(row.get(invoice_header) or "").strip()
++        if not invoice:
++            continue
++        fingerprint = tuple(str(row.get(field) or "").strip() for field in header_fields)
++        previous = seen.get(invoice)
++        if previous and previous[1] != fingerprint:
++            collector.add(
++                _issue(
++                    severity="blocker",
++                    category="document",
++                    code="invoice_header_conflict",
++                    message="Cùng số chứng từ nhưng thông tin header hóa đơn khác nhau.",
++                    row=row_number,
++                    field=invoice_header,
++                    invoice=invoice,
++                    explanation=IssueExplanation(
++                        why="Một chứng từ không nên có ngày/khách hàng/MST khác nhau giữa các dòng.",
++                        impact="Import có thể tạo chứng từ sai header hoặc gộp nhầm dòng.",
++                        fix="Kiểm tra lại số chứng từ, ngày và thông tin khách hàng/nhà cung cấp.",
++                    ),
++                )
++            )
++        else:
++            seen[invoice] = (row_number, fingerprint)
++
++
++def _first_unusual_account(row: dict[str, Any], target_headers: list[str]) -> tuple[str, Any] | None:
++    for header in target_headers:
++        key = normalize_key(header)
++        if not key.startswith("tk"):
++            continue
++        value = row.get(header)
++        if is_blank_value(value):
++            continue
++        text = str(value).strip()
++        if not re.fullmatch(r"\d{3,}(?:\.\d+)?", text):
++            return header, value
++    return None
++
++
++def _check_mixed_tax_rates(
++    collector: _IssueCollector,
++    active_rows: list[tuple[int, dict[str, Any]]],
++    target_headers: list[str],
++) -> None:
++    lookup = _header_lookup(target_headers)
++    if _first_header(lookup, "percent_thue_suat_khac", "thue_suat_khac"):
++        return
++    invoice_header = _first_header(lookup, "so_chung_tu", "so_hoa_don")
++    vat_rate_header = _first_header(
++        lookup,
++        "thue_suat_gtgt",
++        "thue_gtgt",
++        "percent_thue_gtgt",
++        "vat_percent",
++        "vat",
++    )
++    if not invoice_header or not vat_rate_header:
++        return
++    rates_by_invoice: dict[str, set[str]] = {}
++    first_row_by_invoice: dict[str, int] = {}
++    for row_number, row in active_rows:
++        invoice = str(row.get(invoice_header) or "").strip()
++        if not invoice:
++            continue
++        rate = parse_vat_rate(row.get(vat_rate_header))
++        if rate is None:
++            continue
++        rates_by_invoice.setdefault(invoice, set()).add(str(rate))
++        first_row_by_invoice.setdefault(invoice, row_number)
++    for invoice, rates in rates_by_invoice.items():
++        if len(rates) > 1:
++            collector.add(
++                _issue(
++                    severity="blocker",
++                    category="vat",
++                    code="one_tax_template_mixed_rates",
++                    message="Một chứng từ có nhiều thuế suất nhưng template không có cột thuế suất khác.",
++                    row=first_row_by_invoice.get(invoice),
++                    field=vat_rate_header,
++                    invoice=invoice,
++                    actual=", ".join(sorted(rates)),
++                    explanation=IssueExplanation(
++                        why="Template một thuế suất không biểu diễn rõ nhiều mức thuế trên cùng chứng từ.",
++                        impact="Tiền thuế hoặc dòng thuế có thể import sai.",
++                        fix="Tách chứng từ theo thuế suất hoặc chọn template/cấu hình hỗ trợ nhiều thuế suất.",
++                    ),
++                )
++            )
++
++
++def _reconcile(
++    *,
++    input_rows: int,
++    output_rows: list[dict[str, Any]],
++    target_headers: list[str],
++    source_headers: list[str],
++    mapping: dict[str, Any],
++) -> ReconciliationReport:
++    header = _header_lookup(target_headers)
++    invoice_header = _first_header(header, "so_chung_tu", "so_hoa_don")
++    amount_header = _first_header(header, "thanh_tien")
++    vat_header = _first_header(header, "tien_thue_gtgt", "tien_thue")
++    total_header = _first_header(header, "tong_tien_thanh_toan", "tong_tien", "khach_can_tra")
++    mapped_sources = {str(key) for key in mapping}
++    return ReconciliationReport(
++        input_rows=input_rows,
++        output_rows=len(output_rows),
++        invoice_count=len({str(row.get(invoice_header)) for row in output_rows if invoice_header and row.get(invoice_header)}),
++        sum_amount=_fmt(_sum_column(output_rows, amount_header)) if amount_header else None,
++        sum_vat=_fmt(_sum_column(output_rows, vat_header)) if vat_header else None,
++        sum_total=_fmt(_sum_column(output_rows, total_header)) if total_header else None,
++        unmapped_columns=[header for header in source_headers if header not in mapped_sources],
++    )
++
++
++def _required_headers(target_template_id: str, target_headers: list[str]) -> list[str]:
++    required = {header for header in target_headers if "(*)" in header}
++    definition = CONVERSION_TYPES.get(target_template_id)
++    if definition:
++        required.update(header for header in definition.required_output_headers if header in target_headers)
++    return [header for header in target_headers if header in required]
++
++
++def _mapped_targets(mapping: dict[str, Any]) -> set[str]:
++    targets: set[str] = set()
++    for target in mapping.values():
++        if isinstance(target, list):
++            targets.update(str(item) for item in target)
++        else:
++            targets.add(str(target))
++    return targets
++
++
++def _invoice(row: dict[str, Any], target_headers: list[str]) -> str | None:
++    header = _first_header(_header_lookup(target_headers), "so_chung_tu", "so_hoa_don")
++    value = row.get(header) if header else None
++    if is_blank_value(value):
++        return None
++    return str(value).strip()
++
++
++def _header_lookup(headers: list[str]) -> dict[str, str]:
++    return {normalize_key(header): header for header in headers}
++
++
++def _first_header(lookup: dict[str, str], *keys: str) -> str | None:
++    for key in keys:
++        if key in lookup:
++            return lookup[key]
++    return None
++
++
++def _sum_column(rows: list[dict[str, Any]], header: str | None) -> Decimal:
++    if not header:
++        return Decimal("0")
++    total = Decimal("0")
++    for row in rows:
++        value = parse_decimal_value(row.get(header))
++        if value is not None:
++            total += value
++    return total
++
++
++def _status(summary: MisaValidationSummary) -> str:
++    if summary.fatal:
++        return "fatal"
++    if summary.blocker:
++        return "blocked"
++    if summary.warning:
++        return "needs_review"
++    return "ready"
++
++
++def _score(summary: MisaValidationSummary) -> int:
++    score = 100 - summary.fatal * 40 - summary.blocker * 15 - summary.warning * 5
++    return max(0, min(100, score))
++
++
++def _outside_tolerance(expected: Decimal, actual: Decimal) -> bool:
++    return abs(actual - expected) > MONEY_TOLERANCE
++
++
++def _date_outside_policy(transaction_date: date | None, policy: VatPolicy) -> bool:
++    if transaction_date is None:
++        return False
++    start = parse_vietnamese_date(policy.effective_from)
++    end = parse_vietnamese_date(policy.effective_to)
++    if start and transaction_date < start:
++        return True
++    if end and transaction_date > end:
++        return True
++    return False
++
++
++def _coerce_vat_policy(policy: VatPolicy | dict[str, Any] | None) -> VatPolicy:
++    if isinstance(policy, VatPolicy):
++        return policy
++    if isinstance(policy, dict):
++        return VatPolicy.model_validate(policy)
++    return VatPolicy()
++
++
++def _fmt(value: Decimal | None) -> str | None:
++    if value is None:
++        return None
++    normalized = value.normalize()
++    if normalized == normalized.to_integral():
++        return str(normalized.quantize(Decimal("1")))
++    return format(normalized, "f")
++
++
++def _issue(**kwargs: Any) -> MisaValidationIssue:
++    return MisaValidationIssue(**kwargs)
+diff --git a/converter/app/misa_workflow.py b/converter/app/misa_workflow.py
+index 3a919a9..917c548 100644
+--- a/converter/app/misa_workflow.py
++++ b/converter/app/misa_workflow.py
+@@ -29,7 +29,9 @@ from app.misa_mapping import (
+     validate_mapping,
+ )
+ from app.misa_profiles import ProfileStore
++from app.misa_readiness import validate_misa_readiness
+ from app.misa_templates import get_misa_template, list_misa_templates
++from app.models import MisaReadinessReport, VatPolicy
+ from app.normalization import normalize_header
+ 
+ 
+@@ -185,6 +187,40 @@ def preview_mapping(
+     }
+ 
+ 
++def validate_current_mapping(
++    *,
++    upload_id: str,
++    target_template_id: str,
++    mapping: dict[str, Any],
++    defaults: dict[str, Any] | None = None,
++    formulas: dict[str, str] | None = None,
++    accounting_regime: str | None = None,
++    fiscal_year_start: str | None = None,
++    vat_policy: VatPolicy | dict[str, Any] | None = None,
++) -> MisaReadinessReport:
++    table = _read_upload_table(upload_id)
++    template = get_misa_template(target_template_id)
++    clean_mapping = sanitize_mapping_for_template(target_template_id, mapping)
++    clean_defaults = sanitize_defaults_for_template(target_template_id, defaults, template.headers)
++    rows = apply_mapping(table, template.headers, clean_mapping, clean_defaults, formulas)
++    return validate_misa_readiness(
++        input_rows=len(table.rows),
++        target_template_id=target_template_id,
++        target_headers=template.headers,
++        mapping=clean_mapping,
++        defaults=clean_defaults,
++        formulas=formulas or {},
++        output_rows=rows,
++        source_headers=table.headers,
++        hidden_rows=table.hidden_rows,
++        formula_cells=table.formula_cells,
++        blank_rows_ignored=table.blank_rows_ignored,
++        accounting_regime=accounting_regime,
++        fiscal_year_start=fiscal_year_start,
++        vat_policy=vat_policy,
++    )
++
++
+ def confirm_mapping(
+     *,
+     upload_id: str,
+@@ -246,6 +282,27 @@ def confirm_mapping(
+     return {"profile_id": profile.id, "saved": True}
+ 
+ 
++def validate_confirmed_profile(
++    upload_id: str,
++    profile_id: str,
++    *,
++    accounting_regime: str | None = None,
++    fiscal_year_start: str | None = None,
++    vat_policy: VatPolicy | dict[str, Any] | None = None,
++) -> MisaReadinessReport:
++    profile = ProfileStore().get_profile(profile_id)
++    return validate_current_mapping(
++        upload_id=upload_id,
++        target_template_id=profile.target_template_id,
++        mapping=profile.mapping,
++        defaults=profile.defaults,
++        formulas=profile.formulas,
++        accounting_regime=accounting_regime,
++        fiscal_year_start=fiscal_year_start,
++        vat_policy=vat_policy,
++    )
++
++
+ def export_confirmed_profile(upload_id: str, profile_id: str) -> tuple[bytes, str]:
+     table = _read_upload_table(upload_id)
+     profile = ProfileStore().get_profile(profile_id)
+diff --git a/converter/app/models.py b/converter/app/models.py
+index 46a4055..b024e94 100644
+--- a/converter/app/models.py
++++ b/converter/app/models.py
+@@ -1,6 +1,6 @@
+ from __future__ import annotations
+ 
+-from typing import Any
++from typing import Any, Literal
+ 
+ from pydantic import BaseModel, Field
+ 
+@@ -118,3 +118,93 @@ class ExportRowsRequest(BaseModel):
+     conversion_type: str
+     rows: list[dict[str, Any]]
+     options: JsonDict | None = None
++
++
++ValidationSeverity = Literal["fatal", "blocker", "warning", "info"]
++ValidationStatus = Literal["ready", "needs_review", "blocked", "fatal"]
++AccountingRegime = Literal["TT99", "TT200", "TT133"]
++
++
++class RuleSource(BaseModel):
++    title: str
++    url: str
++    effective_from: str | None = None
++    effective_to: str | None = None
++    verified_at: str
++
++
++class IssueExplanation(BaseModel):
++    why: str
++    impact: str
++    fix: str
++    example: str | None = None
++
++
++class MisaValidationIssue(BaseModel):
++    severity: ValidationSeverity
++    category: str
++    code: str
++    message: str
++    row: int | None = None
++    field: str | None = None
++    invoice: str | None = None
++    expected: Any = None
++    actual: Any = None
++    delta: Any = None
++    source_url: str | None = None
++    explanation: IssueExplanation | None = None
++
++
++class MisaValidationSummary(BaseModel):
++    fatal: int = 0
++    blocker: int = 0
++    warning: int = 0
++    info: int = 0
++
++
++class ReconciliationReport(BaseModel):
++    input_rows: int
++    output_rows: int
++    invoice_count: int | None = None
++    sum_amount: str | None = None
++    sum_vat: str | None = None
++    sum_total: str | None = None
++    unmapped_columns: list[str] = Field(default_factory=list)
++
++
++class MisaReadinessReport(BaseModel):
++    validation_run_id: str
++    ok: bool
++    status: ValidationStatus
++    score: int
++    summary: MisaValidationSummary
++    issues: list[MisaValidationIssue]
++    reconciliation: ReconciliationReport
++    legal_disclaimer: str
++
++
++class VatPolicy(BaseModel):
++    allow_8_percent: bool = True
++    effective_from: str = "2025-07-01"
++    effective_to: str = "2026-12-31"
++
++
++class MappingValidateRequest(BaseModel):
++    upload_id: str
++    target_template_id: str
++    mapping: dict[str, Any] = Field(default_factory=dict)
++    defaults: dict[str, Any] = Field(default_factory=dict)
++    formulas: dict[str, str] = Field(default_factory=dict)
++    accounting_regime: AccountingRegime | None = None
++    fiscal_year_start: str | None = None
++    vat_policy: VatPolicy | None = None
++
++
++class ExportConfirmedProfileRequest(BaseModel):
++    upload_id: str
++    profile_id: str
++    acknowledge_warnings: bool = False
++    validation_run_id: str | None = None
++    accounting_regime: AccountingRegime | None = None
++    fiscal_year_start: str | None = None
++    vat_policy: VatPolicy | None = None
+diff --git a/converter/app/rule_normalizers.py b/converter/app/rule_normalizers.py
+new file mode 100644
+index 0000000..c0bb672
+--- /dev/null
++++ b/converter/app/rule_normalizers.py
+@@ -0,0 +1,124 @@
++from __future__ import annotations
++
++import re
++import unicodedata
++from datetime import date, datetime, timedelta
++from decimal import Decimal, InvalidOperation
++from typing import Any
++
++
++BLANK_MARKERS = {"", "-", "—", "–", "none", "null", "nan"}
++
++
++def normalize_text(value: Any) -> str:
++    text = "" if value is None else str(value)
++    text = text.replace("\u00a0", " ")
++    return re.sub(r"\s+", " ", text).strip()
++
++
++def normalize_key(value: Any) -> str:
++    text = normalize_text(value).replace("Đ", "D").replace("đ", "d")
++    text = unicodedata.normalize("NFD", text)
++    text = "".join(ch for ch in text if unicodedata.category(ch) != "Mn")
++    text = text.lower()
++    text = re.sub(r"[^a-z0-9]+", "_", text)
++    return re.sub(r"_+", "_", text).strip("_")
++
++
++def is_blank_value(value: Any) -> bool:
++    if value is None:
++        return True
++    if isinstance(value, str):
++        return normalize_text(value).lower() in BLANK_MARKERS
++    return False
++
++
++def parse_decimal_value(value: Any) -> Decimal | None:
++    if is_blank_value(value):
++        return None
++    if isinstance(value, Decimal):
++        return value
++    if isinstance(value, bool):
++        return Decimal(1 if value else 0)
++    if isinstance(value, int):
++        return Decimal(value)
++    if isinstance(value, float):
++        return Decimal(str(value))
++
++    text = normalize_text(value)
++    negative = False
++    if text.startswith("(") and text.endswith(")"):
++        negative = True
++        text = text[1:-1].strip()
++    text = text.replace(" ", "").replace("\u00a0", "")
++    text = re.sub(r"[^\d,.\-]", "", text)
++    if text.startswith("-"):
++        negative = True
++        text = text[1:]
++    if not text:
++        return None
++
++    if "," in text and "." in text:
++        if text.rfind(",") > text.rfind("."):
++            text = text.replace(".", "").replace(",", ".")
++        else:
++            text = text.replace(",", "")
++    elif "," in text:
++        groups = text.split(",")
++        if len(groups) > 1 and all(len(group) == 3 for group in groups[1:]):
++            text = "".join(groups)
++        else:
++            text = text.replace(",", ".")
++    elif "." in text:
++        groups = text.split(".")
++        if len(groups) > 1 and all(len(group) == 3 for group in groups[1:]):
++            text = "".join(groups)
++
++    try:
++        number = Decimal(text)
++    except InvalidOperation:
++        return None
++    return -number if negative else number
++
++
++def parse_vietnamese_date(value: Any) -> date | None:
++    if is_blank_value(value):
++        return None
++    if isinstance(value, datetime):
++        return value.date()
++    if isinstance(value, date):
++        return value
++    if isinstance(value, (int, float)) and not isinstance(value, bool):
++        if value <= 0:
++            return None
++        return date(1899, 12, 30) + timedelta(days=int(value))
++
++    text = normalize_text(value)
++    for fmt in ("%d/%m/%Y", "%d-%m-%Y", "%Y-%m-%d", "%d/%m/%y", "%d-%m-%y"):
++        try:
++            return datetime.strptime(text, fmt).date()
++        except ValueError:
++            continue
++    return None
++
++
++def parse_vat_rate(value: Any) -> Decimal | str | None:
++    if is_blank_value(value):
++        return None
++    text = normalize_text(value)
++    key = normalize_key(text)
++    if key in {"kct", "khong_chiu_thue", "khong_thue", "non_taxable"}:
++        return "NON_TAXABLE"
++    if key in {"khong_ke_khai", "khong_phai_ke_khai"}:
++        return "NON_TAXABLE"
++    number = parse_decimal_value(text.replace("%", ""))
++    if number is None:
++        return None
++    if number > 1:
++        number = number / Decimal("100")
++    return number
++
++
++def round_money(value: Decimal) -> Decimal:
++    return value.quantize(Decimal("1"))
++
+diff --git a/converter/app/rule_sources.py b/converter/app/rule_sources.py
+new file mode 100644
+index 0000000..7a6d0a6
+--- /dev/null
++++ b/converter/app/rule_sources.py
+@@ -0,0 +1,80 @@
++from __future__ import annotations
++
++from app.models import RuleSource
++
++
++VERIFIED_AT = "2026-06-14"
++
++LEGAL_DISCLAIMER = (
++    "EzFormat chỉ kiểm tra template MISA, công thức toán học và các rule đã cấu hình. "
++    "Kết quả là cảnh báo hỗ trợ rà soát, không phải chứng nhận tuân thủ pháp luật 100%."
++)
++
++ACCOUNTING_LAW = RuleSource(
++    title="Luật Kế toán 88/2015/QH13",
++    url="https://vanban.chinhphu.vn/default.aspx?docid=183198&pageid=27160",
++    effective_from="2017-01-01",
++    verified_at=VERIFIED_AT,
++)
++
++TT99 = RuleSource(
++    title="Thông tư 99/2025/TT-BTC",
++    url="https://congbao.chinhphu.vn/van-ban/thong-tu-so-99-2025-tt-btc-46529.htm",
++    effective_from="2026-01-01",
++    verified_at=VERIFIED_AT,
++)
++
++TT99_FISCAL_YEAR = RuleSource(
++    title="Bộ Tài chính Q&A về thời điểm áp dụng Thông tư 99/2025/TT-BTC",
++    url="https://portal.mof.gov.vn/hoidapcstc/home/cthoidap/159102",
++    effective_from="2026-01-01",
++    verified_at=VERIFIED_AT,
++)
++
++VAT_LAW = RuleSource(
++    title="Luật Thuế GTGT 48/2024/QH15",
++    url="https://vanban.chinhphu.vn/?classid=1&docid=212476&orggroupid=1&pageid=27160",
++    effective_from="2025-07-01",
++    verified_at=VERIFIED_AT,
++)
++
++VAT_DECREE_181 = RuleSource(
++    title="Nghị định 181/2025/NĐ-CP hướng dẫn Luật Thuế GTGT",
++    url="https://vanban.chinhphu.vn/?docid=214336&pageid=27160",
++    effective_from="2025-07-01",
++    verified_at=VERIFIED_AT,
++)
++
++VAT_8_DECREE = RuleSource(
++    title="Nghị định 174/2025/NĐ-CP về giảm thuế GTGT",
++    url="https://vanban.chinhphu.vn/?docid=214310&pageid=27160",
++    effective_from="2025-07-01",
++    effective_to="2026-12-31",
++    verified_at=VERIFIED_AT,
++)
++
++VAT_8_WINDOW = RuleSource(
++    title="Thông tin Chính phủ về giảm thuế GTGT từ 01/07/2025 đến 31/12/2026",
++    url="https://baochinhphu.vn/giam-thue-gia-tri-gia-tang-tu-01-7-2025-den-het-31-12-2026-10225070118590677.htm",
++    effective_from="2025-07-01",
++    effective_to="2026-12-31",
++    verified_at=VERIFIED_AT,
++)
++
++MISA_IMPORT_REQUIRED = RuleSource(
++    title="MISA AMIS: Nhập khẩu dữ liệu, cột có (*) là bắt buộc",
++    url="https://helpamis.misa.vn/kb/nhap-khau/",
++    verified_at=VERIFIED_AT,
++)
++
++RULE_SOURCES = {
++    "accounting_law": ACCOUNTING_LAW,
++    "tt99": TT99,
++    "tt99_fiscal_year": TT99_FISCAL_YEAR,
++    "vat_law": VAT_LAW,
++    "vat_decree_181": VAT_DECREE_181,
++    "vat_8_decree": VAT_8_DECREE,
++    "vat_8_window": VAT_8_WINDOW,
++    "misa_import_required": MISA_IMPORT_REQUIRED,
++}
++
+diff --git a/converter/tests/test_e2e_extreme.py b/converter/tests/test_e2e_extreme.py
+index 73fe90a..92e5a3d 100644
+--- a/converter/tests/test_e2e_extreme.py
++++ b/converter/tests/test_e2e_extreme.py
+@@ -71,7 +71,9 @@ def _kind_path(conversion_type: str, tmp_path: Path) -> Path:
+ 
+ 
+ def test_health_and_conversion_types_catalog():
+-    assert client.get("/healthz").json() == {"status": "ok"}
++    health = client.get("/healthz").json()
++    assert health["status"] == "ok"
++    assert health["ai"] in {"disabled", "offline", "online"}
+     payload = client.get("/api/v1/conversion-types").json()
+     ids = {item["id"] for item in payload["items"]}
+     assert ids == set(CONVERSION_TYPES.keys())
+diff --git a/converter/tests/test_misa_profile_api.py b/converter/tests/test_misa_profile_api.py
+index a1e63b3..7eec85d 100644
+--- a/converter/tests/test_misa_profile_api.py
++++ b/converter/tests/test_misa_profile_api.py
+@@ -127,7 +127,11 @@ def test_analyze_preview_confirm_export_learns_profile(tmp_path, monkeypatch):
+ 
+     export = client.post(
+         "/api/v1/conversions/export",
+-        json={"upload_id": analyze_payload["upload_id"], "profile_id": profile_id},
++        json={
++            "upload_id": analyze_payload["upload_id"],
++            "profile_id": profile_id,
++            "acknowledge_warnings": True,
++        },
+     )
+     assert export.status_code == 200
+     assert export.headers["content-type"].startswith("application/vnd.ms-excel")
+diff --git a/converter/tests/test_misa_readiness.py b/converter/tests/test_misa_readiness.py
+new file mode 100644
+index 0000000..963da4c
+--- /dev/null
++++ b/converter/tests/test_misa_readiness.py
+@@ -0,0 +1,384 @@
++from __future__ import annotations
++
++from datetime import date, timedelta
++from decimal import Decimal
++
++import xlwt
++
++from app.excel_io import read_input_table
++from app.rule_sources import RULE_SOURCES
++from app.rule_normalizers import (
++    normalize_text,
++    parse_decimal_value,
++    parse_vat_rate,
++    parse_vietnamese_date,
++)
++from app.misa_readiness import validate_misa_readiness
++
++
++def test_rule_sources_are_citable():
++    assert RULE_SOURCES
++    for source in RULE_SOURCES.values():
++        assert source.title
++        assert source.url.startswith("https://")
++        assert source.verified_at
++
++
++def test_rule_normalizers_parse_vietnamese_accounting_values():
++    assert normalize_text("  A\u00a0  B  ") == "A B"
++    assert parse_decimal_value("1,234,567") == Decimal("1234567")
++    assert parse_decimal_value("1.234.567") == Decimal("1234567")
++    assert parse_decimal_value("1.234,56") == Decimal("1234.56")
++    assert parse_decimal_value("1,234.56") == Decimal("1234.56")
++    assert parse_decimal_value("(123)") == Decimal("-123")
++    assert parse_decimal_value("-") is None
++    assert parse_vietnamese_date("01/02/2026") == date(2026, 2, 1)
++    assert parse_vietnamese_date("2026-02-01") == date(2026, 2, 1)
++    assert parse_vietnamese_date(46023) == date(2026, 1, 1)
++    assert parse_vat_rate("KCT") == "NON_TAXABLE"
++    assert parse_vat_rate("8%") == Decimal("0.08")
++
++
++def test_xls_input_reports_formula_cells(tmp_path):
++    path = tmp_path / "formula_input.xls"
++    book = xlwt.Workbook()
++    sheet = book.add_sheet("Data")
++    for col, header in enumerate(["Mã hóa đơn", "Mã hàng", "Số lượng", "Đơn giá", "Thành tiền"]):
++        sheet.write(0, col, header)
++    sheet.write(1, 0, "HD001")
++    sheet.write(1, 1, "SP001")
++    sheet.write(1, 2, 2)
++    sheet.write(1, 3, 100)
++    sheet.write(1, 4, xlwt.Formula("C2*D2"))
++    book.save(str(path))
++
++    table = read_input_table(path)
++
++    assert table.formula_cells == ["E2"]
++
++
++def test_readiness_blocks_missing_required_mapping_and_value():
++    headers = [
++        "Ngày hạch toán (*)",
++        "Ngày chứng từ (*)",
++        "Số chứng từ (*)",
++        "Mã hàng (*)",
++    ]
++    report = validate_misa_readiness(
++        input_rows=1,
++        target_template_id="bsn_sales",
++        target_headers=headers,
++        mapping={"Raw invoice": "Số chứng từ (*)"},
++        defaults={},
++        formulas={},
++        output_rows=[{"Số chứng từ (*)": "HD001", "Mã hàng (*)": ""}],
++    )
++
++    assert report.status == "blocked"
++    assert report.summary.blocker >= 1
++    assert {issue.code for issue in report.issues} >= {
++        "required_mapping_missing",
++        "required_value_blank",
++    }
++
++
++def test_readiness_uses_decimal_amount_and_vat_rules():
++    headers = [
++        "Ngày hạch toán (*)",
++        "Ngày chứng từ (*)",
++        "Số chứng từ (*)",
++        "Mã hàng (*)",
++        "Số lượng",
++        "Đơn giá",
++        "Thành tiền",
++        "Thuế suất GTGT",
++        "Tiền thuế GTGT",
++    ]
++    base_row = {
++        "Ngày hạch toán (*)": "01/07/2026",
++        "Ngày chứng từ (*)": "01/07/2026",
++        "Số chứng từ (*)": "HD001",
++        "Mã hàng (*)": "SP001",
++        "Số lượng": "2",
++        "Đơn giá": "1.000",
++        "Thành tiền": "2.000",
++        "Thuế suất GTGT": "8%",
++        "Tiền thuế GTGT": "160",
++    }
++
++    warning_report = validate_misa_readiness(
++        input_rows=1,
++        target_template_id="bsn_sales",
++        target_headers=headers,
++        mapping={
++            "Ngày": ["Ngày hạch toán (*)", "Ngày chứng từ (*)"],
++            "Mã HĐ": "Số chứng từ (*)",
++            "Mã hàng": "Mã hàng (*)",
++        },
++        defaults={},
++        formulas={},
++        output_rows=[base_row],
++    )
++    assert warning_report.status == "needs_review"
++    assert warning_report.summary.warning >= 1
++    assert any(issue.code == "vat_8_eligibility_uncertain" for issue in warning_report.issues)
++
++    bad_row = dict(base_row)
++    bad_row["Thành tiền"] = "2.500"
++    bad_report = validate_misa_readiness(
++        input_rows=1,
++        target_template_id="bsn_sales",
++        target_headers=headers,
++        mapping={
++            "Ngày": ["Ngày hạch toán (*)", "Ngày chứng từ (*)"],
++            "Mã HĐ": "Số chứng từ (*)",
++            "Mã hàng": "Mã hàng (*)",
++        },
++        defaults={},
++        formulas={},
++        output_rows=[bad_row],
++    )
++    assert bad_report.status == "blocked"
++    assert any(issue.code == "line_amount_mismatch" for issue in bad_report.issues)
++
++
++def test_readiness_reports_workbook_and_business_warnings():
++    tomorrow = date.today() + timedelta(days=1)
++    tomorrow_text = tomorrow.strftime("%d/%m/%Y")
++    report = validate_misa_readiness(
++        input_rows=2,
++        target_template_id="bsn_sales",
++        target_headers=[
++            "Ngày hạch toán (*)",
++            "Ngày chứng từ (*)",
++            "Số chứng từ (*)",
++            "Tên khách hàng",
++            "Mã hàng (*)",
++            "Số lượng",
++            "Đơn giá",
++            "Thành tiền",
++            "Mã số thuế",
++        ],
++        mapping={
++            "Ngày": ["Ngày hạch toán (*)", "Ngày chứng từ (*)"],
++            "Mã HĐ": "Số chứng từ (*)",
++            "Mã hàng": "Mã hàng (*)",
++        },
++        defaults={},
++        formulas={},
++        output_rows=[
++            {
++                "Ngày hạch toán (*)": tomorrow_text,
++                "Ngày chứng từ (*)": tomorrow_text,
++                "Số chứng từ (*)": "HD001",
++                "Tên khách hàng": "  Công ty  A  ",
++                "Mã hàng (*)": "SP001",
++                "Số lượng": "1.000",
++                "Đơn giá": "0",
++                "Thành tiền": "0",
++                "Mã số thuế": "",
++            }
++        ],
++        source_headers=["Ngày", "Mã HĐ", "Mã hàng", "Cột dư"],
++        hidden_rows=[1],
++        formula_cells=["F2"],
++        blank_rows_ignored=1,
++    )
++
++    codes = {issue.code for issue in report.issues}
++    assert {
++        "future_date",
++        "zero_price_promotion_unclear",
++        "buyer_tax_code_missing_optional",
++        "hidden_rows_detected",
++        "formula_cell_used",
++        "blank_row_ignored",
++        "unused_source_columns",
++        "text_trimmed",
++        "number_normalized",
++        "date_normalized",
++    }.issubset(codes)
++    assert report.status == "needs_review"
++
++
++def test_readiness_detects_additional_rule_ids():
++    headers = [
++        "Số chứng từ (*)",
++        "Ngày chứng từ (*)",
++        "Tên khách hàng",
++        "Mã hàng (*)",
++        "Số lượng",
++        "Đơn giá",
++        "Thành tiền",
++        "Thuế suất GTGT",
++        "Tiền thuế GTGT",
++        "TK Doanh thu/Có (*)",
++    ]
++    rows = [
++        {
++            "Số chứng từ (*)": "HD001",
++            "Ngày chứng từ (*)": "01/01/2026",
++            "Tên khách hàng": "Khách A",
++            "Mã hàng (*)": "SP001",
++            "Số lượng": 1,
++            "Đơn giá": 100,
++            "Thành tiền": 100,
++            "Thuế suất GTGT": "5%",
++            "Tiền thuế GTGT": 5,
++            "TK Doanh thu/Có (*)": "ABC",
++        },
++        {
++            "Số chứng từ (*)": "HD001",
++            "Ngày chứng từ (*)": "02/01/2026",
++            "Tên khách hàng": "Khách B",
++            "Mã hàng (*)": "SP002",
++            "Số lượng": 1,
++            "Đơn giá": 100,
++            "Thành tiền": 100,
++            "Thuế suất GTGT": "10%",
++            "Tiền thuế GTGT": 10,
++            "TK Doanh thu/Có (*)": "5111",
++        },
++        {
++            "Số chứng từ (*)": "",
++            "Ngày chứng từ (*)": "01/01/2026",
++            "Tên khách hàng": "Khách C",
++            "Mã hàng (*)": "SP003",
++            "Số lượng": 1,
++            "Đơn giá": 100,
++            "Thành tiền": 100,
++            "Thuế suất GTGT": "10%",
++            "Tiền thuế GTGT": 10,
++            "TK Doanh thu/Có (*)": "5111",
++        },
++        {
++            "Số chứng từ (*)": "",
++            "Ngày chứng từ (*)": "01/01/2026",
++            "Tên khách hàng": "Khách C",
++            "Mã hàng (*)": "SP003",
++            "Số lượng": 1,
++            "Đơn giá": 100,
++            "Thành tiền": 100,
++            "Thuế suất GTGT": "10%",
++            "Tiền thuế GTGT": 10,
++            "TK Doanh thu/Có (*)": "5111",
++        },
++    ]
++
++    report = validate_misa_readiness(
++        input_rows=len(rows),
++        target_template_id="bsn_sales",
++        target_headers=headers,
++        mapping={
++            "Số HĐ": "Số chứng từ (*)",
++            "Ngày": "Ngày chứng từ (*)",
++            "Mã hàng": "Mã hàng (*)",
++            "TK": "TK Doanh thu/Có (*)",
++        },
++        defaults={},
++        formulas={},
++        output_rows=rows,
++    )
++
++    codes = {issue.code for issue in report.issues}
++    assert {
++        "vat_5_category_uncertain",
++        "account_pattern_unusual",
++        "invoice_header_conflict",
++        "one_tax_template_mixed_rates",
++        "possible_duplicate",
++    }.issubset(codes)
++    assert report.status == "blocked"
++
++
++def test_readiness_blocks_vat_8_when_policy_disallows_it():
++    report = validate_misa_readiness(
++        input_rows=1,
++        target_template_id="bsn_sales",
++        target_headers=[
++            "Số chứng từ (*)",
++            "Ngày chứng từ (*)",
++            "Mã hàng (*)",
++            "Số lượng",
++            "Đơn giá",
++            "Thành tiền",
++            "Thuế suất GTGT",
++            "Tiền thuế GTGT",
++        ],
++        mapping={
++            "Số HĐ": "Số chứng từ (*)",
++            "Ngày": "Ngày chứng từ (*)",
++            "Mã hàng": "Mã hàng (*)",
++        },
++        defaults={},
++        formulas={},
++        output_rows=[
++            {
++                "Số chứng từ (*)": "HD001",
++                "Ngày chứng từ (*)": "01/01/2026",
++                "Mã hàng (*)": "SP001",
++                "Số lượng": 1,
++                "Đơn giá": 100,
++                "Thành tiền": 100,
++                "Thuế suất GTGT": "8%",
++                "Tiền thuế GTGT": 8,
++            }
++        ],
++        vat_policy={"allow_8_percent": False},
++    )
++
++    assert any(issue.code == "vat_8_not_allowed_by_policy" for issue in report.issues)
++    assert report.status == "blocked"
++
++
++def test_readiness_allows_multi_line_invoice_with_same_header():
++    headers = [
++        "Mã số thuế người bán",
++        "Ký hiệu hóa đơn",
++        "Số hóa đơn",
++        "Ngày chứng từ (*)",
++        "Mã hàng (*)",
++        "Số lượng",
++        "Đơn giá",
++        "Thành tiền",
++    ]
++    rows = [
++        {
++            "Mã số thuế người bán": "0100109106",
++            "Ký hiệu hóa đơn": "AA/26E",
++            "Số hóa đơn": "000001",
++            "Ngày chứng từ (*)": "01/01/2026",
++            "Mã hàng (*)": "SP001",
++            "Số lượng": 1,
++            "Đơn giá": 100,
++            "Thành tiền": 100,
++        },
++        {
++            "Mã số thuế người bán": "0100109106",
++            "Ký hiệu hóa đơn": "AA/26E",
++            "Số hóa đơn": "000001",
++            "Ngày chứng từ (*)": "01/01/2026",
++            "Mã hàng (*)": "SP002",
++            "Số lượng": 2,
++            "Đơn giá": 50,
++            "Thành tiền": 100,
++        },
++    ]
++
++    report = validate_misa_readiness(
++        input_rows=len(rows),
++        target_template_id="bsn_sales",
++        target_headers=headers,
++        mapping={
++            "MST": "Mã số thuế người bán",
++            "Ký hiệu": "Ký hiệu hóa đơn",
++            "Số HĐ": "Số hóa đơn",
++            "Ngày": "Ngày chứng từ (*)",
++            "Mã hàng": "Mã hàng (*)",
++        },
++        defaults={},
++        formulas={},
++        output_rows=rows,
++    )
++
++    assert not any(issue.code == "duplicate_invoice_key" for issue in report.issues)
+diff --git a/converter/tests/test_misa_validate_api.py b/converter/tests/test_misa_validate_api.py
+new file mode 100644
+index 0000000..4094fc8
+--- /dev/null
++++ b/converter/tests/test_misa_validate_api.py
+@@ -0,0 +1,97 @@
++from __future__ import annotations
++
++from pathlib import Path
++
++from fastapi.testclient import TestClient
++
++from app.main import app
++
++
++ROOT = Path(__file__).resolve().parents[1]
++SAMPLES = ROOT / "fixtures" / "samples"
++client = TestClient(app)
++
++
++def _analyze_sample():
++    with (SAMPLES / "raw_sales_sample.xlsx").open("rb") as handle:
++        response = client.post(
++            "/api/v1/uploads/analyze",
++            data={"target_template_id": "bsn_sales"},
++            files={
++                "file": (
++                    "raw_sales_sample.xlsx",
++                    handle,
++                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
++                )
++            },
++        )
++    assert response.status_code == 200
++    return response.json()
++
++
++def test_validate_mapping_endpoint_returns_readiness_report(monkeypatch, tmp_path):
++    monkeypatch.setenv("MAPPING_DB_PATH", str(tmp_path / "profiles.sqlite"))
++    monkeypatch.setenv("AI_PROVIDER", "disabled")
++    analyze = _analyze_sample()
++    suggestion = analyze["mapping_suggestion"]
++
++    response = client.post(
++        "/api/v1/mappings/validate",
++        json={
++            "upload_id": analyze["upload_id"],
++            "target_template_id": "bsn_sales",
++            "mapping": suggestion["mapping"],
++            "defaults": suggestion["defaults"],
++            "formulas": suggestion["formulas"],
++        },
++    )
++
++    assert response.status_code == 200
++    payload = response.json()
++    assert payload["status"] in {"ready", "needs_review"}
++    assert payload["summary"]["blocker"] == 0
++    assert payload["reconciliation"]["input_rows"] == 1930
++    assert payload["reconciliation"]["output_rows"] == 1930
++
++
++def test_export_gate_blocks_unacknowledged_warnings(monkeypatch, tmp_path):
++    monkeypatch.setenv("MAPPING_DB_PATH", str(tmp_path / "profiles.sqlite"))
++    monkeypatch.setenv("AI_PROVIDER", "disabled")
++    analyze = _analyze_sample()
++    suggestion = analyze["mapping_suggestion"]
++    mapping = dict(suggestion["mapping"])
++    mapping["VAT"] = "% thuế GTGT"
++    defaults = dict(suggestion["defaults"])
++    defaults["% thuế GTGT"] = "8%"
++
++    confirm = client.post(
++        "/api/v1/mappings/confirm",
++        json={
++            "upload_id": analyze["upload_id"],
++            "target_template_id": "bsn_sales",
++            "mapping": mapping,
++            "defaults": defaults,
++            "formulas": suggestion["formulas"],
++        },
++    )
++    assert confirm.status_code == 200
++
++    blocked = client.post(
++        "/api/v1/conversions/export",
++        json={
++            "upload_id": analyze["upload_id"],
++            "profile_id": confirm.json()["profile_id"],
++        },
++    )
++    assert blocked.status_code == 422
++    assert blocked.json()["detail"]["status"] == "needs_review"
++
++    allowed = client.post(
++        "/api/v1/conversions/export",
++        json={
++            "upload_id": analyze["upload_id"],
++            "profile_id": confirm.json()["profile_id"],
++            "acknowledge_warnings": True,
++        },
++    )
++    assert allowed.status_code == 200
+diff --git a/frontend/src/components/PreviewTable.jsx b/frontend/src/components/PreviewTable.jsx
+index 3aed44b..efcb742 100644
+--- a/frontend/src/components/PreviewTable.jsx
++++ b/frontend/src/components/PreviewTable.jsx
+@@ -11,6 +11,9 @@ export default function PreviewTable({
+   disabled,
+ }) {
+   const [page, setPage] = useState(0);
++  const canEdit = !disabled && typeof onCellChange === "function";
++  const canDelete = !disabled && typeof onDeleteRow === "function";
++  const showActions = typeof onDeleteRow === "function";
+   const totalPages = Math.max(1, Math.ceil(rows.length / PAGE_SIZE));
+ 
+   useEffect(() => {
+@@ -73,9 +76,11 @@ export default function PreviewTable({
+                   {h}
+                 </th>
+               ))}
+-              <th className="bg-gray-50 border-b border-gray-200 px-3 py-2.5 text-center text-gray-500 font-semibold w-12">
+-                Xoá
+-              </th>
++              {showActions && (
++                <th className="bg-gray-50 border-b border-gray-200 px-3 py-2.5 text-center text-gray-500 font-semibold w-12">
++                  Xoá
++                </th>
++              )}
+             </tr>
+           </thead>
+           <tbody>
+@@ -94,28 +99,35 @@ export default function PreviewTable({
+                       key={`${rIdx}-${h}`}
+                       className="border-b border-r border-gray-100 p-0"
+                     >
+-                      <input
+-                        type="text"
+-                        disabled={disabled}
+-                        value={
+-                          row[h] !== undefined && row[h] !== null ? String(row[h]) : ""
+-                        }
+-                        onChange={(e) => onCellChange(rIdx, h, e.target.value)}
+-                        className="w-full min-w-[128px] px-3 py-2 text-xs text-gray-800 bg-transparent border-none outline-none transition-colors focus:bg-primary-50 focus:ring-1 focus:ring-inset focus:ring-primary-400 disabled:opacity-60"
+-                      />
++                      {canEdit ? (
++                        <input
++                          type="text"
++                          value={
++                            row[h] !== undefined && row[h] !== null ? String(row[h]) : ""
++                          }
++                          onChange={(e) => onCellChange(rIdx, h, e.target.value)}
++                          className="w-full min-w-[128px] px-3 py-2 text-xs text-gray-800 bg-transparent border-none outline-none transition-colors focus:bg-primary-50 focus:ring-1 focus:ring-inset focus:ring-primary-400"
++                        />
++                      ) : (
++                        <span className="block w-full min-w-[128px] px-3 py-2 text-xs text-gray-800">
++                          {row[h] !== undefined && row[h] !== null ? String(row[h]) : ""}
++                        </span>
++                      )}
+                     </td>
+                   ))}
+-                  <td className="border-b border-gray-100 px-2 py-1 text-center">
+-                    <button
+-                      type="button"
+-                      disabled={disabled}
+-                      onClick={() => onDeleteRow(rIdx)}
+-                      className="rounded-md p-1 text-gray-400 opacity-0 group-hover:opacity-100 hover:bg-red-50 hover:text-red-600 transition-all disabled:opacity-30"
+-                      title="Xoá dòng này"
+-                    >
+-                      <Trash2 size={14} />
+-                    </button>
+-                  </td>
++                  {showActions && (
++                    <td className="border-b border-gray-100 px-2 py-1 text-center">
++                      <button
++                        type="button"
++                        disabled={!canDelete}
++                        onClick={() => onDeleteRow(rIdx)}
++                        className="rounded-md p-1 text-gray-400 opacity-0 group-hover:opacity-100 hover:bg-red-50 hover:text-red-600 transition-all disabled:opacity-30"
++                        title="Xoá dòng này"
++                      >
++                        <Trash2 size={14} />
++                      </button>
++                    </td>
++                  )}
+                 </tr>
+               );
+             })}
+diff --git a/frontend/src/components/ReconciliationPanel.jsx b/frontend/src/components/ReconciliationPanel.jsx
+new file mode 100644
+index 0000000..a863584
+--- /dev/null
++++ b/frontend/src/components/ReconciliationPanel.jsx
+@@ -0,0 +1,34 @@
++export default function ReconciliationPanel({ reconciliation }) {
++  if (!reconciliation) return null;
++
++  const items = [
++    ["Dòng nguồn", reconciliation.input_rows],
++    ["Dòng MISA", reconciliation.output_rows],
++    ["Số chứng từ", reconciliation.invoice_count ?? "—"],
++    ["Tổng thành tiền", reconciliation.sum_amount ?? "—"],
++    ["Tổng thuế", reconciliation.sum_vat ?? "—"],
++    ["Tổng thanh toán", reconciliation.sum_total ?? "—"],
++  ];
++
++  return (
++    <section className="rounded-2xl border border-gray-200 bg-white p-4 shadow-sm">
++      <h3 className="text-base font-bold text-gray-900">Đối chiếu nhanh</h3>
++      <div className="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-3 xl:grid-cols-6">
++        {items.map(([label, value]) => (
++          <div key={label} className="rounded-xl bg-gray-50 p-3">
++            <div className="text-xs text-gray-500">{label}</div>
++            <div className="mt-1 truncate text-sm font-black text-gray-900" title={String(value)}>
++              {value}
++            </div>
++          </div>
++        ))}
++      </div>
++      {reconciliation.unmapped_columns?.length > 0 && (
++        <p className="mt-3 text-xs text-gray-500">
++          {reconciliation.unmapped_columns.length} cột nguồn chưa dùng trong mapping.
++        </p>
++      )}
++    </section>
++  );
++}
++
+diff --git a/frontend/src/components/ValidationIssueTable.jsx b/frontend/src/components/ValidationIssueTable.jsx
+new file mode 100644
+index 0000000..d75a80c
+--- /dev/null
++++ b/frontend/src/components/ValidationIssueTable.jsx
+@@ -0,0 +1,85 @@
++const SEVERITY_CLASS = {
++  fatal: "bg-red-100 text-red-700",
++  blocker: "bg-red-100 text-red-700",
++  warning: "bg-amber-100 text-amber-700",
++  info: "bg-blue-100 text-blue-700",
++};
++
++export default function ValidationIssueTable({ issues = [] }) {
++  if (!issues.length) return null;
++
++  return (
++    <section className="rounded-2xl border border-gray-200 bg-white shadow-sm">
++      <div className="border-b border-gray-100 px-4 py-3">
++        <h3 className="text-base font-bold text-gray-900">Chi tiết lỗi/cảnh báo</h3>
++        <p className="text-xs text-gray-500">
++          Backend là nguồn kiểm tra chính. AI không được thay đổi mức độ lỗi.
++        </p>
++      </div>
++      <div className="overflow-auto">
++        <table className="min-w-[980px] text-sm">
++          <thead className="bg-gray-50 text-xs uppercase text-gray-500">
++            <tr>
++              <th className="px-4 py-3 text-left">Mức độ</th>
++              <th className="px-4 py-3 text-left">Dòng</th>
++              <th className="px-4 py-3 text-left">Cột</th>
++              <th className="px-4 py-3 text-left">Lỗi</th>
++              <th className="px-4 py-3 text-left">Hiện tại</th>
++              <th className="px-4 py-3 text-left">Kỳ vọng</th>
++              <th className="px-4 py-3 text-left">Nguồn</th>
++            </tr>
++          </thead>
++          <tbody>
++            {issues.map((issue, index) => (
++              <tr key={`${issue.code}-${index}`} className="border-t border-gray-100 align-top">
++                <td className="px-4 py-3">
++                  <span
++                    className={`rounded-full px-2.5 py-1 text-xs font-bold ${
++                      SEVERITY_CLASS[issue.severity] || SEVERITY_CLASS.info
++                    }`}
++                  >
++                    {issue.severity}
++                  </span>
++                </td>
++                <td className="px-4 py-3 text-gray-600">{issue.row ?? "—"}</td>
++                <td className="px-4 py-3 font-medium text-gray-800">{issue.field || "—"}</td>
++                <td className="px-4 py-3">
++                  <div className="font-semibold text-gray-900">{issue.message}</div>
++                  {issue.explanation && (
++                    <details className="mt-2 text-xs text-gray-500">
++                      <summary className="cursor-pointer font-semibold text-primary-700">
++                        Vì sao / cách sửa
++                      </summary>
++                      <div className="mt-2 space-y-1 leading-relaxed">
++                        <p><strong>Vì sao:</strong> {issue.explanation.why}</p>
++                        <p><strong>Ảnh hưởng:</strong> {issue.explanation.impact}</p>
++                        <p><strong>Cách sửa:</strong> {issue.explanation.fix}</p>
++                      </div>
++                    </details>
++                  )}
++                </td>
++                <td className="px-4 py-3 text-gray-600">{issue.actual ?? "—"}</td>
++                <td className="px-4 py-3 text-gray-600">{issue.expected ?? "—"}</td>
++                <td className="px-4 py-3">
++                  {issue.source_url ? (
++                    <a
++                      className="font-semibold text-primary-600 hover:underline"
++                      href={issue.source_url}
++                      target="_blank"
++                      rel="noreferrer"
++                    >
++                      Mở nguồn
++                    </a>
++                  ) : (
++                    <span className="text-gray-400">Rule nội bộ</span>
++                  )}
++                </td>
++              </tr>
++            ))}
++          </tbody>
++        </table>
++      </div>
++    </section>
++  );
++}
++
+diff --git a/frontend/src/components/ValidationReadinessCard.jsx b/frontend/src/components/ValidationReadinessCard.jsx
+new file mode 100644
+index 0000000..a9995c4
+--- /dev/null
++++ b/frontend/src/components/ValidationReadinessCard.jsx
+@@ -0,0 +1,99 @@
++import { AlertTriangle, CheckCircle, ShieldAlert } from "lucide-react";
++
++const STATE_STYLE = {
++  ready: {
++    label: "Sẵn sàng",
++    icon: CheckCircle,
++    className: "border-emerald-200 bg-emerald-50 text-emerald-900",
++    badge: "bg-emerald-600 text-white",
++  },
++  needs_review: {
++    label: "Cần kiểm tra cảnh báo",
++    icon: AlertTriangle,
++    className: "border-amber-200 bg-amber-50 text-amber-950",
++    badge: "bg-amber-500 text-white",
++  },
++  blocked: {
++    label: "Đang bị chặn",
++    icon: ShieldAlert,
++    className: "border-red-200 bg-red-50 text-red-950",
++    badge: "bg-red-600 text-white",
++  },
++  fatal: {
++    label: "Không thể xử lý",
++    icon: ShieldAlert,
++    className: "border-red-200 bg-red-50 text-red-950",
++    badge: "bg-red-600 text-white",
++  },
++};
++
++export default function ValidationReadinessCard({
++  report,
++  acknowledgeWarnings,
++  onAcknowledgeWarnings,
++}) {
++  if (!report) return null;
++  const state = STATE_STYLE[report.status] || STATE_STYLE.blocked;
++  const Icon = state.icon;
++  const summary = report.summary || {};
++  const hasBlocking = (summary.fatal || 0) + (summary.blocker || 0) > 0;
++  const hasWarnings = (summary.warning || 0) > 0;
++
++  return (
++    <section className={`rounded-2xl border p-4 ${state.className}`}>
++      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
++        <div className="flex items-start gap-3">
++          <div className="mt-0.5 rounded-xl bg-white/70 p-2">
++            <Icon size={20} />
++          </div>
++          <div>
++            <div className="flex flex-wrap items-center gap-2">
++              <h3 className="text-base font-black">{state.label}</h3>
++              <span className={`rounded-full px-3 py-1 text-xs font-bold ${state.badge}`}>
++                {report.score}/100
++              </span>
++            </div>
++            <p className="mt-1 text-sm opacity-85">
++              {hasBlocking
++                ? "Còn lỗi nặng cần sửa trước khi tải file MISA."
++                : hasWarnings
++                  ? "Không có lỗi chặn, nhưng cần xác nhận đã kiểm tra cảnh báo."
++                  : "Không phát hiện lỗi chặn theo rule đã cấu hình."}
++            </p>
++          </div>
++        </div>
++
++        <div className="grid grid-cols-4 gap-2 text-center text-xs">
++          {[
++            ["Fatal", summary.fatal || 0],
++            ["Lỗi nặng", summary.blocker || 0],
++            ["Cảnh báo", summary.warning || 0],
++            ["Info", summary.info || 0],
++          ].map(([label, value]) => (
++            <div key={label} className="rounded-xl bg-white/70 px-3 py-2">
++              <div className="text-lg font-black">{value}</div>
++              <div className="whitespace-nowrap opacity-75">{label}</div>
++            </div>
++          ))}
++        </div>
++      </div>
++
++      {hasWarnings && !hasBlocking && (
++        <label className="mt-4 flex cursor-pointer items-start gap-2 rounded-xl bg-white/70 p-3 text-sm font-semibold">
++          <input
++            type="checkbox"
++            className="mt-1 h-4 w-4 rounded border-gray-300 text-primary-600 focus:ring-primary-500"
++            checked={acknowledgeWarnings}
++            onChange={(event) => onAcknowledgeWarnings?.(event.target.checked)}
++          />
++          <span>Tôi đã kiểm tra các cảnh báo và muốn tiếp tục tải file.</span>
++        </label>
++      )}
++
++      {report.legal_disclaimer && (
++        <p className="mt-3 text-xs leading-relaxed opacity-70">{report.legal_disclaimer}</p>
++      )}
++    </section>
++  );
++}
++
+diff --git a/frontend/src/hooks/useConverterApi.js b/frontend/src/hooks/useConverterApi.js
+index 53a5421..8bd25c9 100644
+--- a/frontend/src/hooks/useConverterApi.js
++++ b/frontend/src/hooks/useConverterApi.js
+@@ -126,6 +126,15 @@ export function useConverterApi() {
+     return readJsonResponse(response, "Không thể xem trước mapping MISA.");
+   }, []);
+ 
++  const validateMapping = useCallback(async (payload) => {
++    const response = await fetch(`${pythonBaseURL}/api/v1/mappings/validate`, {
++      method: "POST",
++      headers: { "Content-Type": "application/json" },
++      body: JSON.stringify(payload),
++    });
++    return readJsonResponse(response, "Không thể kiểm tra lỗi MISA.");
++  }, []);
++
+   const confirmMapping = useCallback(async (payload) => {
+     const response = await fetch(`${pythonBaseURL}/api/v1/mappings/confirm`, {
+       method: "POST",
+@@ -135,11 +144,16 @@ export function useConverterApi() {
+     return readJsonResponse(response, "Không thể lưu setting mapping.");
+   }, []);
+ 
+-  const exportConfirmed = useCallback(async (uploadId, profileId) => {
++  const exportConfirmed = useCallback(async (uploadId, profileId, options = {}) => {
+     const response = await fetch(`${pythonBaseURL}/api/v1/conversions/export`, {
+       method: "POST",
+       headers: { "Content-Type": "application/json" },
+-      body: JSON.stringify({ upload_id: uploadId, profile_id: profileId }),
++      body: JSON.stringify({
++        upload_id: uploadId,
++        profile_id: profileId,
++        acknowledge_warnings: Boolean(options.acknowledgeWarnings),
++        validation_run_id: options.validationRunId || undefined,
++      }),
+     });
+ 
+     if (!response.ok) {
+@@ -159,6 +173,7 @@ export function useConverterApi() {
+     aiOnline,
+     analyzeFile,
+     previewMapping,
++    validateMapping,
+     confirmMapping,
+     exportConfirmed,
+   };
+diff --git a/frontend/src/pages/ConvertPage.jsx b/frontend/src/pages/ConvertPage.jsx
+index f1433de..4a5e271 100644
+--- a/frontend/src/pages/ConvertPage.jsx
++++ b/frontend/src/pages/ConvertPage.jsx
+@@ -19,19 +19,23 @@ import ChatSupport from "../components/ChatSupport";
+ import Alert from "../components/ui/Alert";
+ import StepProgress from "../components/ui/StepProgress";
+ import PreviewTable from "../components/PreviewTable";
++import ReconciliationPanel from "../components/ReconciliationPanel";
++import ValidationIssueTable from "../components/ValidationIssueTable";
++import ValidationReadinessCard from "../components/ValidationReadinessCard";
+ import { useConverterApi } from "../hooks/useConverterApi";
+ 
+ const STATUS = {
+   IDLE: "idle",
+   ANALYZING: "analyzing",
+   MAPPING: "mapping",
++  VALIDATING: "validating",
+   PREVIEW: "preview",
+   DOWNLOADING: "downloading",
+   SUCCESS: "success",
+   ERROR: "error",
+ };
+ 
+-const STEPS = ["Tải file", "Ghép cột", "Xem trước", "Tải file MISA"];
++const STEPS = ["Tải file", "Ghép cột", "Kiểm tra lỗi", "Xem trước", "Tải file MISA"];
+ const DEFAULT_TEMPLATE_ID = "bsn_sales";
+ const EXCEL_EXT = ["xlsx", "xls"];
+ const PDF_EXT = ["pdf"];
+@@ -137,6 +141,7 @@ const ConvertPage = () => {
+     aiOnline,
+     analyzeFile,
+     previewMapping,
++    validateMapping,
+     confirmMapping,
+     exportConfirmed,
+   } = useConverterApi();
+@@ -155,6 +160,8 @@ const ConvertPage = () => {
+   const [previewHeaders, setPreviewHeaders] = useState([]);
+   const [previewRows, setPreviewRows] = useState([]);
+   const [previewStats, setPreviewStats] = useState(null);
++  const [validationReport, setValidationReport] = useState(null);
++  const [acknowledgeWarnings, setAcknowledgeWarnings] = useState(false);
+   const [profileId, setProfileId] = useState(null);
+   const [focusedTarget, setFocusedTarget] = useState("");
+ 
+@@ -245,6 +252,15 @@ const ConvertPage = () => {
+   );
+   const keyMappingOkCount = keyMappingValues.filter((item) => item.ok).length;
+   const hasPreviewReady = previewRows.length > 0;
++  const validationSummary = validationReport?.summary || {};
++  const hasValidationBlocker =
++    (validationSummary.fatal || 0) + (validationSummary.blocker || 0) > 0;
++  const hasValidationWarnings = (validationSummary.warning || 0) > 0;
++  const canDownloadMisa =
++    hasPreviewReady &&
++    validationReport &&
++    !hasValidationBlocker &&
++    (!hasValidationWarnings || acknowledgeWarnings);
+   const liveMissingRequiredIssues = useMemo(
+     () =>
+       !analyzePayload
+@@ -313,11 +329,13 @@ const ConvertPage = () => {
+   const stepIndex =
+     convStatus === STATUS.MAPPING
+       ? 1
+-      : convStatus === STATUS.PREVIEW || convStatus === STATUS.DOWNLOADING
+-        ? 2
+-        : convStatus === STATUS.SUCCESS
+-          ? 3
+-          : 0;
++      : convStatus === STATUS.SUCCESS
++          ? 4
++          : convStatus === STATUS.PREVIEW || convStatus === STATUS.DOWNLOADING
++            ? 3
++            : convStatus === STATUS.VALIDATING || validationReport
++              ? 2
++              : 0;
+ 
+   useEffect(() => {
+     if (!templates.length) return;
+@@ -336,13 +354,18 @@ const ConvertPage = () => {
+     setPreviewHeaders([]);
+     setPreviewRows([]);
+     setPreviewStats(null);
++    setValidationReport(null);
++    setAcknowledgeWarnings(false);
+     setProfileId(null);
+   };
++
+ 
+   const clearPreviewAfterMappingChange = () => {
+     setPreviewHeaders([]);
+     setPreviewRows([]);
+     setPreviewStats(null);
++    setValidationReport(null);
++    setAcknowledgeWarnings(false);
+     setProfileId(null);
+     if (convStatus === STATUS.PREVIEW || convStatus === STATUS.SUCCESS) {
+       setConvStatus(STATUS.MAPPING);
+@@ -459,13 +482,22 @@ const ConvertPage = () => {
+     return result;
+   };
+ 
++  const runValidation = async () => {
++    const result = await validateMapping(buildMappingPayload());
++    setValidationReport(result);
++    setAcknowledgeWarnings(false);
++    setIssues(result.issues || []);
++    return result;
++  };
++
+   const handlePreview = async () => {
+     if (!analyzePayload?.upload_id) return;
+     window.scrollBy({ top: 800, behavior: "smooth" });
+ 
+-    setConvStatus(STATUS.ANALYZING);
++    setConvStatus(STATUS.VALIDATING);
+     setErrorMsg("");
+     try {
++      await runValidation();
+       await createPreview();
+       setConvStatus(STATUS.PREVIEW);
+     } catch (err) {
+@@ -490,6 +522,14 @@ const ConvertPage = () => {
+     setConvStatus(STATUS.DOWNLOADING);
+     setErrorMsg("");
+     try {
++      const report = validationReport || (await runValidation());
++      const summary = report?.summary || {};
++      if ((summary.fatal || 0) + (summary.blocker || 0) > 0) {
++        throw new Error("Còn lỗi nặng cần sửa trước khi tải file MISA.");
++      }
++      if ((summary.warning || 0) > 0 && !acknowledgeWarnings) {
++        throw new Error("Bạn cần xác nhận đã kiểm tra các cảnh báo trước khi tải.");
++      }
+       if (!previewRows.length) {
+         const preview = await createPreview();
+         if (!(preview.rows || []).length) {
+@@ -500,6 +540,10 @@ const ConvertPage = () => {
+       const { blob, filename } = await exportConfirmed(
+         analyzePayload.upload_id,
+         savedProfileId,
++        {
++          acknowledgeWarnings,
++          validationRunId: report?.validation_run_id,
++        },
+       );
+       const url = window.URL.createObjectURL(blob);
+       const a = document.createElement("a");
+@@ -718,7 +762,9 @@ const ConvertPage = () => {
+                     disabled={
+                       !selectedFile ||
+                       serviceOnline === false ||
+-                      convStatus === STATUS.ANALYZING
++                      convStatus === STATUS.ANALYZING ||
++                      convStatus === STATUS.VALIDATING ||
++                      convStatus === STATUS.DOWNLOADING
+                     }
+                   >
+                     {convStatus === STATUS.ANALYZING && !analyzePayload ? (
+@@ -762,7 +808,7 @@ const ConvertPage = () => {
+                         disabled={convStatus === STATUS.DOWNLOADING}
+                       >
+                         <Wand2 size={16} />
+-                        Xem trước
++                        Kiểm tra & xem trước
+                       </button>
+                       <button
+                         type="button"
+@@ -771,7 +817,8 @@ const ConvertPage = () => {
+                         disabled={
+                           convStatus === STATUS.DOWNLOADING ||
+                           convStatus === STATUS.ANALYZING ||
+-                          !hasPreviewReady
++                          convStatus === STATUS.VALIDATING ||
++                          !canDownloadMisa
+                         }
+                       >
+                         {convStatus === STATUS.DOWNLOADING ? (
+@@ -786,7 +833,16 @@ const ConvertPage = () => {
+ 
+                   {analyzePayload && !hasPreviewReady && (
+                     <p className="text-center text-xs text-amber-700">
+-                      Hoàn thành bước <strong>Xem trước</strong> để mở tải file MISA.
++                      Hoàn thành bước <strong>Kiểm tra & xem trước</strong> để mở tải file MISA.
++                    </p>
++                  )}
++                  {analyzePayload && hasPreviewReady && !canDownloadMisa && (
++                    <p className="text-center text-xs text-amber-700">
++                      {hasValidationBlocker
++                        ? "Còn lỗi nặng cần sửa trước khi tải."
++                        : hasValidationWarnings
++                          ? "Tick xác nhận cảnh báo để tải file."
++                          : "Cần chạy kiểm tra lỗi trước khi tải."}
+                     </p>
+                   )}
+                 </div>
+@@ -808,13 +864,14 @@ const ConvertPage = () => {
+                 {(attentionItems.length > 0 ||
+                   (analyzePayload &&
+                     convStatus !== STATUS.ANALYZING &&
++                    convStatus !== STATUS.VALIDATING &&
+                     !hasPreviewReady)) && (
+                   <Alert
+                     variant={attentionItems.length > 0 ? "warning" : "info"}
+                     title={
+                       attentionItems.length > 0
+-                        ? `Cần hoàn thành trước khi sang bước 3${attentionItems.length ? ` · ${attentionItems.length} mục cần kiểm tra` : ""}`
+-                        : "Bước tiếp theo: Xem trước"
++                        ? `Cần hoàn thành trước khi kiểm tra lỗi${attentionItems.length ? ` · ${attentionItems.length} mục cần kiểm tra` : ""}`
++                        : "Bước tiếp theo: Kiểm tra & xem trước"
+                     }
+                     className="text-left"
+                   >
+@@ -849,21 +906,24 @@ const ConvertPage = () => {
+                       )}
+                       {analyzePayload &&
+                         convStatus !== STATUS.ANALYZING &&
++                        convStatus !== STATUS.VALIDATING &&
+                         !hasPreviewReady && (
+                           <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                             <p className="text-sm">
+-                              Bạn cần bấm <strong>Xem trước</strong> để kiểm tra dữ
+-                              liệu đầu ra và chuyển sang bước 3 trước khi tải file
+-                              MISA.
++                              Bạn cần bấm <strong>Kiểm tra & xem trước</strong> để rà
++                              lỗi và chuyển sang bước xem trước trước khi tải file MISA.
+                             </p>
+                             <button
+                               type="button"
+                               className="btn-primary justify-center px-4 py-2"
+                               onClick={handlePreview}
+-                              disabled={convStatus === STATUS.DOWNLOADING}
++                              disabled={
++                                convStatus === STATUS.DOWNLOADING ||
++                                convStatus === STATUS.VALIDATING
++                              }
+                             >
+                               <Wand2 size={16} />
+-                              Xem trước ngay
++                              Kiểm tra ngay
+                             </button>
+                           </div>
+                         )}
+@@ -871,7 +931,9 @@ const ConvertPage = () => {
+                   </Alert>
+                 )}
+ 
+-                {!analyzePayload && convStatus !== STATUS.ANALYZING && (
++                {!analyzePayload &&
++                  convStatus !== STATUS.ANALYZING &&
++                  convStatus !== STATUS.VALIDATING && (
+                   <div className="rounded-3xl border border-gray-200 bg-white p-8 sm:p-12 shadow-card text-center">
+                     <AlertTriangle size={36} className="mx-auto text-gray-300 mb-3" />
+                     <h2 className="text-base font-semibold text-gray-800">
+@@ -884,11 +946,11 @@ const ConvertPage = () => {
+                   </div>
+                 )}
+ 
+-                {convStatus === STATUS.ANALYZING && (
++                {(convStatus === STATUS.ANALYZING || convStatus === STATUS.VALIDATING) && (
+                   <div className="rounded-3xl border border-primary-100 bg-white p-8 sm:p-12 shadow-card flex flex-col items-center gap-4">
+                     <Loader2 size={40} className="text-primary-500 animate-spin" />
+                     <p className="text-sm font-semibold text-gray-800 text-center">
+-                      Đang xử lý…
++                      {convStatus === STATUS.VALIDATING ? "Đang kiểm tra lỗi…" : "Đang xử lý…"}
+                     </p>
+                     <p className="text-xs text-gray-400 text-center">
+                       File lớn có thể mất vài chục giây.
+@@ -896,7 +958,9 @@ const ConvertPage = () => {
+                   </div>
+                 )}
+ 
+-                {analyzePayload && convStatus !== STATUS.ANALYZING && (
++                {analyzePayload &&
++                  convStatus !== STATUS.ANALYZING &&
++                  convStatus !== STATUS.VALIDATING && (
+                   <div className="rounded-3xl border border-gray-200 bg-white shadow-card overflow-hidden">
+                     <div className="px-5 sm:px-6 py-5 border-b border-gray-100 flex flex-col lg:flex-row lg:items-start lg:justify-between gap-4">
+                       <div className="min-w-0">
+@@ -1005,10 +1069,7 @@ const ConvertPage = () => {
+                                     className="w-full min-w-[190px] rounded-xl border border-gray-200 bg-white px-3 py-2.5 text-sm text-gray-800 shadow-sm focus:border-primary-500 focus:outline-none focus:ring-2 focus:ring-primary-500/20"
+                                     value={matchedRaw}
+                                     onChange={(e) =>
+-                                      setTargetMapping((prev) => ({
+-                                        ...prev,
+-                                        [target]: e.target.value,
+-                                      }))
++                                      updateTargetMapping(target, e.target.value)
+                                     }
+                                   >
+                                     <option value="">— Không lấy từ Excel —</option>
+@@ -1031,10 +1092,7 @@ const ConvertPage = () => {
+                                     placeholder="Giá trị mặc định"
+                                     value={defaults[target] ?? ""}
+                                     onChange={(e) =>
+-                                      setDefaults((prev) => ({
+-                                        ...prev,
+-                                        [target]: e.target.value,
+-                                      }))
++                                      updateDefault(target, e.target.value)
+                                     }
+                                   />
+                                 </td>
+@@ -1050,10 +1108,7 @@ const ConvertPage = () => {
+                                     placeholder="VD: XK_${Số chứng từ (*)}"
+                                     value={formulas[target] ?? ""}
+                                     onChange={(e) =>
+-                                      setFormulas((prev) => ({
+-                                        ...prev,
+-                                        [target]: e.target.value,
+-                                      }))
++                                      updateFormula(target, e.target.value)
+                                     }
+                                   />
+                                 </td>
+@@ -1064,6 +1119,20 @@ const ConvertPage = () => {
+                       </table>
+                     </div>
+ 
++                    {validationReport && (
++                      <div className="space-y-4 border-t border-gray-100 bg-gray-50/60 px-5 py-4 sm:px-6">
++                        <ValidationReadinessCard
++                          report={validationReport}
++                          acknowledgeWarnings={acknowledgeWarnings}
++                          onAcknowledgeWarnings={setAcknowledgeWarnings}
++                        />
++                        <ReconciliationPanel
++                          reconciliation={validationReport.reconciliation}
++                        />
++                        <ValidationIssueTable issues={validationReport.issues || []} />
++                      </div>
++                    )}
++
+                     {convStatus === STATUS.PREVIEW && previewRows.length > 0 && (
+                       <div className="border-t border-gray-100 bg-white px-5 py-4 sm:px-6">
+                         <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+@@ -1072,7 +1141,7 @@ const ConvertPage = () => {
+                               Xem trước dữ liệu đầu ra
+                             </h3>
+                             <p className="text-sm text-gray-500">
+-                              Bạn có thể chỉnh sửa trực tiếp trước khi tải file MISA.
++                              Preview chỉ để kiểm tra. Nếu cần sửa, hãy chỉnh mapping/default/formula rồi làm mới xem trước.
+                             </p>
+                           </div>
+                           <div className="flex flex-col xs:flex-row gap-2">
+@@ -1089,7 +1158,10 @@ const ConvertPage = () => {
+                               type="button"
+                               className="inline-flex items-center justify-center gap-2 rounded-xl bg-emerald-600 px-5 py-2.5 text-sm font-semibold text-white shadow-sm transition-all duration-200 hover:bg-emerald-700 hover:shadow-md active:scale-[0.98] disabled:pointer-events-none disabled:opacity-50"
+                               onClick={handleDownload}
+-                              disabled={convStatus === STATUS.DOWNLOADING}
++                              disabled={
++                                convStatus === STATUS.DOWNLOADING ||
++                                !canDownloadMisa
++                              }
+                             >
+                               {convStatus === STATUS.DOWNLOADING ? (
+                                 <Loader2 size={16} className="animate-spin" />
+@@ -1100,13 +1172,20 @@ const ConvertPage = () => {
+                             </button>
+                           </div>
+                         </div>
++                        {!canDownloadMisa && (
++                          <p className="mb-3 text-sm font-semibold text-amber-700">
++                            {hasValidationBlocker
++                              ? "Còn lỗi nặng cần sửa trước khi tải."
++                              : hasValidationWarnings
++                                ? "Tick xác nhận cảnh báo ở bước Kiểm tra lỗi để tải file."
++                                : "Cần chạy kiểm tra lỗi trước khi tải."}
++                          </p>
++                        )}
+ 
+                         <div className="rounded-2xl border border-gray-200 overflow-hidden shadow-sm">
+                           <PreviewTable
+                             headers={previewHeaders}
+                             rows={previewRows}
+-                            onCellChange={handlePreviewCellChange}
+-                            onDeleteRow={handlePreviewRowDelete}
+                           />
+                         </div>
+                       </div>
+-- 
+2.54.0.windows.1
+

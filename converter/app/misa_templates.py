@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 
 from app.conversion_types import BACKEND_ROOT, CONVERSION_TYPES
@@ -51,8 +52,13 @@ def configured_template_dir() -> Path:
 
 
 def template_path_for(template_id: str) -> Path:
+    return _template_path_for(template_id, str(configured_template_dir()))
+
+
+@lru_cache(maxsize=16)
+def _template_path_for(template_id: str, configured_dir_value: str) -> Path:
     definition = CONVERSION_TYPES[template_id]
-    configured_dir = configured_template_dir()
+    configured_dir = Path(configured_dir_value)
     display_name = DISPLAY_FILENAMES.get(template_id)
     if configured_dir.exists() and display_name:
         candidate = configured_dir / display_name
@@ -64,10 +70,15 @@ def template_path_for(template_id: str) -> Path:
 
 
 def get_misa_template(template_id: str) -> MisaTemplate:
+    return _get_misa_template(template_id, str(configured_template_dir()))
+
+
+@lru_cache(maxsize=16)
+def _get_misa_template(template_id: str, configured_dir_value: str) -> MisaTemplate:
     if template_id not in CONVERSION_TYPES:
         raise ValueError(f"Unsupported target_template_id: {template_id}")
     definition = CONVERSION_TYPES[template_id]
-    path = template_path_for(template_id)
+    path = _template_path_for(template_id, configured_dir_value)
     workbook = read_template(path)
     return MisaTemplate(
         id=template_id,

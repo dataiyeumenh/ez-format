@@ -20,6 +20,8 @@ import Alert from "../components/ui/Alert";
 import StepProgress from "../components/ui/StepProgress";
 import PreviewTable from "../components/PreviewTable";
 import { useConverterApi } from "../hooks/useConverterApi";
+import { useAuth } from "../context/AuthContext";
+import api from "../services/api";
 
 const STATUS = {
   IDLE: "idle",
@@ -31,7 +33,7 @@ const STATUS = {
   ERROR: "error",
 };
 
-const STEPS = ["Tải file", "Ghép cột", "Xem trước", "Tải file MISA"];
+const STEPS = ["Tải file", "Ghép cột", "Tải file MISA"];
 const DEFAULT_TEMPLATE_ID = "bsn_sales";
 const EXCEL_EXT = ["xlsx", "xls"];
 const PDF_EXT = ["pdf"];
@@ -140,6 +142,19 @@ const ConvertPage = () => {
     confirmMapping,
     exportConfirmed,
   } = useConverterApi();
+  const { user, refreshUser } = useAuth();
+
+  const planCode = String(user?.plan?.code || user?.plan || "free").toLowerCase();
+  const isLimitedPlan = planCode === "free" || planCode === "perfile";
+  const dailyFileCredit = Math.max(0, Number(user?.dailyFileCredit || 0));
+  const fileCredits = Math.max(0, Number(user?.fileCredits || 0));
+  const canConvert =
+    !isLimitedPlan ||
+    (planCode === "free" ? dailyFileCredit > 0 : dailyFileCredit > 0 || fileCredits > 0);
+  const noCreditMessage =
+    planCode === "free"
+      ? "Bạn đã dùng hết lượt chuyển đổi miễn phí hôm nay. Vui lòng quay lại vào ngày mai hoặc nâng cấp gói."
+      : "Bạn đã hết lượt chuyển đổi. Vui lòng mua thêm lượt hoặc nâng cấp gói.";
 
   const [dragActive, setDragActive] = useState(false);
   const [selectedFile, setSelectedFile] = useState(null);
@@ -156,6 +171,7 @@ const ConvertPage = () => {
   const [previewRows, setPreviewRows] = useState([]);
   const [previewStats, setPreviewStats] = useState(null);
   const [profileId, setProfileId] = useState(null);
+  const [conversionRunId, setConversionRunId] = useState(null);
   const [focusedTarget, setFocusedTarget] = useState("");
 
   const inputRef = useRef(null);
@@ -244,7 +260,6 @@ const ConvertPage = () => {
     [defaults, formulas, targetHeaders, targetMapping],
   );
   const keyMappingOkCount = keyMappingValues.filter((item) => item.ok).length;
-  const hasPreviewReady = previewRows.length > 0;
   const liveMissingRequiredIssues = useMemo(
     () =>
       !analyzePayload
@@ -311,13 +326,11 @@ const ConvertPage = () => {
     confidence !== undefined ? ` · Khớp ${Math.round(confidence * 100)}%` : "";
 
   const stepIndex =
-    convStatus === STATUS.MAPPING
-      ? 1
-      : convStatus === STATUS.PREVIEW || convStatus === STATUS.DOWNLOADING
-        ? 2
-        : convStatus === STATUS.SUCCESS
-          ? 3
-          : 0;
+    convStatus === STATUS.SUCCESS || convStatus === STATUS.DOWNLOADING
+      ? 2
+      : convStatus === STATUS.MAPPING || convStatus === STATUS.PREVIEW
+        ? 1
+        : 0;
 
   useEffect(() => {
     if (!templates.length) return;
@@ -337,6 +350,36 @@ const ConvertPage = () => {
     setPreviewRows([]);
     setPreviewStats(null);
     setProfileId(null);
+    setConversionRunId(null);
+  };
+
+  const createConversionRunLog = async (file, templateId) => {
+    if (!localStorage.getItem("token")) return null;
+    try {
+      const { data } = await api.post("/conversion-runs", {
+        fileName: file.name,
+        fileSizeBytes: file.size,
+        targetTemplateId: templateId,
+      });
+      const runId = data.run?.id || null;
+      setConversionRunId(runId);
+      return runId;
+    } catch (err) {
+      console.warn("[ConvertPage] Cannot create conversion run log:", err);
+      return null;
+    }
+  };
+
+  const updateConversionRunLog = async (status, payload = {}, runId = conversionRunId) => {
+    if (!runId || !localStorage.getItem("token")) return;
+    try {
+      await api.patch(`/conversion-runs/${runId}/status`, {
+        status,
+        ...payload,
+      });
+    } catch (err) {
+      console.warn("[ConvertPage] Cannot update conversion run log:", err);
+    }
   };
 
   const clearPreviewAfterMappingChange = () => {
@@ -423,6 +466,7 @@ const ConvertPage = () => {
     setConvStatus(STATUS.ANALYZING);
     setErrorMsg("");
     resetAnalysis();
+    const runId = await createConversionRunLog(file, templateId);
     try {
       const result = await analyzeFile(file, templateId);
       const suggestion = result.mapping_suggestion || {};
@@ -435,8 +479,21 @@ const ConvertPage = () => {
       setIssues(result.issues || []);
       setProfileId(suggestion.profile_id || null);
       setConvStatus(STATUS.MAPPING);
+      await updateConversionRunLog(
+        "processing",
+        {
+          converterUploadId: result.upload_id,
+          targetTemplateId: result.target_template_id || templateId,
+        },
+        runId,
+      );
     } catch (err) {
       console.error("[ConvertPage] Analyze failed:", err);
+      await updateConversionRunLog(
+        "failed",
+        { errorMessage: err.message || "Không thể phân tích file." },
+        runId,
+      );
       setErrorMsg(err.message || "Không thể phân tích file.");
       setConvStatus(STATUS.ERROR);
     }
@@ -489,6 +546,7 @@ const ConvertPage = () => {
     if (!analyzePayload?.upload_id) return;
     setConvStatus(STATUS.DOWNLOADING);
     setErrorMsg("");
+    let exportStarted = false;
     try {
       if (!previewRows.length) {
         const preview = await createPreview();
@@ -497,6 +555,7 @@ const ConvertPage = () => {
         }
       }
       const savedProfileId = await saveProfileIfNeeded();
+      exportStarted = true;
       const { blob, filename } = await exportConfirmed(
         analyzePayload.upload_id,
         savedProfileId,
@@ -509,9 +568,22 @@ const ConvertPage = () => {
       a.click();
       a.remove();
       window.URL.revokeObjectURL(url);
+      await updateConversionRunLog("completed", {
+        converterUploadId: analyzePayload.upload_id,
+        targetTemplateId,
+      });
       setConvStatus(STATUS.SUCCESS);
+      // Cập nhật lại lượt (đã bị trừ ở server) để badge hiển thị đúng.
+      refreshUser?.().catch(() => {});
     } catch (err) {
       console.error("[ConvertPage] Download failed:", err);
+      if (exportStarted) {
+        await updateConversionRunLog("failed", {
+          converterUploadId: analyzePayload.upload_id,
+          targetTemplateId,
+          errorMessage: err.message || "Không thể tải file MISA.",
+        });
+      }
       setErrorMsg(err.message || "Không thể tải file MISA.");
       setConvStatus(previewRows.length ? STATUS.PREVIEW : STATUS.MAPPING);
     }
@@ -718,7 +790,8 @@ const ConvertPage = () => {
                     disabled={
                       !selectedFile ||
                       serviceOnline === false ||
-                      convStatus === STATUS.ANALYZING
+                      convStatus === STATUS.ANALYZING ||
+                      !canConvert
                     }
                   >
                     {convStatus === STATUS.ANALYZING && !analyzePayload ? (
@@ -728,6 +801,12 @@ const ConvertPage = () => {
                     )}
                     Phân tích & gợi ý ghép cột
                   </button>
+
+                  {isLimitedPlan && !canConvert && (
+                    <Alert variant="warning" className="text-left">
+                      {noCreditMessage}
+                    </Alert>
+                  )}
 
                   {analyzePayload && (
                     <div className="rounded-xl bg-gray-50 p-3 text-xs text-gray-600 space-y-1">
@@ -771,7 +850,7 @@ const ConvertPage = () => {
                         disabled={
                           convStatus === STATUS.DOWNLOADING ||
                           convStatus === STATUS.ANALYZING ||
-                          !hasPreviewReady
+                          (!canConvert && convStatus !== STATUS.SUCCESS)
                         }
                       >
                         {convStatus === STATUS.DOWNLOADING ? (
@@ -779,16 +858,11 @@ const ConvertPage = () => {
                         ) : (
                           <Download size={16} />
                         )}
-                        Tải file MISA
+                        {convStatus === STATUS.SUCCESS ? "Tải lại file MISA" : "Tải file MISA"}
                       </button>
                     </div>
                   )}
 
-                  {analyzePayload && !hasPreviewReady && (
-                    <p className="text-center text-xs text-amber-700">
-                      Hoàn thành bước <strong>Xem trước</strong> để mở tải file MISA.
-                    </p>
-                  )}
                 </div>
 
                 <p className="text-center text-xs text-gray-400">
@@ -805,17 +879,10 @@ const ConvertPage = () => {
                   </Alert>
                 )}
 
-                {(attentionItems.length > 0 ||
-                  (analyzePayload &&
-                    convStatus !== STATUS.ANALYZING &&
-                    !hasPreviewReady)) && (
+                {attentionItems.length > 0 && (
                   <Alert
-                    variant={attentionItems.length > 0 ? "warning" : "info"}
-                    title={
-                      attentionItems.length > 0
-                        ? `Cần hoàn thành trước khi sang bước 3${attentionItems.length ? ` · ${attentionItems.length} mục cần kiểm tra` : ""}`
-                        : "Bước tiếp theo: Xem trước"
-                    }
+                    variant="warning"
+                    title={`Cần kiểm tra · ${attentionItems.length} mục`}
                     className="text-left"
                   >
                     <div className="space-y-3">
@@ -847,26 +914,6 @@ const ConvertPage = () => {
                           ))}
                         </ul>
                       )}
-                      {analyzePayload &&
-                        convStatus !== STATUS.ANALYZING &&
-                        !hasPreviewReady && (
-                          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-                            <p className="text-sm">
-                              Bạn cần bấm <strong>Xem trước</strong> để kiểm tra dữ
-                              liệu đầu ra và chuyển sang bước 3 trước khi tải file
-                              MISA.
-                            </p>
-                            <button
-                              type="button"
-                              className="btn-primary justify-center px-4 py-2"
-                              onClick={handlePreview}
-                              disabled={convStatus === STATUS.DOWNLOADING}
-                            >
-                              <Wand2 size={16} />
-                              Xem trước ngay
-                            </button>
-                          </div>
-                        )}
                     </div>
                   </Alert>
                 )}
@@ -1118,8 +1165,10 @@ const ConvertPage = () => {
                         title="Đã xuất file MISA"
                         className="rounded-none border-0 border-t border-emerald-100"
                       >
-                        Thiết lập ghép cột đã được lưu. Lần sau tải file cùng cấu
-                        trúc, hệ thống sẽ ưu tiên dùng thiết lập này.
+                        Thiết lập ghép cột đã được lưu. Nếu chưa lưu được file (lỡ
+                        bấm hủy hộp thoại lưu), bạn có thể bấm{" "}
+                        <strong>Tải lại file MISA</strong> để tải lại mà không tốn
+                        thêm lượt.
                       </Alert>
                     )}
                   </div>

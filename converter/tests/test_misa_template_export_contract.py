@@ -118,3 +118,16 @@ def test_export_clears_stale_template_data_rows(tmp_path):
     stale_row = template.workbook.header_row_index + 2
     if sheet.nrows > stale_row:
         assert sheet.cell_value(stale_row, invoice_col) == ""
+
+
+def test_export_does_not_copy_blank_template_tail(tmp_path):
+    template = next(item for item in list_misa_templates() if item.id == "bsn_sales")
+    output_path = tmp_path / "trimmed_tail.xls"
+    row = {header: "" for header in template.headers}
+    row["Số chứng từ (*)"] = "TRIMMED"
+
+    write_xls_from_template(template.workbook, [row], output_path)
+
+    sheet = xlrd.open_workbook(str(output_path), formatting_info=True).sheet_by_index(0)
+    assert sheet.nrows <= 12
+    assert len(sheet.rowinfo_map) <= 128

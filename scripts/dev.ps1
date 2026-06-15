@@ -114,7 +114,7 @@ if ($ollamaOnline -and (Test-Path -LiteralPath $tokenPath)) {
     $env:AI_PROVIDER      = "remote_http"
     $env:AI_BASE_URL      = "http://127.0.0.1:$GatewayPort/v1/misa/suggest-mapping"
     $env:AI_TOKEN         = $aiToken
-    $env:AI_TIMEOUT_SECONDS = "120"
+    $env:AI_MAPPING_TIMEOUT_SECONDS = "15"
     $env:AI_REQUIRED      = "false"
     Write-Host "[converter] AI enabled (gateway at port $GatewayPort)" -ForegroundColor Green
 } else {

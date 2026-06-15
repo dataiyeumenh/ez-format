@@ -37,6 +37,8 @@ const protect = async (req, res, next) => {
     if (
       req.user.isModified("plan") ||
       req.user.isModified("fileCredits") ||
+      req.user.isModified("dailyFileCredit") ||
+      req.user.isModified("dailyFileCreditDate") ||
       req.user.isModified("planStartedAt") ||
       req.user.isModified("planExpiresAt")
     ) {

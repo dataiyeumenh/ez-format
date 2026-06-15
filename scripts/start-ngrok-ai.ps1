@@ -174,7 +174,7 @@ OLLAMA_BASE_URL=$publicUrl
 AI_PROVIDER=remote_http
 AI_BASE_URL=$aiBaseUrl
 AI_TOKEN=$token
-AI_TIMEOUT_SECONDS=120
+AI_MAPPING_TIMEOUT_SECONDS=15
 AI_REQUIRED=false
 "@
 }
@@ -193,7 +193,7 @@ if (-not $ExposeOllamaDirect) {
     Write-Host "AI_PROVIDER=remote_http"
     Write-Host "AI_BASE_URL=$aiBaseUrl"
     Write-Host "AI_TOKEN=<redacted from $tokenPath>"
-    Write-Host "AI_TIMEOUT_SECONDS=120"
+    Write-Host "AI_MAPPING_TIMEOUT_SECONDS=15"
     Write-Host "AI_REQUIRED=false"
 }
 Write-Host ""

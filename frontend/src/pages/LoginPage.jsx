@@ -125,7 +125,7 @@ const LoginPage = () => {
                   Mật khẩu
                 </label>
                 <Link
-                  to="/contact"
+                  to="/forgot-password"
                   className="text-xs text-primary-600 hover:text-primary-700"
                 >
                   Quên mật khẩu?
