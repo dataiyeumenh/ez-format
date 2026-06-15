@@ -126,6 +126,15 @@ export function useConverterApi() {
     return readJsonResponse(response, "Không thể xem trước mapping MISA.");
   }, []);
 
+  const validateMapping = useCallback(async (payload) => {
+    const response = await fetch(`${pythonBaseURL}/api/v1/mappings/validate`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    return readJsonResponse(response, "Không thể kiểm tra lỗi MISA.");
+  }, []);
+
   const confirmMapping = useCallback(async (payload) => {
     const response = await fetch(`${pythonBaseURL}/api/v1/mappings/confirm`, {
       method: "POST",
@@ -135,11 +144,16 @@ export function useConverterApi() {
     return readJsonResponse(response, "Không thể lưu setting mapping.");
   }, []);
 
-  const exportConfirmed = useCallback(async (uploadId, profileId) => {
+  const exportConfirmed = useCallback(async (uploadId, profileId, options = {}) => {
     const response = await fetch(`${pythonBaseURL}/api/v1/conversions/export`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ upload_id: uploadId, profile_id: profileId }),
+      body: JSON.stringify({
+        upload_id: uploadId,
+        profile_id: profileId,
+        acknowledge_warnings: Boolean(options.acknowledgeWarnings),
+        validation_run_id: options.validationRunId || undefined,
+      }),
     });
 
     if (!response.ok) {
@@ -159,6 +173,7 @@ export function useConverterApi() {
     aiOnline,
     analyzeFile,
     previewMapping,
+    validateMapping,
     confirmMapping,
     exportConfirmed,
   };

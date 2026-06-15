@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -118,3 +118,93 @@ class ExportRowsRequest(BaseModel):
     conversion_type: str
     rows: list[dict[str, Any]]
     options: JsonDict | None = None
+
+
+ValidationSeverity = Literal["fatal", "blocker", "warning", "info"]
+ValidationStatus = Literal["ready", "needs_review", "blocked", "fatal"]
+AccountingRegime = Literal["TT99", "TT200", "TT133"]
+
+
+class RuleSource(BaseModel):
+    title: str
+    url: str
+    effective_from: str | None = None
+    effective_to: str | None = None
+    verified_at: str
+
+
+class IssueExplanation(BaseModel):
+    why: str
+    impact: str
+    fix: str
+    example: str | None = None
+
+
+class MisaValidationIssue(BaseModel):
+    severity: ValidationSeverity
+    category: str
+    code: str
+    message: str
+    row: int | None = None
+    field: str | None = None
+    invoice: str | None = None
+    expected: Any = None
+    actual: Any = None
+    delta: Any = None
+    source_url: str | None = None
+    explanation: IssueExplanation | None = None
+
+
+class MisaValidationSummary(BaseModel):
+    fatal: int = 0
+    blocker: int = 0
+    warning: int = 0
+    info: int = 0
+
+
+class ReconciliationReport(BaseModel):
+    input_rows: int
+    output_rows: int
+    invoice_count: int | None = None
+    sum_amount: str | None = None
+    sum_vat: str | None = None
+    sum_total: str | None = None
+    unmapped_columns: list[str] = Field(default_factory=list)
+
+
+class MisaReadinessReport(BaseModel):
+    validation_run_id: str
+    ok: bool
+    status: ValidationStatus
+    score: int
+    summary: MisaValidationSummary
+    issues: list[MisaValidationIssue]
+    reconciliation: ReconciliationReport
+    legal_disclaimer: str
+
+
+class VatPolicy(BaseModel):
+    allow_8_percent: bool = True
+    effective_from: str = "2025-07-01"
+    effective_to: str = "2026-12-31"
+
+
+class MappingValidateRequest(BaseModel):
+    upload_id: str
+    target_template_id: str
+    mapping: dict[str, Any] = Field(default_factory=dict)
+    defaults: dict[str, Any] = Field(default_factory=dict)
+    formulas: dict[str, str] = Field(default_factory=dict)
+    accounting_regime: AccountingRegime | None = None
+    fiscal_year_start: str | None = None
+    vat_policy: VatPolicy | None = None
+
+
+class ExportConfirmedProfileRequest(BaseModel):
+    upload_id: str
+    profile_id: str
+    acknowledge_warnings: bool = False
+    validation_run_id: str | None = None
+    accounting_regime: AccountingRegime | None = None
+    fiscal_year_start: str | None = None
+    vat_policy: VatPolicy | None = None

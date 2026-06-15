@@ -17,6 +17,7 @@ from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.encoders import jsonable_encoder
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
+from pydantic import ValidationError
 from starlette.concurrency import run_in_threadpool
 
 from app.ai_assistant import explain_validation_report, suggest_mapping_for_file
@@ -31,8 +32,16 @@ from app.misa_workflow import (
     export_confirmed_profile,
     preview_mapping,
     templates_payload,
+    validate_confirmed_profile,
+    validate_current_mapping,
 )
-from app.models import ExportRowsRequest, PreviewResponse, ValidationReport
+from app.models import (
+    ExportConfirmedProfileRequest,
+    ExportRowsRequest,
+    MappingValidateRequest,
+    PreviewResponse,
+    ValidationReport,
+)
 
 
 app = FastAPI(title="EzFormat Converter API")
@@ -166,6 +175,30 @@ async def confirm_misa_mapping(body: dict) -> JSONResponse:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+@app.post("/api/v1/mappings/validate")
+async def validate_misa_mapping(body: dict) -> JSONResponse:
+    try:
+        request = MappingValidateRequest.model_validate(body)
+        report = await run_in_threadpool(
+            validate_current_mapping,
+            upload_id=request.upload_id,
+            target_template_id=request.target_template_id,
+            mapping=request.mapping,
+            defaults=request.defaults,
+            formulas=request.formulas,
+            accounting_regime=request.accounting_regime,
+            fiscal_year_start=request.fiscal_year_start,
+            vat_policy=request.vat_policy,
+        )
+        return JSONResponse(jsonable_encoder(report))
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValidationError as exc:
+        raise HTTPException(status_code=422, detail=exc.errors()) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @app.post("/api/v1/conversions/validate")
 async def validate_conversion(
     conversion_type: Annotated[str, Form()],
@@ -214,13 +247,34 @@ async def preview_conversion(
 async def export_conversion_rows(body: dict) -> Response:
     if "upload_id" in body and "profile_id" in body:
         try:
+            request = ExportConfirmedProfileRequest.model_validate(body)
+            report = await run_in_threadpool(
+                validate_confirmed_profile,
+                request.upload_id,
+                request.profile_id,
+                accounting_regime=request.accounting_regime,
+                fiscal_year_start=request.fiscal_year_start,
+                vat_policy=request.vat_policy,
+            )
+            if report.summary.fatal or report.summary.blocker:
+                return JSONResponse(
+                    status_code=422,
+                    content={"detail": jsonable_encoder(report)},
+                )
+            if report.summary.warning and not request.acknowledge_warnings:
+                return JSONResponse(
+                    status_code=422,
+                    content={"detail": jsonable_encoder(report)},
+                )
             content, filename = await run_in_threadpool(
                 export_confirmed_profile,
-                upload_id=str(body["upload_id"]),
-                profile_id=str(body["profile_id"]),
+                upload_id=request.upload_id,
+                profile_id=request.profile_id,
             )
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValidationError as exc:
+            raise HTTPException(status_code=422, detail=exc.errors()) from exc
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return Response(

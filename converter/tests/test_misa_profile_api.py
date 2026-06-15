@@ -127,7 +127,11 @@ def test_analyze_preview_confirm_export_learns_profile(tmp_path, monkeypatch):
 
     export = client.post(
         "/api/v1/conversions/export",
-        json={"upload_id": analyze_payload["upload_id"], "profile_id": profile_id},
+        json={
+            "upload_id": analyze_payload["upload_id"],
+            "profile_id": profile_id,
+            "acknowledge_warnings": True,
+        },
     )
     assert export.status_code == 200
     assert export.headers["content-type"].startswith("application/vnd.ms-excel")

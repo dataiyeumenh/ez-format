@@ -29,7 +29,9 @@ from app.misa_mapping import (
     validate_mapping,
 )
 from app.misa_profiles import ProfileStore
+from app.misa_readiness import validate_misa_readiness
 from app.misa_templates import get_misa_template, list_misa_templates
+from app.models import MisaReadinessReport, VatPolicy
 from app.normalization import normalize_header
 
 
@@ -185,6 +187,40 @@ def preview_mapping(
     }
 
 
+def validate_current_mapping(
+    *,
+    upload_id: str,
+    target_template_id: str,
+    mapping: dict[str, Any],
+    defaults: dict[str, Any] | None = None,
+    formulas: dict[str, str] | None = None,
+    accounting_regime: str | None = None,
+    fiscal_year_start: str | None = None,
+    vat_policy: VatPolicy | dict[str, Any] | None = None,
+) -> MisaReadinessReport:
+    table = _read_upload_table(upload_id)
+    template = get_misa_template(target_template_id)
+    clean_mapping = sanitize_mapping_for_template(target_template_id, mapping)
+    clean_defaults = sanitize_defaults_for_template(target_template_id, defaults, template.headers)
+    rows = apply_mapping(table, template.headers, clean_mapping, clean_defaults, formulas)
+    return validate_misa_readiness(
+        input_rows=len(table.rows),
+        target_template_id=target_template_id,
+        target_headers=template.headers,
+        mapping=clean_mapping,
+        defaults=clean_defaults,
+        formulas=formulas or {},
+        output_rows=rows,
+        source_headers=table.headers,
+        hidden_rows=table.hidden_rows,
+        formula_cells=table.formula_cells,
+        blank_rows_ignored=table.blank_rows_ignored,
+        accounting_regime=accounting_regime,
+        fiscal_year_start=fiscal_year_start,
+        vat_policy=vat_policy,
+    )
+
+
 def confirm_mapping(
     *,
     upload_id: str,
@@ -244,6 +280,27 @@ def confirm_mapping(
         issues=[],
     )
     return {"profile_id": profile.id, "saved": True}
+
+
+def validate_confirmed_profile(
+    upload_id: str,
+    profile_id: str,
+    *,
+    accounting_regime: str | None = None,
+    fiscal_year_start: str | None = None,
+    vat_policy: VatPolicy | dict[str, Any] | None = None,
+) -> MisaReadinessReport:
+    profile = ProfileStore().get_profile(profile_id)
+    return validate_current_mapping(
+        upload_id=upload_id,
+        target_template_id=profile.target_template_id,
+        mapping=profile.mapping,
+        defaults=profile.defaults,
+        formulas=profile.formulas,
+        accounting_regime=accounting_regime,
+        fiscal_year_start=fiscal_year_start,
+        vat_policy=vat_policy,
+    )
 
 
 def export_confirmed_profile(upload_id: str, profile_id: str) -> tuple[bytes, str]:
