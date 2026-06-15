@@ -14,6 +14,10 @@ function getTransporter() {
     port: Number(process.env.SMTP_PORT || 587),
     secure: String(process.env.SMTP_SECURE || "false") === "true",
     auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
+    // Tránh treo vô hạn khi SMTP sai/bị chặn -> fail trong ~10-15s.
+    connectionTimeout: 10000,
+    greetingTimeout: 10000,
+    socketTimeout: 15000,
   });
   return transporter;
 }
@@ -38,17 +42,37 @@ function buildResetEmailHtml(resetUrl, name) {
 async function sendPasswordResetEmail(to, resetUrl, name = "") {
   if (!isEmailConfigured()) {
     // Dev fallback: SMTP chưa cấu hình -> log link ra console để test thủ công.
-    console.log(`[emailService] SMTP chưa cấu hình. Reset link cho ${to}:\n${resetUrl}`);
+    console.warn(
+      `[emailService] SMTP CHƯA cấu hình (thiếu SMTP_HOST/SMTP_USER/SMTP_PASS). ` +
+        `Email KHÔNG được gửi. Reset link cho ${to}:\n${resetUrl}`,
+    );
     return { sent: false, reason: "not_configured" };
   }
   const from = process.env.EMAIL_FROM || process.env.SMTP_USER;
-  await getTransporter().sendMail({
-    from,
-    to,
-    subject: "Đặt lại mật khẩu EzFormat",
-    html: buildResetEmailHtml(resetUrl, name),
-  });
-  return { sent: true };
+  try {
+    await getTransporter().sendMail({
+      from,
+      to,
+      subject: "Đặt lại mật khẩu EzFormat",
+      html: buildResetEmailHtml(resetUrl, name),
+    });
+    return { sent: true };
+  } catch (err) {
+    // Log lỗi SMTP thật để debug (sai app password, sai host/port, bị chặn...).
+    console.error(`[emailService] Gửi email thất bại tới ${to}:`, err.message);
+    return { sent: false, reason: "send_failed", error: err.message };
+  }
 }
 
-module.exports = { isEmailConfigured, sendPasswordResetEmail };
+// Kiểm tra kết nối SMTP (gọi thủ công khi debug). Trả về { ok, error }.
+async function verifyEmailTransport() {
+  if (!isEmailConfigured()) return { ok: false, error: "not_configured" };
+  try {
+    await getTransporter().verify();
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+}
+
+module.exports = { isEmailConfigured, sendPasswordResetEmail, verifyEmailTransport };

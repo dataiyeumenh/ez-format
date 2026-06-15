@@ -285,7 +285,11 @@ const forgotPassword = async (req, res) => {
       await user.save({ validateBeforeSave: false });
 
       const resetUrl = `${resolveFrontendBase(req)}/reset-password?token=${token}`;
-      await sendPasswordResetEmail(user.email, resetUrl, user.name);
+      // Fire-and-forget: KHÔNG await để response không bị treo nếu SMTP chậm/lỗi.
+      // Lỗi (nếu có) được log trong emailService để debug qua Render logs.
+      sendPasswordResetEmail(user.email, resetUrl, user.name).catch((err) =>
+        console.error("[forgotPassword] gửi email lỗi:", err.message),
+      );
     }
 
     return res.json({ success: true, message: genericMessage });
