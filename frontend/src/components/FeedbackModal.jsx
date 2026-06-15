@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { createPortal } from "react-dom";
 import { MessageSquarePlus, X, CheckCircle2 } from "lucide-react";
 import { FEEDBACK_CATEGORIES, submitFeedback } from "../services/feedback";
 
@@ -51,7 +52,7 @@ const FeedbackModal = ({ open, onClose }) => {
     }
   };
 
-  return (
+  return createPortal(
     <div
       className="fixed inset-0 z-[90] flex items-center justify-center bg-gray-900/50 p-4 animate-fade-in"
       onClick={handleClose}
@@ -163,7 +164,8 @@ const FeedbackModal = ({ open, onClose }) => {
           </>
         )}
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 };
 
