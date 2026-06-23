@@ -11,7 +11,29 @@ import xlrd
 import xlwt
 from xlutils.filter import XLWTWriter
 
-from app.normalization import is_blank
+from app.normalization import is_blank, normalize_header
+
+
+SMART_PURCHASE_HEADERS = frozenset(
+    {
+        "sr_hd",
+        "soct",
+        "ngayct",
+        "so_hd",
+        "tendm",
+        "mathang",
+        "phan_loai",
+        "donvi",
+        "luong",
+        "dgvnd",
+        "ttvnd",
+        "tkthue",
+        "ts_gtgt",
+        "thuevnd",
+        "makh",
+        "tenkh",
+    }
+)
 
 
 class InputReadError(Exception):
@@ -119,6 +141,18 @@ def score_header_rows(rows: list[Any]) -> tuple[int, int]:
     return best_idx, best_score or (0, 0)
 
 
+def is_smart_purchase_header(values: list[Any] | tuple[Any, ...]) -> bool:
+    normalized = {normalize_header(value) for value in values if not is_blank(value)}
+    return SMART_PURCHASE_HEADERS.issubset(normalized)
+
+
+def _smart_purchase_header_index(rows: list[Any]) -> int | None:
+    for idx, row in enumerate(rows[:30]):
+        if is_smart_purchase_header(row):
+            return idx
+    return None
+
+
 def _read_xlsx(path: Path) -> InputTable:
     try:
         workbook = openpyxl.load_workbook(path, read_only=True, data_only=True)
@@ -133,7 +167,12 @@ def _read_xlsx(path: Path) -> InputTable:
             rows = list(islice(sheet.iter_rows(values_only=True), 30))
             if not rows:
                 continue
-            header_idx, score = score_header_rows(rows)
+            smart_header_idx = _smart_purchase_header_index(rows)
+            if smart_header_idx is not None:
+                header_idx = smart_header_idx
+                score = (1000, len([value for value in rows[header_idx] if not is_blank(value)]))
+            else:
+                header_idx, score = score_header_rows(rows)
             if score > best_score:
                 best_score = score
                 best_name = name
@@ -188,7 +227,12 @@ def _read_xls(path: Path) -> InputTable:
         ]
         if not rows:
             continue
-        header_idx, score = score_header_rows(rows)
+        smart_header_idx = _smart_purchase_header_index(rows)
+        if smart_header_idx is not None:
+            header_idx = smart_header_idx
+            score = (1000, len([value for value in rows[header_idx] if not is_blank(value)]))
+        else:
+            header_idx, score = score_header_rows(rows)
         if score > best_score:
             best_score = score
             best_name = sheet.name
