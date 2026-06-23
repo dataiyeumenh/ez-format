@@ -112,6 +112,8 @@ def detect_target_template_id(table: InputTable, requested: str | None = None) -
     if requested:
         return requested
     normalized = {normalize_header(header) for header in table.headers}
+    if {"soct", "makh", "tenkh", "tendm", "mathang", "phan_loai"} <= normalized:
+        return "purchase_goods"
     if {"ma_hoa_don", "ten_khach_hang", "ma_hang"} & normalized:
         return "bsn_sales"
     if {"ma_nha_cung_cap", "ten_nha_cung_cap"} & normalized:
