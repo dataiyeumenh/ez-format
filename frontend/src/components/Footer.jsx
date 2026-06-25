@@ -23,30 +23,6 @@ const Footer = () => {
 
           <div className="space-y-3">
             <h4 className="font-semibold text-white text-sm uppercase tracking-wider">
-              Sản phẩm
-            </h4>
-            <ul className="space-y-2">
-              <li>
-                <Link
-                  to="/convert"
-                  className="text-sm text-gray-400 hover:text-white transition-colors"
-                >
-                  Chuyển đổi file
-                </Link>
-              </li>
-              <li>
-                <Link
-                  to="/pricing"
-                  className="text-sm text-gray-400 hover:text-white transition-colors"
-                >
-                  Bảng giá
-                </Link>
-              </li>
-            </ul>
-          </div>
-
-          <div className="space-y-3">
-            <h4 className="font-semibold text-white text-sm uppercase tracking-wider">
               Hỗ trợ
             </h4>
             <ul className="space-y-2">
@@ -86,18 +62,6 @@ const Footer = () => {
               <li>Điều khoản dịch vụ (sắp có)</li>
             </ul>
           </div>
-        </div>
-
-        <div className="border-t border-gray-800 mt-10 pt-6 flex flex-col sm:flex-row items-center justify-between gap-4">
-          <p className="text-xs text-gray-500">
-            © {new Date().getFullYear()} EzFormat. All rights reserved.
-          </p>
-          <Link
-            to="/convert"
-            className="text-xs text-gray-500 hover:text-gray-300 transition-colors"
-          >
-            Bắt đầu chuyển đổi →
-          </Link>
         </div>
       </div>
     </footer>

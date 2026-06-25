@@ -28,12 +28,13 @@ export const AuthProvider = ({ children }) => {
 
   const login = useCallback(async (email, password) => {
     const response = await api.post("/auth/login", { email, password });
-    const { token, user } = response.data;
+    const { token, user, isFirstLogin } = response.data;
+    const sessionUser = { ...user, isFirstLogin: Boolean(isFirstLogin ?? user?.isFirstLogin) };
     localStorage.setItem("token", token);
-    localStorage.setItem("user", JSON.stringify(user));
+    localStorage.setItem("user", JSON.stringify(sessionUser));
     setToken(token);
-    setUser(user);
-    return user;
+    setUser(sessionUser);
+    return sessionUser;
   }, []);
 
   const register = useCallback(async (name, email, password) => {
@@ -47,12 +48,13 @@ export const AuthProvider = ({ children }) => {
 
   const loginWithGoogle = useCallback(async (credential) => {
     const response = await api.post("/auth/google", { credential });
-    const { token, user } = response.data;
+    const { token, user, isFirstLogin } = response.data;
+    const sessionUser = { ...user, isFirstLogin: Boolean(isFirstLogin ?? user?.isFirstLogin) };
     localStorage.setItem("token", token);
-    localStorage.setItem("user", JSON.stringify(user));
+    localStorage.setItem("user", JSON.stringify(sessionUser));
     setToken(token);
-    setUser(user);
-    return user;
+    setUser(sessionUser);
+    return sessionUser;
   }, []);
 
   const refreshUser = useCallback(async () => {
