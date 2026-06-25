@@ -183,13 +183,15 @@ def export_rows(
     rows: list[dict[str, Any]],
     output_path: Path,
     options: JsonDict | None = None,
+    *,
+    sheet_name: str | None = None,
 ) -> None:
     """Write edited preview rows to a MISA template .xls file."""
     if not rows:
         raise ValueError("No rows to export.")
     definition = get_conversion_type(conversion_type)
     template = read_template(definition.template_path)
-    write_xls_from_template(template, rows, output_path)
+    write_xls_from_template(template, rows, output_path, output_sheet_name=sheet_name)
 
 
 def convert_file(
@@ -210,7 +212,7 @@ def convert_file(
     detected_columns = report.detected_columns
     template = read_template(definition.template_path)
     output_rows = [_map_row(row, detected_columns, definition, options) for row in table.rows]
-    write_xls_from_template(template, output_rows, output_path)
+    write_xls_from_template(template, output_rows, output_path, output_sheet_name=table.sheet_name)
     return report
 
 

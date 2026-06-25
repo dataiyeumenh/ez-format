@@ -239,6 +239,7 @@ async def export_conversion_rows(body: dict) -> Response:
             legacy_body.rows,
             output_path,
             legacy_body.options,
+            sheet_name=legacy_body.sheet_name,
         )
         content = output_path.read_bytes()
         return Response(

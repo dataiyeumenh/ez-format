@@ -258,7 +258,7 @@ def export_confirmed_profile(upload_id: str, profile_id: str) -> tuple[bytes, st
         profile.formulas,
     )
     output_path = _upload_dir(upload_id) / "misa_export.xls"
-    write_xls_from_template(template.workbook, rows, output_path)
+    write_xls_from_template(template.workbook, rows, output_path, output_sheet_name=table.sheet_name)
     return output_path.read_bytes(), f"Import misa {upload_id[:8]}.xls"
 
 
