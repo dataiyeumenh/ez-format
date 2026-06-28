@@ -33,7 +33,7 @@ const STATUS = {
   ERROR: "error",
 };
 
-const STEPS = ["Tải file", "Ghép cột", "Tải file MISA"];
+const STEPS = ["Tải file", "Ghép cột", "Tải file đã chuẩn hoá"];
 const DEFAULT_TEMPLATE_ID = "bsn_sales";
 const EXCEL_EXT = ["xlsx", "xls"];
 const PDF_EXT = ["pdf"];
@@ -527,7 +527,7 @@ const ConvertPage = () => {
       setConvStatus(STATUS.PREVIEW);
     } catch (err) {
       console.error("[ConvertPage] Preview failed:", err);
-      setErrorMsg(err.message || "Không thể xem trước dữ liệu MISA.");
+      setErrorMsg(err.message || "Không thể xem trước dữ liệu.");
       setConvStatus(STATUS.MAPPING);
     }
   };
@@ -536,7 +536,7 @@ const ConvertPage = () => {
     if (profileId) return profileId;
     const result = await confirmMapping({
       ...buildMappingPayload(),
-      profile_name: selectedTemplate?.label || "Thiết lập ghép cột MISA",
+      profile_name: selectedTemplate?.label || "Thiết lập ghép cột",
     });
     setProfileId(result.profile_id);
     return result.profile_id;
@@ -548,10 +548,12 @@ const ConvertPage = () => {
     setErrorMsg("");
     let exportStarted = false;
     try {
-      if (!previewRows.length) {
+      let rowsToExport = previewRows;
+      if (!rowsToExport.length) {
         const preview = await createPreview();
-        if (!(preview.rows || []).length) {
-          throw new Error("Không có dòng dữ liệu MISA để tải.");
+        rowsToExport = preview.rows || [];
+        if (!rowsToExport.length) {
+          throw new Error("Không có dòng dữ liệu để tải.");
         }
       }
       const savedProfileId = await saveProfileIfNeeded();
@@ -559,6 +561,7 @@ const ConvertPage = () => {
       const { blob, filename } = await exportConfirmed(
         analyzePayload.upload_id,
         savedProfileId,
+        rowsToExport,
       );
       const url = window.URL.createObjectURL(blob);
       const a = document.createElement("a");
@@ -581,10 +584,10 @@ const ConvertPage = () => {
         await updateConversionRunLog("failed", {
           converterUploadId: analyzePayload.upload_id,
           targetTemplateId,
-          errorMessage: err.message || "Không thể tải file MISA.",
+          errorMessage: err.message || "Không thể tải file.",
         });
       }
-      setErrorMsg(err.message || "Không thể tải file MISA.");
+      setErrorMsg(err.message || "Không thể tải file.");
       setConvStatus(previewRows.length ? STATUS.PREVIEW : STATUS.MAPPING);
     }
   };
@@ -639,10 +642,10 @@ const ConvertPage = () => {
 
             <div className="text-center mb-6 sm:mb-8">
               <h1 className="text-2xl sm:text-3xl font-bold text-gray-900 tracking-tight">
-                Chuyển đổi Excel → MISA
+                Chuyển đổi Excel → Chuẩn định dạng kế toán
               </h1>
               <p className="text-sm sm:text-base text-gray-500 mt-2 max-w-2xl mx-auto">
-                Hệ thống đọc cấu trúc file nhập liệu chuẩn của MISA, nhận biết tên
+                Hệ thống đọc cấu trúc file nhập liệu chuẩn của phần mềm kế toán chuyên dụng, nhận biết tên
                 cột cần có trong biểu mẫu và tự gợi ý ghép cột từ file Excel để bạn
                 kiểm tra, chỉnh sửa trước khi tải file.
               </p>
@@ -756,7 +759,7 @@ const ConvertPage = () => {
 
                 <div className="rounded-2xl border border-gray-200 bg-white p-4 shadow-card space-y-3">
                   <label className="block text-sm font-medium text-gray-700">
-                    Template MISA đích
+                    Template chuẩn từ phần mềm kế toán
                     <select
                       className="mt-1.5 w-full rounded-xl border border-gray-200 bg-white px-3 py-2.5 text-sm text-gray-800 shadow-sm focus:border-primary-500 focus:outline-none focus:ring-2 focus:ring-primary-500/20"
                       value={targetTemplateId}
@@ -858,7 +861,7 @@ const ConvertPage = () => {
                         ) : (
                           <Download size={16} />
                         )}
-                        {convStatus === STATUS.SUCCESS ? "Tải lại file MISA" : "Tải file MISA"}
+                        {convStatus === STATUS.SUCCESS ? "Tải lại file kết quả" : "Tải file kết quả"}
                       </button>
                     </div>
                   )}
@@ -948,10 +951,10 @@ const ConvertPage = () => {
                     <div className="px-5 sm:px-6 py-5 border-b border-gray-100 flex flex-col lg:flex-row lg:items-start lg:justify-between gap-4">
                       <div className="min-w-0">
                         <h2 className="text-2xl font-black text-gray-900">
-                          Ghép cột Excel → MISA
+                          Ghép cột Excel → Chuẩn định dạng kế toán
                         </h2>
                         <p className="mt-1 text-sm leading-relaxed text-gray-600">
-                          Với <strong>mỗi dòng cột MISA</strong>, bạn chỉ chọn{" "}
+                          Với <strong>mỗi dòng cột theo chuẩn</strong>, bạn chỉ chọn{" "}
                           <strong>1 trong 3 ô</strong>: <strong>Cột từ file Excel</strong>,{" "}
                           <strong>Giá trị mặc định</strong> hoặc{" "}
                           <strong>Công thức tự động</strong>. Sau khi đã chọn 1 cách,
@@ -1010,7 +1013,7 @@ const ConvertPage = () => {
                       <table className="min-w-[1180px] text-sm">
                         <thead className="sticky top-0 z-10 bg-gray-50 text-xs text-gray-500 uppercase">
                           <tr>
-                            <th className="px-4 py-3 text-left w-[24%]">Cột MISA</th>
+                            <th className="px-4 py-3 text-left w-[24%]">Cột theo định dạng chuẩn</th>
                             <th className="px-4 py-3 text-left w-[24%]">
                               Cột từ file Excel
                               <ColumnHelp text="Chọn cột dữ liệu tương ứng từ file Excel của bạn." />
@@ -1119,7 +1122,7 @@ const ConvertPage = () => {
                               Xem trước dữ liệu đầu ra
                             </h3>
                             <p className="text-sm text-gray-500">
-                              Bạn có thể chỉnh sửa trực tiếp trước khi tải file MISA.
+                              Bạn có thể chỉnh sửa trực tiếp trước khi tải file.
                             </p>
                           </div>
                           <div className="flex flex-col xs:flex-row gap-2">
@@ -1143,7 +1146,7 @@ const ConvertPage = () => {
                               ) : (
                                 <Download size={16} />
                               )}
-                              Tải file MISA
+                              Tải file kết quả
                             </button>
                           </div>
                         </div>
@@ -1162,12 +1165,12 @@ const ConvertPage = () => {
                     {convStatus === STATUS.SUCCESS && (
                       <Alert
                         variant="success"
-                        title="Đã xuất file MISA"
+                        title="Đã xuất file kết quả"
                         className="rounded-none border-0 border-t border-emerald-100"
                       >
                         Thiết lập ghép cột đã được lưu. Nếu chưa lưu được file (lỡ
                         bấm hủy hộp thoại lưu), bạn có thể bấm{" "}
-                        <strong>Tải lại file MISA</strong> để tải lại mà không tốn
+                        <strong>Tải lại file kết quả</strong> để tải lại mà không tốn
                         thêm lượt.
                       </Alert>
                     )}
@@ -1182,11 +1185,7 @@ const ConvertPage = () => {
       <Footer />
       <ChatSupport
         initialMessages={[
-          { from: "bot", text: "Xin chào! Tôi có thể giúp gì cho bạn?" },
-          {
-            from: "bot",
-            text: "Hỏi về chuyển đổi Excel → MISA, ghép cột hoặc hỗ trợ kỹ thuật.",
-          },
+          { from: "bot", text: "Coming soon..." },
         ]}
       />
     </div>

@@ -214,10 +214,12 @@ async def preview_conversion(
 async def export_conversion_rows(body: dict) -> Response:
     if "upload_id" in body and "profile_id" in body:
         try:
+            edited_rows = body.get("rows")
             content, filename = await run_in_threadpool(
                 export_confirmed_profile,
                 upload_id=str(body["upload_id"]),
                 profile_id=str(body["profile_id"]),
+                edited_rows=edited_rows if isinstance(edited_rows, list) and edited_rows else None,
             )
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc

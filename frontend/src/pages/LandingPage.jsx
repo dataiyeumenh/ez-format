@@ -17,18 +17,18 @@ import Footer from "../components/Footer";
 import ChatSupport from "../components/ChatSupport";
 import StepProgress from "../components/ui/StepProgress";
 
-const processSteps = ["Tải file", "Map cột", "Xem trước", "Tải file MISA"];
+const processSteps = ["Tải file lên", "Map cột", "Xem trước", "Tải xuống file kết quả"];
 
 const guideSteps = [
   {
     icon: UploadCloud,
-    title: "Tải file Excel",
+    title: "Tải lên file Excel",
     text: "Chọn hoặc kéo thả file .xlsx/.xls bán hàng, mua hàng vào hệ thống.",
   },
   {
     icon: Wand2,
     title: "Kiểm tra mapping",
-    text: "EzFormat gợi ý map cột sang mẫu MISA, bạn rà lại các dòng cảnh báo.",
+    text: "EzFormat gợi ý map cột sang mẫu chuẩn cho phần mềm kế toán, bạn rà lại các dòng cảnh báo.",
   },
   {
     icon: Eye,
@@ -37,55 +37,8 @@ const guideSteps = [
   },
   {
     icon: Download,
-    title: "Tải file Misa",
-    text: "Xuất file kết quả để import vào phần mềm MISA.",
-  },
-];
-
-const pricingPlans = [
-  {
-    id: "free",
-    name: "GÓI MIỄN PHÍ",
-    price: "0đ",
-    period: "/mo",
-    description: "Phù hợp để tham khảo các chức năng cơ bản",
-    buttonText: "Bắt đầu",
-    buttonVariant: "outline",
-    features: ["Chức năng cơ bản", "Giới hạn 3 files", "Thu thập dữ liệu"],
-    popular: false,
-  },
-  {
-    id: "monthly",
-    name: "GÓI THÁNG",
-    price: "149k",
-    period: "/tháng",
-    description: "Phù hợp cho mọi loại tình huống, tăng hiệu suất công việc",
-    buttonText: "Xem gói tháng",
-    buttonVariant: "outline",
-    features: ["Chức năng bảng thống kê", "Không quảng cáo"],
-    popular: false,
-  },
-  {
-    id: "yearly",
-    name: "GÓI NĂM",
-    price: "109k",
-    period: "/tháng",
-    description: "Lựa chọn tối ưu dành cho người dùng chuyên sâu và gói chuyên môn",
-    buttonText: "Xem gói năm",
-    buttonVariant: "primary",
-    features: ["Các chức năng của gói tháng", "Không giới hạn files", "Bảo mật cao"],
-    popular: true,
-  },
-  {
-    id: "perfile",
-    name: "THEO LƯỢT",
-    price: "10k",
-    period: "/ 1 file",
-    description: "Phù hợp cho mỗi lần sử dụng",
-    buttonText: "Xem theo lượt",
-    buttonVariant: "outline",
-    features: ["Các chức năng của gói miễn phí", "Không quảng cáo"],
-    popular: false,
+    title: "Tải xuống file đã chuẩn hoá",
+    text: "Xuất file kết quả để import vào phần mềm dành cho kế toán.",
   },
 ];
 
@@ -128,7 +81,7 @@ const LandingPage = () => {
           <div className="max-w-6xl mx-auto text-center">
             <h1
               className="font-black text-gray-900 leading-[1.05] tracking-tight mb-4"
-              aria-label="Chuẩn hóa dữ liệu kế toán tự động Excel sang Misa"
+              aria-label="Chuẩn hóa dữ liệu kế toán tự động Excel sang Chuẩn phần mềm kế toán"
             >
               <span className="mx-auto block whitespace-nowrap text-[2rem] sm:text-4xl lg:text-5xl">
                 Chuẩn hóa dữ liệu kế toán tự động
@@ -150,13 +103,13 @@ const LandingPage = () => {
                   />
                 </svg>
                 <span className="text-transparent bg-clip-text bg-gradient-to-r from-primary-600 to-cyan-500">
-                  Misa
+                  Phần mềm kế toán
                 </span>
               </span>
             </h1>
             <p className="text-gray-500 text-base sm:text-lg max-w-3xl mx-auto leading-relaxed mb-8">
               <span className="block">
-                Nền tảng chuyển đổi file bán/mua hàng sang form nhập MISA.
+                Nền tảng chuyển đổi file bán/mua hàng sang form nhập Chuẩn phần mềm kế toán.
               </span>
               <span className="block">Xem trước, chỉnh sửa và tải về trong vài bước.</span>
             </p>
@@ -177,7 +130,7 @@ const LandingPage = () => {
               <div
                 className="flex h-full overflow-hidden rounded-3xl border border-gray-100 bg-gradient-to-br from-gray-50 to-primary-50/60 p-4 shadow-inner"
                 role="img"
-                aria-label="Minh họa giao diện quá trình chuyển đổi Excel sang Misa"
+                aria-label="Minh họa giao diện quá trình chuyển đổi Excel sang Chuẩn phần mềm kế toán"
               >
                 <div className="flex min-h-[390px] w-full flex-col rounded-2xl border border-gray-100 bg-white p-4 shadow-sm">
                   <div className="mb-4 flex items-center justify-between border-b border-gray-100 pb-3">
@@ -187,7 +140,7 @@ const LandingPage = () => {
                       <span className="h-2.5 w-2.5 rounded-full bg-emerald-300" />
                     </div>
                     <span className="rounded-full bg-primary-50 px-3 py-1 text-xs font-semibold text-primary-700">
-                      Preview MISA
+                      Preview
                     </span>
                   </div>
 
@@ -225,7 +178,7 @@ const LandingPage = () => {
                       </svg>
                     </div>
                     <div className="rounded-2xl border border-cyan-100 bg-cyan-50/80 p-3">
-                      <p className="mb-2 text-xs font-bold text-cyan-700">File Misa</p>
+                      <p className="mb-2 text-xs font-bold text-cyan-700">File kết quả</p>
                       <div className="space-y-2" aria-hidden="true">
                         <span className="block h-2 rounded-full bg-cyan-300" />
                         <span className="block h-2 w-4/5 rounded-full bg-cyan-200" />
@@ -264,7 +217,7 @@ const LandingPage = () => {
                   Cách thực hiện
                 </p>
                 <h2 className="mt-2 text-2xl font-black text-gray-900">
-                  Chuyển Excel sang Misa trong 4 bước
+                  Chuyển Excel sang Chuẩn phần mềm kế toán trong 4 bước
                 </h2>
                 <div className="mt-5 space-y-4">
                   {guideSteps.map(({ icon: Icon, title, text }, index) => (

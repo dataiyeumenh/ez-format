@@ -246,17 +246,24 @@ def confirm_mapping(
     return {"profile_id": profile.id, "saved": True}
 
 
-def export_confirmed_profile(upload_id: str, profile_id: str) -> tuple[bytes, str]:
+def export_confirmed_profile(
+    upload_id: str,
+    profile_id: str,
+    edited_rows: list[dict[str, Any]] | None = None,
+) -> tuple[bytes, str]:
     table = _read_upload_table(upload_id)
     profile = ProfileStore().get_profile(profile_id)
     template = get_misa_template(profile.target_template_id)
-    rows = apply_mapping(
-        table,
-        template.headers,
-        sanitize_mapping_for_template(profile.target_template_id, profile.mapping),
-        sanitize_defaults_for_template(profile.target_template_id, profile.defaults, template.headers),
-        profile.formulas,
-    )
+    if edited_rows:
+        rows = edited_rows
+    else:
+        rows = apply_mapping(
+            table,
+            template.headers,
+            sanitize_mapping_for_template(profile.target_template_id, profile.mapping),
+            sanitize_defaults_for_template(profile.target_template_id, profile.defaults, template.headers),
+            profile.formulas,
+        )
     output_path = _upload_dir(upload_id) / "misa_export.xls"
     write_xls_from_template(template.workbook, rows, output_path, output_sheet_name=table.sheet_name)
     return output_path.read_bytes(), f"Import misa {upload_id[:8]}.xls"

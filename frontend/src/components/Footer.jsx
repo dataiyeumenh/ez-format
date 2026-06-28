@@ -16,12 +16,12 @@ const Footer = () => {
               <span className="font-bold text-white text-lg">EzFormat</span>
             </Link>
             <p className="text-sm text-gray-400 leading-relaxed">
-              Chuẩn hoá dữ liệu kế toán — chuyển Excel sang form nhập MISA nhanh và
+              Chuẩn hoá dữ liệu kế toán — chuyển Excel sang form nhập của phần mềm kế toán ưa dùng hiện nay một cách nhanh chóng và
               chính xác.
             </p>
           </div>
 
-          <div className="space-y-3">
+          <div className="pl-20 space-y-3">
             <h4 className="font-semibold text-white text-sm uppercase tracking-wider">
               Hỗ trợ
             </h4>
