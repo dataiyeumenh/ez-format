@@ -17,7 +17,7 @@ const generateToken = (id, role) => {
   });
 };
 
-const serializeUser = (user) => ({
+const serializeUser = (user, { isFirstLogin } = {}) => ({
   id: user._id,
   name: user.name,
   email: user.email,
@@ -30,7 +30,15 @@ const serializeUser = (user) => ({
   avatar: user.avatar,
   authProvider: user.authProvider,
   hasPassword: Boolean(user.password),
+  ...(typeof isFirstLogin === "boolean" ? { isFirstLogin } : {}),
 });
+
+const recordLogin = async (user) => {
+  const isFirstLogin = (user.loginCount || 0) === 0;
+  user.loginCount = (user.loginCount || 0) + 1;
+  await user.save();
+  return isFirstLogin;
+};
 
 // @desc    Register user
 // @route   POST /api/auth/register
@@ -121,13 +129,15 @@ const login = async (req, res) => {
       await user.populate("plan");
     }
 
+    const isFirstLogin = await recordLogin(user);
     const token = generateToken(user._id, user.role);
 
     res.json({
       success: true,
       message: "Đăng nhập thành công",
       token,
-      user: serializeUser(user),
+      isFirstLogin,
+      user: serializeUser(user, { isFirstLogin }),
     });
   } catch (error) {
     res
@@ -191,13 +201,15 @@ const googleLogin = async (req, res) => {
       await user.populate("plan");
     }
 
+    const isFirstLogin = await recordLogin(user);
     const token = generateToken(user._id, user.role);
 
     res.json({
       success: true,
       message: "Đăng nhập Google thành công",
       token,
-      user: serializeUser(user),
+      isFirstLogin,
+      user: serializeUser(user, { isFirstLogin }),
     });
   } catch (error) {
     const statusCode = error.statusCode || 401;

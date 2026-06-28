@@ -261,6 +261,14 @@ def _read_xls(path: Path) -> InputTable:
     )
 
 
+
+def _sanitize_output_sheet_name(name: str | None, fallback: str) -> str:
+    raw = str(name or "").strip() or fallback
+    cleaned = "".join("_" if ch in "\\/?*[]" else ch for ch in raw).strip()
+    cleaned = cleaned[:31] or fallback[:31] or "Sheet1"
+    return cleaned
+
+
 def _rows_to_records(headers: list[str], rows: list[Any]) -> list[dict[str, Any]]:
     records: list[dict[str, Any]] = []
     for row in rows:
@@ -281,11 +289,13 @@ def write_xls_from_template(
     template: TemplateWorkbook,
     output_rows: list[dict[str, Any]],
     output_path: Path,
+    *,
+    output_sheet_name: str | None = None,
 ) -> None:
     source_book = xlrd.open_workbook(str(template.path), formatting_info=True)
     source_sheet = source_book.sheet_by_name(template.sheet_name)
     workbook = xlwt.Workbook(encoding="utf-8")
-    sheet = workbook.add_sheet(template.sheet_name)
+    sheet = workbook.add_sheet(_sanitize_output_sheet_name(output_sheet_name, template.sheet_name))
     styles = _xlwt_styles_for(source_book)
     data_start_row = template.header_row_index + 1
     output_end_row = data_start_row + len(output_rows)

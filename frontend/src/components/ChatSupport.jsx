@@ -2,11 +2,7 @@ import { useState } from "react";
 import { MessageCircle, Send, X } from "lucide-react";
 
 const DEFAULT_MESSAGES = [
-  { from: "bot", text: "Xin chào! Tôi có thể giúp gì cho bạn?" },
-  {
-    from: "bot",
-    text: "Hỏi về chuyển đổi Excel → MISA, bảng giá hoặc hỗ trợ kỹ thuật.",
-  },
+  { from: "bot", text: "Coming soon..." },
 ];
 
 const ChatSupport = ({ initialMessages = DEFAULT_MESSAGES }) => {

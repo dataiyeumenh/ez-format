@@ -135,11 +135,15 @@ export function useConverterApi() {
     return readJsonResponse(response, "Không thể lưu setting mapping.");
   }, []);
 
-  const exportConfirmed = useCallback(async (uploadId, profileId) => {
+  const exportConfirmed = useCallback(async (uploadId, profileId, rows) => {
+    const payload = { upload_id: uploadId, profile_id: profileId };
+    if (Array.isArray(rows) && rows.length > 0) {
+      payload.rows = rows;
+    }
     const response = await fetch(`${pythonBaseURL}/api/v1/conversions/export`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ upload_id: uploadId, profile_id: profileId }),
+      body: JSON.stringify(payload),
     });
 
     if (!response.ok) {
