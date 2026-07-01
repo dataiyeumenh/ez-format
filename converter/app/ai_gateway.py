@@ -8,6 +8,8 @@ import httpx
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse
 
+from app.accounting_ai_context import build_accounting_mapping_context
+
 
 app = FastAPI(title="EzFormat Local AI Gateway")
 
@@ -80,16 +82,32 @@ async def _call_ollama(payload: dict[str, Any]) -> dict[str, Any]:
 def _build_prompt(payload: dict[str, Any]) -> str:
     target = payload.get("target_template") or {}
     source = payload.get("source") or {}
+    target_headers = [str(item) for item in target.get("headers") or []]
+    source_headers = [str(item) for item in source.get("headers") or []]
+    accounting_context = build_accounting_mapping_context(
+        target_template_id=str(target.get("id") or ""),
+        source_headers=source_headers,
+        target_headers=target_headers,
+    )
     compact = json.dumps(
         {
             "target_template_id": target.get("id"),
-            "misa_headers": target.get("headers") or [],
+            "misa_headers": target_headers,
             "raw_sheet_name": source.get("sheet_name"),
-            "raw_headers": source.get("headers") or [],
+            "raw_headers": source_headers,
+            "sample_rows": _compact_sample_rows(source.get("sample_rows"), source_headers),
             "nearby_profiles": payload.get("nearby_profiles") or [],
         },
         ensure_ascii=False,
     )
+    context_block = ""
+    if accounting_context:
+        context_block = (
+            "\nACCOUNTING_MAPPING_CONTEXT (examples are synthetic guidance only; "
+            "output keys must still come from current raw_headers/misa_headers):\n"
+            + json.dumps(accounting_context, ensure_ascii=False)
+            + "\n"
+        )
     return (
         "NHIỆM VỤ DUY NHẤT: đề xuất mapping cột Excel thô sang header template MISA. "
         "KHÔNG phân tích doanh số, KHÔNG viết báo cáo, KHÔNG tóm tắt dữ liệu. "
@@ -101,13 +119,41 @@ def _build_prompt(payload: dict[str, Any]) -> str:
         "- raw header key phải copy y nguyên từ raw_headers.\n"
         "- MISA header value phải copy y nguyên từ misa_headers.\n"
         "- Nếu không chắc thì bỏ qua cột đó, không bịa header.\n"
+        "- Không bịa mã hàng, mã nhà cung cấp, tài khoản hoặc thuế suất.\n"
+        "- Ví dụ synthetic chỉ giúp hiểu ngữ nghĩa, không được copy header không có trong input hiện tại.\n"
         "- confidence là số từ 0 đến 1.\n"
         "Ví dụ đúng: {\"target_template_id\":\"bsn_sales\","
         "\"mapping\":{\"Mã hóa đơn\":\"Số chứng từ (*)\","
         "\"Thời gian\":[\"Ngày hạch toán (*)\",\"Ngày chứng từ (*)\"]},"
         "\"defaults\":{},\"formulas\":{},\"confidence\":0.8,\"notes\":[]}\n\n"
-        f"INPUT_HEADERS_ONLY:\n{compact}"
+        f"{context_block}\nINPUT_DATA_COMPACT:\n{compact}"
     )
+
+
+def _compact_sample_rows(
+    sample_rows: Any,
+    source_headers: list[str],
+    *,
+    max_rows: int = 3,
+    max_value_chars: int = 120,
+) -> list[dict[str, Any]]:
+    if not isinstance(sample_rows, list):
+        return []
+    allowed = set(source_headers)
+    output: list[dict[str, Any]] = []
+    for row in sample_rows[:max_rows]:
+        if not isinstance(row, dict):
+            continue
+        compact_row: dict[str, Any] = {}
+        for key, value in row.items():
+            if key not in allowed:
+                continue
+            if isinstance(value, str) and len(value) > max_value_chars:
+                compact_row[key] = value[:max_value_chars] + "…"
+            else:
+                compact_row[key] = value
+        output.append(compact_row)
+    return output
 
 
 def _normalize_gateway_response(response: dict[str, Any], request_payload: dict[str, Any]) -> dict[str, Any]:

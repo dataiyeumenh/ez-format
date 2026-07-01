@@ -71,7 +71,9 @@ def _kind_path(conversion_type: str, tmp_path: Path) -> Path:
 
 
 def test_health_and_conversion_types_catalog():
-    assert client.get("/healthz").json() == {"status": "ok"}
+    health = client.get("/healthz").json()
+    assert health["status"] == "ok"
+    assert health["ai"] in {"disabled", "offline", "online"}
     payload = client.get("/api/v1/conversion-types").json()
     ids = {item["id"] for item in payload["items"]}
     assert ids == set(CONVERSION_TYPES.keys())

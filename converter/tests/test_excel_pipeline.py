@@ -33,6 +33,7 @@ def test_all_conversion_templates_are_registered_and_have_required_headers():
     assert set(CONVERSION_TYPES) == {
         "bsn_sales",
         "bsn_purchase",
+        "misa_purchase_domestic",
         "sales_goods",
         "sales_service",
         "purchase_goods",

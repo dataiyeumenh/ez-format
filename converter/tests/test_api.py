@@ -171,6 +171,7 @@ def test_conversion_types_endpoint():
     assert {item["id"] for item in payload["items"]} == {
         "bsn_sales",
         "bsn_purchase",
+        "misa_purchase_domestic",
         "sales_goods",
         "sales_service",
         "purchase_goods",
