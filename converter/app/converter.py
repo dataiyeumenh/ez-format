@@ -14,7 +14,7 @@ from app.conversion_types import ConversionTypeDefinition, get_conversion_type
 from app.excel_io import InputReadError, read_input_table, read_template, write_xls_from_template
 from app.field_detection import apply_column_mapping, detect_columns, semantic_value
 from app.models import JsonDict, ReportIssue, ValidationReport
-from app.normalization import is_blank
+from app.normalization import is_blank, normalize_header
 from app.parsing import parse_date, parse_number
 
 
@@ -183,13 +183,15 @@ def export_rows(
     rows: list[dict[str, Any]],
     output_path: Path,
     options: JsonDict | None = None,
+    *,
+    sheet_name: str | None = None,
 ) -> None:
     """Write edited preview rows to a MISA template .xls file."""
     if not rows:
         raise ValueError("No rows to export.")
     definition = get_conversion_type(conversion_type)
     template = read_template(definition.template_path)
-    write_xls_from_template(template, rows, output_path)
+    write_xls_from_template(template, rows, output_path, output_sheet_name=sheet_name)
 
 
 def convert_file(
@@ -210,7 +212,7 @@ def convert_file(
     detected_columns = report.detected_columns
     template = read_template(definition.template_path)
     output_rows = [_map_row(row, detected_columns, definition, options) for row in table.rows]
-    write_xls_from_template(template, output_rows, output_path)
+    write_xls_from_template(template, output_rows, output_path, output_sheet_name=table.sheet_name)
     return report
 
 
@@ -286,32 +288,88 @@ def _map_purchase_row(
 ) -> dict[str, Any]:
     defaults = _merged_defaults(definition, options)
     receipt = _text(semantic_value(row, detected_columns, "purchase_receipt"))
+    invoice_number = _text(semantic_value(row, detected_columns, "invoice")) or receipt
+    invoice_symbol = _text(semantic_value(row, detected_columns, "invoice_symbol"))
+    invoice_date = parse_date(semantic_value(row, detected_columns, "invoice_date"))
     supplier_code = _text(semantic_value(row, detected_columns, "supplier_code"))
     supplier_name = _text(semantic_value(row, detected_columns, "supplier_name"))
+    supplier_address = _text(semantic_value(row, detected_columns, "supplier_address"))
     item_code = _text(semantic_value(row, detected_columns, "item_code"))
     item_name = _text(semantic_value(row, detected_columns, "item_name"))
+    item_type = _text(semantic_value(row, detected_columns, "item_type"))
+    unit = _text(semantic_value(row, detected_columns, "unit")) or str(defaults.get("ĐVT", ""))
     quantity = parse_number(semantic_value(row, detected_columns, "quantity")) or 0
     unit_price = parse_number(semantic_value(row, detected_columns, "unit_price")) or 0
+    line_amount = _trusted_purchase_line_amount(row, detected_columns)
+    discount_percent = _number_or_text(semantic_value(row, detected_columns, "discount_percent"))
+    discount_amount = parse_number(semantic_value(row, detected_columns, "discount_amount")) or 0
+    vat_rate = _text(semantic_value(row, detected_columns, "vat_rate"))
+    vat_amount = parse_number(semantic_value(row, detected_columns, "vat_amount")) or 0
+    input_vat_account = _text(semantic_value(row, detected_columns, "input_vat_account")) or "1331"
+    inventory_account = _text(semantic_value(row, detected_columns, "inventory_account")) or str(
+        defaults.get("TK kho/TK chi phí (*)", "")
+    )
+    payable_account = _text(semantic_value(row, detected_columns, "payable_account")) or str(
+        defaults.get("TK công nợ/TK tiền (*)", "")
+    )
     date_value = parse_date(semantic_value(row, detected_columns, "date"))
+    is_service = definition.kind.endswith("service") or normalize_header(item_type) == "dich_vu"
+    purchase_form = (
+        "Mua hàng trong nước không qua kho"
+        if is_service
+        else str(defaults.get("Hình thức mua hàng", "Mua hàng trong nước nhập kho"))
+    )
+    payment_method = _purchase_payment_method(
+        semantic_value(row, detected_columns, "payment_method"),
+        payable_account,
+        str(defaults.get("Phương thức thanh toán", "Chưa thanh toán")),
+    )
+    payment_doc = receipt if is_service else ""
+    stock_receipt = "" if is_service else receipt
 
     output: dict[str, Any] = dict(defaults)
     output.update(
         {
+            "Hình thức mua hàng": purchase_form,
+            "Phương thức thanh toán": payment_method,
+            "Nhận kèm hóa đơn": defaults.get("Nhận kèm hóa đơn", "Nhận kèm hóa đơn"),
             "Ngày hạch toán (*)": date_value,
             "Ngày chứng từ (*)": date_value,
-            "Số phiếu nhập (*)": receipt,
+            "Số phiếu nhập (*)": stock_receipt,
+            "Số chứng từ ghi nợ/Số chứng từ thanh toán": payment_doc,
             "Số chứng từ (*)": receipt,
+            "Ký hiệu HĐ": invoice_symbol,
+            "Số hóa đơn": invoice_number,
+            "Ngày hóa đơn": invoice_date or date_value,
             "Mã nhà cung cấp": supplier_code,
             "Nhà cung cấp": supplier_code,
             "Tên nhà cung cấp": supplier_name,
             "Tên NCC": supplier_name,
+            "Mã NCC": supplier_code,
+            "Mã số thuế": supplier_code,
+            "Mã số thuế NCC": supplier_code,
+            "Địa chỉ": supplier_address,
+            "Địa chỉ NCC": supplier_address,
+            "Diễn giải": f"Mua hàng của {supplier_name}" if supplier_name else "",
+            "Diễn giải/Lý do chi/Nội dung thanh toán": (
+                f"Mua dịch vụ của {supplier_name}" if supplier_name and is_service else ""
+            ),
             "Mã hàng (*)": item_code,
             "Tên hàng": item_name,
             "Mã dịch vụ (*)": item_code,
             "Tên dịch vụ": item_name,
+            "Là dòng ghi chú": "không",
+            "TK kho/TK chi phí (*)": inventory_account,
+            "TK công nợ/TK tiền (*)": payable_account,
+            "ĐVT": unit,
             "Số lượng": quantity,
             "Đơn giá": unit_price,
-            "Thành tiền": _multiply(unit_price, quantity),
+            "Thành tiền": line_amount if line_amount is not None else _multiply(unit_price, quantity),
+            "Tỷ lệ CK (%)": discount_percent,
+            "Tiền chiết khấu": discount_amount,
+            "% thuế GTGT": vat_rate,
+            "Tiền thuế GTGT": vat_amount,
+            "TK thuế GTGT": input_vat_account,
         }
     )
     return output
@@ -328,6 +386,31 @@ def _text(value: Any) -> str:
 def _multiply(left: float | int, right: float | int) -> float | int:
     result = left * right
     return int(result) if isinstance(result, float) and result.is_integer() else result
+
+
+def _trusted_purchase_line_amount(
+    row: dict[str, Any], detected_columns: dict[str, str]
+) -> float | int | None:
+    source_header = detected_columns.get("line_amount", "")
+    if normalize_header(source_header) != "ttvnd":
+        return None
+    return parse_number(semantic_value(row, detected_columns, "line_amount"))
+
+
+def _number_or_text(value: Any) -> Any:
+    number = parse_number(value)
+    if number is not None:
+        return number
+    return _text(value)
+
+
+def _purchase_payment_method(raw_value: Any, payable_account: str, default: str) -> str:
+    raw = normalize_header(raw_value)
+    if payable_account.startswith("111") or "tien_mat" in raw:
+        return "Tiền mặt"
+    if payable_account.startswith("112") or "uy_nhiem_chi" in raw:
+        return "Ủy nhiệm chi"
+    return default
 
 
 def _serialize_preview_row(row: dict[str, Any]) -> dict[str, Any]:

@@ -58,6 +58,10 @@ export default function PreviewTable({
         </div>
       )}
 
+      <p className="border-b border-gray-100 bg-primary-50/50 px-4 py-2 text-xs text-primary-700">
+        Nhấn vào ô để chỉnh sửa trực tiếp trước khi tải file.
+      </p>
+
       <div className="table-scroll w-full overflow-auto" style={{ maxHeight: "62vh" }}>
         <table className="min-w-max w-full text-xs border-collapse">
           <thead className="sticky top-0 z-10">
@@ -101,7 +105,7 @@ export default function PreviewTable({
                           row[h] !== undefined && row[h] !== null ? String(row[h]) : ""
                         }
                         onChange={(e) => onCellChange(rIdx, h, e.target.value)}
-                        className="w-full min-w-[128px] px-3 py-2 text-xs text-gray-800 bg-transparent border-none outline-none transition-colors focus:bg-primary-50 focus:ring-1 focus:ring-inset focus:ring-primary-400 disabled:opacity-60"
+                        className="w-full min-w-[128px] px-3 py-2 text-xs text-gray-800 bg-transparent border-none outline-none transition-colors cursor-text hover:bg-gray-50/80 focus:bg-primary-50 focus:ring-1 focus:ring-inset focus:ring-primary-400 disabled:opacity-60 disabled:cursor-not-allowed"
                       />
                     </td>
                   ))}

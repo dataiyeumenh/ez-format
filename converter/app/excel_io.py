@@ -11,7 +11,29 @@ import xlrd
 import xlwt
 from xlutils.filter import XLWTWriter
 
-from app.normalization import is_blank
+from app.normalization import is_blank, normalize_header
+
+
+SMART_PURCHASE_HEADERS = frozenset(
+    {
+        "sr_hd",
+        "soct",
+        "ngayct",
+        "so_hd",
+        "tendm",
+        "mathang",
+        "phan_loai",
+        "donvi",
+        "luong",
+        "dgvnd",
+        "ttvnd",
+        "tkthue",
+        "ts_gtgt",
+        "thuevnd",
+        "makh",
+        "tenkh",
+    }
+)
 
 
 class InputReadError(Exception):
@@ -119,6 +141,18 @@ def score_header_rows(rows: list[Any]) -> tuple[int, int]:
     return best_idx, best_score or (0, 0)
 
 
+def is_smart_purchase_header(values: list[Any] | tuple[Any, ...]) -> bool:
+    normalized = {normalize_header(value) for value in values if not is_blank(value)}
+    return SMART_PURCHASE_HEADERS.issubset(normalized)
+
+
+def _smart_purchase_header_index(rows: list[Any]) -> int | None:
+    for idx, row in enumerate(rows[:30]):
+        if is_smart_purchase_header(row):
+            return idx
+    return None
+
+
 def _read_xlsx(path: Path) -> InputTable:
     try:
         workbook = openpyxl.load_workbook(path, read_only=True, data_only=True)
@@ -147,7 +181,12 @@ def _read_xlsx(path: Path) -> InputTable:
             rows = list(islice(sheet.iter_rows(values_only=True), 30))
             if not rows:
                 continue
-            header_idx, score = score_header_rows(rows)
+            smart_header_idx = _smart_purchase_header_index(rows)
+            if smart_header_idx is not None:
+                header_idx = smart_header_idx
+                score = (1000, len([value for value in rows[header_idx] if not is_blank(value)]))
+            else:
+                header_idx, score = score_header_rows(rows)
             if score > best_score:
                 best_score = score
                 best_name = name
@@ -213,7 +252,12 @@ def _read_xls(path: Path) -> InputTable:
         ]
         if not rows:
             continue
-        header_idx, score = score_header_rows(rows)
+        smart_header_idx = _smart_purchase_header_index(rows)
+        if smart_header_idx is not None:
+            header_idx = smart_header_idx
+            score = (1000, len([value for value in rows[header_idx] if not is_blank(value)]))
+        else:
+            header_idx, score = score_header_rows(rows)
         if score > best_score:
             best_score = score
             best_name = sheet.name
@@ -242,6 +286,14 @@ def _read_xls(path: Path) -> InputTable:
     )
 
 
+
+def _sanitize_output_sheet_name(name: str | None, fallback: str) -> str:
+    raw = str(name or "").strip() or fallback
+    cleaned = "".join("_" if ch in "\\/?*[]" else ch for ch in raw).strip()
+    cleaned = cleaned[:31] or fallback[:31] or "Sheet1"
+    return cleaned
+
+
 def _rows_to_records(headers: list[str], rows: list[Any]) -> list[dict[str, Any]]:
     records: list[dict[str, Any]] = []
     for row in rows:
@@ -262,11 +314,13 @@ def write_xls_from_template(
     template: TemplateWorkbook,
     output_rows: list[dict[str, Any]],
     output_path: Path,
+    *,
+    output_sheet_name: str | None = None,
 ) -> None:
     source_book = xlrd.open_workbook(str(template.path), formatting_info=True)
     source_sheet = source_book.sheet_by_name(template.sheet_name)
     workbook = xlwt.Workbook(encoding="utf-8")
-    sheet = workbook.add_sheet(template.sheet_name)
+    sheet = workbook.add_sheet(_sanitize_output_sheet_name(output_sheet_name, template.sheet_name))
     styles = _xlwt_styles_for(source_book)
     data_start_row = template.header_row_index + 1
     output_end_row = data_start_row + len(output_rows)

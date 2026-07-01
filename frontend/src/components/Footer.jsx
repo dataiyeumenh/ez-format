@@ -16,36 +16,12 @@ const Footer = () => {
               <span className="font-bold text-white text-lg">EzFormat</span>
             </Link>
             <p className="text-sm text-gray-400 leading-relaxed">
-              Chuẩn hoá dữ liệu kế toán — chuyển Excel sang form nhập MISA nhanh và
+              Chuẩn hoá dữ liệu kế toán — chuyển Excel sang form nhập của phần mềm kế toán ưa dùng hiện nay một cách nhanh chóng và
               chính xác.
             </p>
           </div>
 
-          <div className="space-y-3">
-            <h4 className="font-semibold text-white text-sm uppercase tracking-wider">
-              Sản phẩm
-            </h4>
-            <ul className="space-y-2">
-              <li>
-                <Link
-                  to="/convert"
-                  className="text-sm text-gray-400 hover:text-white transition-colors"
-                >
-                  Chuyển đổi file
-                </Link>
-              </li>
-              <li>
-                <Link
-                  to="/pricing"
-                  className="text-sm text-gray-400 hover:text-white transition-colors"
-                >
-                  Bảng giá
-                </Link>
-              </li>
-            </ul>
-          </div>
-
-          <div className="space-y-3">
+          <div className="pl-20 space-y-3">
             <h4 className="font-semibold text-white text-sm uppercase tracking-wider">
               Hỗ trợ
             </h4>
@@ -86,18 +62,6 @@ const Footer = () => {
               <li>Điều khoản dịch vụ (sắp có)</li>
             </ul>
           </div>
-        </div>
-
-        <div className="border-t border-gray-800 mt-10 pt-6 flex flex-col sm:flex-row items-center justify-between gap-4">
-          <p className="text-xs text-gray-500">
-            © {new Date().getFullYear()} EzFormat. All rights reserved.
-          </p>
-          <Link
-            to="/convert"
-            className="text-xs text-gray-500 hover:text-gray-300 transition-colors"
-          >
-            Bắt đầu chuyển đổi →
-          </Link>
         </div>
       </div>
     </footer>

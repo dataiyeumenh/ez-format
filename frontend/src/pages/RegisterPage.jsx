@@ -7,6 +7,7 @@ import Footer from "../components/Footer";
 import Alert from "../components/ui/Alert";
 import GoogleSignInButton from "../components/GoogleSignInButton";
 import { getApiErrorMessage } from "../utils/apiError";
+import { getPostLoginPath } from "../utils/authRedirect";
 import ezFormatMainLogo from "../assets/ezformat-main-logo.png";
 
 const RegisterPage = () => {
@@ -69,7 +70,7 @@ const RegisterPage = () => {
     setError("");
     try {
       const user = await loginWithGoogle(credential);
-      navigate(user.role === "admin" ? "/admin" : "/");
+      navigate(getPostLoginPath(user));
     } catch (err) {
       const message = getApiErrorMessage(err, "Đăng nhập Google thất bại");
       setError(message);
