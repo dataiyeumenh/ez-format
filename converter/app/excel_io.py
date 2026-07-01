@@ -125,6 +125,20 @@ def _read_xlsx(path: Path) -> InputTable:
     except Exception as exc:
         raise InputReadError("corrupt_xlsx", f"Cannot read Excel workbook: {exc}") from exc
     try:
+        preferred_sheet = _known_purchase_detail_sheet(workbook)
+        if preferred_sheet is not None:
+            header_row = next(preferred_sheet.iter_rows(min_row=1, max_row=1, values_only=True), ())
+            headers = ["" if value is None else str(value).strip() for value in header_row]
+            return InputTable(
+                headers=headers,
+                rows=_rows_to_records(
+                    headers,
+                    preferred_sheet.iter_rows(min_row=2, values_only=True),
+                ),
+                sheet_name=preferred_sheet.title,
+                header_row_index=0,
+            )
+
         best_name: str | None = None
         best_score = (-1, -1)
         best_header_idx = 0
@@ -166,6 +180,17 @@ def _read_xlsx(path: Path) -> InputTable:
         )
     finally:
         workbook.close()
+
+
+def _known_purchase_detail_sheet(workbook: openpyxl.Workbook):
+    """Select the partner's line-detail sheet only when its schema markers match."""
+    if "Smart_KTSC_OK" not in workbook.sheetnames:
+        return None
+    sheet = workbook["Smart_KTSC_OK"]
+    first_row = next(sheet.iter_rows(min_row=1, max_row=1, values_only=True), ())
+    headers = {str(value).strip() for value in first_row if value is not None}
+    required_markers = {"SR_HD", "SOCT", "MATHANG", "Phân loại", "TTVND"}
+    return sheet if required_markers.issubset(headers) else None
 
 
 def _read_xls(path: Path) -> InputTable:

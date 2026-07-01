@@ -69,6 +69,17 @@ PURCHASE_GOODS_REQUIRED_HEADERS = (
     "TK công nợ/TK tiền (*)",
 )
 
+MISA_PURCHASE_DOMESTIC_REQUIRED_HEADERS = (
+    "Hình thức mua hàng",
+    "Phương thức thanh toán",
+    "Ngày hạch toán (*)",
+    "Ngày chứng từ (*)",
+    "Số phiếu nhập (*)",
+    "Mã hàng (*)",
+    "TK kho/TK chi phí (*)",
+    "TK công nợ/TK tiền (*)",
+)
+
 PURCHASE_SERVICE_REQUIRED_HEADERS = (
     "Phương thức thanh toán",
     "Ngày hạch toán (*)",
@@ -106,6 +117,13 @@ PURCHASE_DEFAULTS: dict[str, object] = {
     "ĐVT": "Cái",
 }
 
+MISA_PURCHASE_DOMESTIC_DEFAULTS: dict[str, object] = {
+    "Phương thức thanh toán": "Chưa thanh toán",
+    "Nhận kèm hóa đơn": "Nhận kèm hóa đơn",
+    "TK công nợ/TK tiền (*)": "331",
+    "Là dòng ghi chú": "Không",
+}
+
 CONVERSION_TYPES: dict[str, ConversionTypeDefinition] = {
     "bsn_sales": ConversionTypeDefinition(
         id="bsn_sales",
@@ -124,6 +142,15 @@ CONVERSION_TYPES: dict[str, ConversionTypeDefinition] = {
         required_source_fields=PURCHASE_REQUIRED_SOURCE_FIELDS,
         required_output_headers=PURCHASE_GOODS_REQUIRED_HEADERS,
         defaults=PURCHASE_DEFAULTS,
+    ),
+    "misa_purchase_domestic": ConversionTypeDefinition(
+        id="misa_purchase_domestic",
+        label="Mua hàng trong nước - MISA",
+        template_path=TEMPLATE_DIR / "mua_hang_trong_nuoc_full.xls",
+        kind="purchase_goods",
+        required_source_fields=PURCHASE_REQUIRED_SOURCE_FIELDS,
+        required_output_headers=MISA_PURCHASE_DOMESTIC_REQUIRED_HEADERS,
+        defaults=MISA_PURCHASE_DOMESTIC_DEFAULTS,
     ),
     "sales_goods": ConversionTypeDefinition(
         id="sales_goods",

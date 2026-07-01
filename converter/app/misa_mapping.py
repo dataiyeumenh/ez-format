@@ -56,6 +56,31 @@ BSN_SALES_DEFAULTS = {
     "Mã khách hàng": "KH_LE",
 }
 
+MISA_PURCHASE_DOMESTIC_DIRECT_MAPPING: dict[str, MappingValue] = {
+    "Phân loại": ["Hình thức mua hàng", "TK kho/TK chi phí (*)"],
+    "HTTT": "Phương thức thanh toán",
+    "NGAYCT": ["Ngày hạch toán (*)", "Ngày chứng từ (*)"],
+    "SOCT": "Số phiếu nhập (*)",
+    "SR_HD": "Ký hiệu HĐ",
+    "SO_HD": "Số hóa đơn",
+    "NGAY_HD": "Ngày hóa đơn",
+    "MADTPNCO": ["Mã nhà cung cấp", "Mã số thuế"],
+    "TENKH": "Tên nhà cung cấp",
+    "DIACHI": "Địa chỉ",
+    "DIENGIAI": "Diễn giải",
+    "MATHANG": ["Mã hàng (*)", "Tên hàng"],
+    "DONVI": "ĐVT",
+    "LUONG": "Số lượng",
+    "DGVND": "Đơn giá",
+    "TTVND": "Thành tiền",
+    "PT_CK": "Tỷ lệ CK (%)",
+    "CHIETKHAU": "Tiền chiết khấu",
+    "TS_GTGT": "% thuế GTGT",
+    "THUEVND": "Tiền thuế GTGT",
+    "TKTHUE": "TK thuế GTGT",
+    "TKCO": "TK công nợ/TK tiền (*)",
+}
+
 
 @dataclass(frozen=True)
 class SourceSignature:
@@ -112,6 +137,8 @@ def detect_target_template_id(table: InputTable, requested: str | None = None) -
     if requested:
         return requested
     normalized = {normalize_header(header) for header in table.headers}
+    if {"sr_hd", "soct", "mathang", "phan_loai", "ttvnd"}.issubset(normalized):
+        return "misa_purchase_domestic"
     if {"ma_hoa_don", "ten_khach_hang", "ma_hang"} & normalized:
         return "bsn_sales"
     if {"ma_nha_cung_cap", "ten_nha_cung_cap"} & normalized:
@@ -139,6 +166,18 @@ def heuristic_suggestion(
             discount_header = _resolve_header(table.headers, "Giảm giá")
             if discount_header and "Tiền chiết khấu" in target_headers:
                 mapping[discount_header] = "Tiền chiết khấu"
+    elif target_template_id == "misa_purchase_domestic":
+        for raw_header, target in MISA_PURCHASE_DOMESTIC_DIRECT_MAPPING.items():
+            resolved = _resolve_header(table.headers, raw_header)
+            if resolved and _target_exists(target_headers, target):
+                mapping[resolved] = target
+        warnings.extend(
+            [
+                "Mã hàng đang dùng tên mặt hàng vì file nguồn không có mã riêng; cần kiểm tra danh mục MISA.",
+                "TK kho/TK chi phí được gợi ý theo phân loại Hàng hóa/Dịch vụ; kế toán cần rà soát tài khoản thực tế.",
+                "Phương thức thanh toán lấy nguyên văn từ file nguồn; cần rà soát giá trị được MISA chấp nhận.",
+            ]
+        )
     else:
         semantic = detect_columns(table.headers)
         mapping.update(_semantic_to_template_mapping(semantic, target_headers))
@@ -228,7 +267,16 @@ def normalize_ai_suggestion(
         confidence_float = max(fallback.confidence, max(0.0, min(1.0, float(confidence))))
     except (TypeError, ValueError):
         confidence_float = fallback.confidence
-    warnings = list(fallback.warnings)
+    warnings = [
+        warning
+        for warning in fallback.warnings
+        if not warning.startswith("Thiếu mapping cho cột bắt buộc:")
+    ]
+    remaining_missing = _missing_required(target_template_id, mapping)
+    if remaining_missing:
+        warnings.append(
+            "Thiếu mapping cho cột bắt buộc: " + ", ".join(remaining_missing)
+        )
     notes = payload.get("notes")
     if isinstance(notes, list):
         warnings.extend(str(note) for note in notes if note)
@@ -315,6 +363,25 @@ def transform_value(value: Any, target_header: str) -> Any:
     if value is None:
         return ""
     normalized_target = normalize_header(target_header)
+    if normalized_target == "hinh_thuc_mua_hang":
+        classification = normalize_header(_clean_text(value))
+        if classification == "dich_vu":
+            return "Mua hàng trong nước không qua kho"
+        if classification in {"hang_hoa", "vat_tu"}:
+            return "Mua hàng trong nước nhập kho"
+        return _clean_text(value)
+    if normalized_target == "tk_kho_tk_chi_phi":
+        classification = normalize_header(_clean_text(value))
+        if classification == "dich_vu":
+            return "6428"
+        if classification in {"hang_hoa", "vat_tu"}:
+            return "1561"
+        return ""
+    if normalized_target == "percent_thue_gtgt":
+        parsed_number = parse_number(value)
+        if parsed_number is None:
+            return _clean_text(value)
+        return int(parsed_number) if float(parsed_number).is_integer() else parsed_number
     if normalized_target == "han_su_dung" and isinstance(value, (datetime, date)):
         return value
     if normalized_target == "so_chung_tu":

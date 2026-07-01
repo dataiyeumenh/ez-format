@@ -12,6 +12,7 @@ from app.excel_io import TemplateWorkbook, read_template
 DISPLAY_FILENAMES = {
     "bsn_sales": "BSN - Form import bán hàng.xls",
     "bsn_purchase": "BSN - Form import mua hàng.xls",
+    "misa_purchase_domestic": "mua_hang_trong_nuoc_full.xls",
     "sales_service": "Form bán hàng dịch vụ.xls",
     "sales_goods": "Form bán hàng hóa.xls",
     "purchase_service": "Form mua dịch vụ.xls",
