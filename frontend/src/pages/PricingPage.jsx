@@ -161,7 +161,9 @@ const PricingPage = () => {
                         />
                         <span
                           className={`text-xs ${
-                            plan.isPopular ? "font-medium text-gray-700" : "text-gray-600"
+                            plan.isPopular
+                              ? "font-medium text-gray-700"
+                              : "text-gray-600"
                           }`}
                         >
                           {feature}

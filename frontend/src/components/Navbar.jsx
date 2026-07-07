@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { Link, NavLink, useNavigate } from "react-router-dom";
 import { useAuth } from "../context/AuthContext";
 import { LogOut, Menu, X } from "lucide-react";
-import ezFormatLogo from "../assets/ezformat-main-logo.png";
+import ezFormatLogo from "../assets/ezformat-logo-64.webp";
 import UserPlanBadge from "./UserPlanBadge";
 import FeedbackModal from "./FeedbackModal";
 import ChangePasswordModal from "./ChangePasswordModal";
@@ -14,7 +14,9 @@ const Logo = () => (
       alt="EzFormat logo"
       className="w-9 h-9 object-contain transition-transform group-hover:scale-105"
     />
-    <span className="text-xl font-extrabold tracking-tight text-gray-950">EzFormat</span>
+    <span className="text-xl font-extrabold tracking-tight text-gray-950">
+      EzFormat
+    </span>
   </Link>
 );
 

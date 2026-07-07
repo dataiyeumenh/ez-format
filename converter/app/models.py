@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -119,3 +119,48 @@ class ExportRowsRequest(BaseModel):
     rows: list[dict[str, Any]]
     options: JsonDict | None = None
     sheet_name: str | None = None
+
+
+ReadinessSeverity = Literal["blocker", "warning", "info"]
+ReadinessStatus = Literal["ready", "needs_review", "blocked"]
+
+
+class MisaReadinessIssue(BaseModel):
+    severity: ReadinessSeverity
+    category: str
+    code: str
+    message: str
+    row: int | None = None
+    field: str | None = None
+    invoice: str | None = None
+    expected: Any = None
+    actual: Any = None
+    delta: Any = None
+    fix_hint: str | None = None
+    source_url: str | None = None
+
+
+class MisaReadinessSummary(BaseModel):
+    blocker: int = 0
+    warning: int = 0
+    info: int = 0
+
+
+class MisaReconciliationReport(BaseModel):
+    input_rows: int
+    output_rows: int
+    invoice_count: int | None = None
+    sum_amount: str | None = None
+    sum_vat: str | None = None
+    sum_total: str | None = None
+    unmapped_source_columns: list[str] = Field(default_factory=list)
+
+
+class MisaReadinessReport(BaseModel):
+    ok: bool
+    status: ReadinessStatus
+    score: int
+    summary: MisaReadinessSummary
+    issues: list[MisaReadinessIssue]
+    reconciliation: MisaReconciliationReport
+    disclaimer: str

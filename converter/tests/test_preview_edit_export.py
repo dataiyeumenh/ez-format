@@ -67,6 +67,7 @@ def test_export_uses_edited_preview_rows(tmp_path, monkeypatch):
             "upload_id": analyze_payload["upload_id"],
             "profile_id": profile_id,
             "rows": edited_rows,
+            "acknowledge_warnings": True,
         },
     )
     assert export.status_code == 200

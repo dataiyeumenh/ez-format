@@ -48,7 +48,15 @@ function formatDateTime(value) {
 }
 
 function buildCsv(rows) {
-  const headers = ["User", "Email", "Tên file", "Định dạng", "Kích thước", "Trạng thái", "Ngày giờ"];
+  const headers = [
+    "User",
+    "Email",
+    "Tên file",
+    "Định dạng",
+    "Kích thước",
+    "Trạng thái",
+    "Ngày giờ",
+  ];
   const lines = rows.map((row) => [
     row.user?.name || "",
     row.user?.email || "",
@@ -59,7 +67,9 @@ function buildCsv(rows) {
     formatDateTime(row.createdAt),
   ]);
   return [headers, ...lines]
-    .map((line) => line.map((cell) => `"${String(cell).replace(/"/g, '""')}"`).join(","))
+    .map((line) =>
+      line.map((cell) => `"${String(cell).replace(/"/g, '""')}"`).join(","),
+    )
     .join("\n");
 }
 
@@ -67,7 +77,13 @@ const FilesPage = () => {
   const [currentPage, setCurrentPage] = useState(1);
   const [status, setStatus] = useState("");
   const [runs, setRuns] = useState([]);
-  const [stats, setStats] = useState({ total: 0, completed: 0, failed: 0, processing: 0, cancelled: 0 });
+  const [stats, setStats] = useState({
+    total: 0,
+    completed: 0,
+    failed: 0,
+    processing: 0,
+    cancelled: 0,
+  });
   const [totalPages, setTotalPages] = useState(1);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -84,10 +100,22 @@ const FilesPage = () => {
         },
       });
       setRuns(data.runs || []);
-      setStats(data.stats || { total: 0, completed: 0, failed: 0, processing: 0, cancelled: 0 });
+      setStats(
+        data.stats || {
+          total: 0,
+          completed: 0,
+          failed: 0,
+          processing: 0,
+          cancelled: 0,
+        },
+      );
       setTotalPages(data.totalPages || 1);
     } catch (err) {
-      setError(err.response?.data?.message || err.message || "Không thể tải lịch sử chuyển đổi.");
+      setError(
+        err.response?.data?.message ||
+          err.message ||
+          "Không thể tải lịch sử chuyển đổi.",
+      );
     } finally {
       setLoading(false);
     }
@@ -178,13 +206,20 @@ const FilesPage = () => {
 
         <div className="grid grid-cols-2 lg:grid-cols-5 gap-4">
           {statCards.map((s) => (
-            <div key={s.label} className="bg-white rounded-xl p-4 border border-gray-100">
+            <div
+              key={s.label}
+              className="bg-white rounded-xl p-4 border border-gray-100"
+            >
               <div className="flex items-center justify-between mb-2">
-                <span className={`text-base font-bold w-9 h-9 flex items-center justify-center rounded-lg ${s.color}`}>
+                <span
+                  className={`text-base font-bold w-9 h-9 flex items-center justify-center rounded-lg ${s.color}`}
+                >
                   {s.icon}
                 </span>
               </div>
-              <p className="text-xl font-black text-gray-900">{s.value.toLocaleString("vi-VN")}</p>
+              <p className="text-xl font-black text-gray-900">
+                {s.value.toLocaleString("vi-VN")}
+              </p>
               <p className="text-xs text-gray-500 mt-0.5">{s.label}</p>
               <p className="text-xs text-gray-400 mt-0.5">{s.change}</p>
             </div>
@@ -216,7 +251,10 @@ const FilesPage = () => {
               <RefreshCw size={14} className={loading ? "animate-spin" : ""} />
               Tải lại
             </button>
-            <button onClick={handleReset} className="ml-auto text-sm text-gray-400 hover:text-gray-600">
+            <button
+              onClick={handleReset}
+              className="ml-auto text-sm text-gray-400 hover:text-gray-600"
+            >
               ⚙ Reset Filters
             </button>
           </div>
@@ -231,8 +269,19 @@ const FilesPage = () => {
             <table className="w-full">
               <thead>
                 <tr className="border-b border-gray-50">
-                  {["USER", "TÊN FILE", "ĐỊNH DẠNG", "KÍCH THƯỚC", "TRẠNG THÁI", "NGÀY & GIỜ", "HÀNH ĐỘNG"].map((h) => (
-                    <th key={h} className="text-left text-xs font-semibold text-gray-400 uppercase tracking-wider px-5 py-3">
+                  {[
+                    "USER",
+                    "TÊN FILE",
+                    "ĐỊNH DẠNG",
+                    "KÍCH THƯỚC",
+                    "TRẠNG THÁI",
+                    "NGÀY & GIỜ",
+                    "HÀNH ĐỘNG",
+                  ].map((h) => (
+                    <th
+                      key={h}
+                      className="text-left text-xs font-semibold text-gray-400 uppercase tracking-wider px-5 py-3"
+                    >
                       {h}
                     </th>
                   ))}
@@ -241,31 +290,49 @@ const FilesPage = () => {
               <tbody>
                 {loading && runs.length === 0 ? (
                   <tr>
-                    <td colSpan={7} className="px-5 py-10 text-center text-sm text-gray-500">
+                    <td
+                      colSpan={7}
+                      className="px-5 py-10 text-center text-sm text-gray-500"
+                    >
                       Đang tải lịch sử chuyển đổi...
                     </td>
                   </tr>
                 ) : runs.length === 0 ? (
                   <tr>
-                    <td colSpan={7} className="px-5 py-10 text-center text-sm text-gray-500">
+                    <td
+                      colSpan={7}
+                      className="px-5 py-10 text-center text-sm text-gray-500"
+                    >
                       Chưa có lịch sử chuyển đổi nào.
                     </td>
                   </tr>
                 ) : (
                   runs.map((run, index) => (
-                    <tr key={run.id} className="border-b border-gray-50 last:border-0 hover:bg-gray-50/50 transition-colors">
+                    <tr
+                      key={run.id}
+                      className="border-b border-gray-50 last:border-0 hover:bg-gray-50/50 transition-colors"
+                    >
                       <td className="px-5 py-4">
                         <div className="flex items-center gap-3">
-                          <div className={`w-9 h-9 rounded-full ${avatarColors[index % avatarColors.length]} flex items-center justify-center text-white text-xs font-bold`}>
+                          <div
+                            className={`w-9 h-9 rounded-full ${avatarColors[index % avatarColors.length]} flex items-center justify-center text-white text-xs font-bold`}
+                          >
                             {initials(run.user?.name)}
                           </div>
                           <div>
-                            <p className="text-sm font-medium text-gray-900">{run.user?.name || "Không rõ"}</p>
-                            {run.user?.email && <p className="text-xs text-gray-400">{run.user.email}</p>}
+                            <p className="text-sm font-medium text-gray-900">
+                              {run.user?.name || "Không rõ"}
+                            </p>
+                            {run.user?.email && (
+                              <p className="text-xs text-gray-400">{run.user.email}</p>
+                            )}
                           </div>
                         </div>
                       </td>
-                      <td className="px-5 py-4 text-sm text-gray-700 max-w-[220px] truncate" title={run.fileName}>
+                      <td
+                        className="px-5 py-4 text-sm text-gray-700 max-w-[220px] truncate"
+                        title={run.fileName}
+                      >
                         {run.fileName}
                       </td>
                       <td className="px-5 py-4">
@@ -275,12 +342,16 @@ const FilesPage = () => {
                       </td>
                       <td className="px-5 py-4 text-sm text-gray-500">{run.size}</td>
                       <td className="px-5 py-4">
-                        <span className={`text-xs font-semibold px-2.5 py-1 rounded-full flex items-center gap-1.5 w-fit ${statusStyle[run.status] || "bg-gray-100 text-gray-600"}`}>
+                        <span
+                          className={`text-xs font-semibold px-2.5 py-1 rounded-full flex items-center gap-1.5 w-fit ${statusStyle[run.status] || "bg-gray-100 text-gray-600"}`}
+                        >
                           <span className="w-1.5 h-1.5 rounded-full bg-current" />
                           {statusLabels[run.status] || run.status}
                         </span>
                       </td>
-                      <td className="px-5 py-4 text-sm text-gray-500">{formatDateTime(run.createdAt)}</td>
+                      <td className="px-5 py-4 text-sm text-gray-500">
+                        {formatDateTime(run.createdAt)}
+                      </td>
                       <td className="px-5 py-4 text-sm text-gray-400">—</td>
                     </tr>
                   ))

@@ -9,6 +9,16 @@ const HEALTH_URL = `${pythonBaseURL}/healthz`;
 const TEMPLATES_URL = `${pythonBaseURL}/api/v1/templates`;
 const STATUS_REFRESH_MS = 15000;
 
+export const DEFAULT_CONVERTER_TEMPLATES = [
+  { id: "bsn_sales", label: "BSN - Form import bán hàng" },
+  { id: "bsn_purchase", label: "BSN - Form import mua hàng" },
+  { id: "misa_purchase_domestic", label: "Mua hàng trong nước - MISA" },
+  { id: "sales_goods", label: "Form bán hàng hóa" },
+  { id: "sales_service", label: "Form bán hàng dịch vụ" },
+  { id: "purchase_goods", label: "Form mua hàng hóa" },
+  { id: "purchase_service", label: "Form mua dịch vụ" },
+];
+
 export function formatApiError(payload, fallback) {
   if (!payload || typeof payload !== "object") return fallback;
   if (typeof payload.error === "string") return payload.error;
@@ -62,8 +72,7 @@ export async function fetchConverterStatus(fetchImpl = fetch) {
     fetchJson(fetchImpl, TEMPLATES_URL),
   ]);
 
-  const health =
-    healthResult.status === "fulfilled" ? healthResult.value : null;
+  const health = healthResult.status === "fulfilled" ? healthResult.value : null;
   const templatesData =
     templatesResult.status === "fulfilled" ? templatesResult.value : null;
 
@@ -72,12 +81,14 @@ export async function fetchConverterStatus(fetchImpl = fetch) {
   return {
     serviceOnline,
     aiOnline: health ? aiStatusFromHealth(health) : null,
-    templates: templatesData?.items || [],
+    templates: templatesData?.items?.length
+      ? templatesData.items
+      : DEFAULT_CONVERTER_TEMPLATES,
   };
 }
 
 export function useConverterApi() {
-  const [templates, setTemplates] = useState([]);
+  const [templates, setTemplates] = useState(DEFAULT_CONVERTER_TEMPLATES);
   const [serviceOnline, setServiceOnline] = useState(null);
   const [aiOnline, setAiOnline] = useState(null); // null=loading, true=online, false=offline, "disabled"=không cấu hình
 
@@ -96,7 +107,7 @@ export function useConverterApi() {
           if (cancelled) return;
           setServiceOnline(false);
           setAiOnline(false);
-          setTemplates([]);
+          setTemplates(DEFAULT_CONVERTER_TEMPLATES);
         });
     };
 
@@ -135,27 +146,48 @@ export function useConverterApi() {
     return readJsonResponse(response, "Không thể lưu setting mapping.");
   }, []);
 
-  const exportConfirmed = useCallback(async (uploadId, profileId, rows) => {
-    const payload = { upload_id: uploadId, profile_id: profileId };
-    if (Array.isArray(rows) && rows.length > 0) {
-      payload.rows = rows;
-    }
-    const response = await fetch(`${pythonBaseURL}/api/v1/conversions/export`, {
+  const checkReadiness = useCallback(async (payload) => {
+    const response = await fetch(`${pythonBaseURL}/api/v1/mappings/readiness`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
     });
-
-    if (!response.ok) {
-      const errData = await response.json().catch(() => ({}));
-      throw new Error(formatApiError(errData, "Không thể tải file MISA."));
-    }
-
-    const blob = await response.blob();
-    const disposition = response.headers.get("Content-Disposition") || "";
-    const match = disposition.match(/filename="?([^";\n]+)"?/i);
-    return { blob, filename: match ? match[1] : "Import misa.xls" };
+    return readJsonResponse(
+      response,
+      "Không kiểm tra được trạng thái sẵn sàng import MISA.",
+    );
   }, []);
+
+  const exportConfirmed = useCallback(
+    async (uploadId, profileId, rows, acknowledgeWarnings = false) => {
+      const payload = {
+        upload_id: uploadId,
+        profile_id: profileId,
+        acknowledge_warnings: acknowledgeWarnings,
+      };
+      if (Array.isArray(rows) && rows.length > 0) {
+        payload.rows = rows;
+      }
+      const response = await fetch(`${pythonBaseURL}/api/v1/conversions/export`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+
+      if (!response.ok) {
+        const errData = await response.json().catch(() => ({}));
+        const error = new Error(formatApiError(errData, "Không thể tải file MISA."));
+        error.payload = errData;
+        throw error;
+      }
+
+      const blob = await response.blob();
+      const disposition = response.headers.get("Content-Disposition") || "";
+      const match = disposition.match(/filename="?([^";\n]+)"?/i);
+      return { blob, filename: match ? match[1] : "Import misa.xls" };
+    },
+    [],
+  );
 
   return {
     templates,
@@ -164,6 +196,7 @@ export function useConverterApi() {
     analyzeFile,
     previewMapping,
     confirmMapping,
+    checkReadiness,
     exportConfirmed,
   };
 }

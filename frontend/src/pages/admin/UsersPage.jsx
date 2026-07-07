@@ -416,8 +416,7 @@ const UsersPage = () => {
                     const planName = u.plan?.name || "GÓI MIỄN PHÍ";
                     const planStyle =
                       PLAN_STYLES[planCode] || "bg-gray-100 text-gray-600";
-                    const canManage =
-                      u.role !== "admin" && u._id !== currentUser?.id;
+                    const canManage = u.role !== "admin" && u._id !== currentUser?.id;
                     return (
                       <tr
                         key={u._id}
@@ -568,8 +567,8 @@ const UsersPage = () => {
             <p className="mt-2 text-sm leading-relaxed text-gray-500">
               {statusAction === "ban" ? (
                 <>
-                  Người dùng <strong>{statusActionUser.name}</strong> sẽ không thể
-                  đăng nhập cho đến khi được mở khoá lại.
+                  Người dùng <strong>{statusActionUser.name}</strong> sẽ không thể đăng
+                  nhập cho đến khi được mở khoá lại.
                 </>
               ) : (
                 <>
@@ -676,7 +675,8 @@ const UsersPage = () => {
                   ))}
                 </select>
               </div>
-              {plans.find((plan) => plan.id === (editForm.plan || freePlanId))?.code === "perfile" && (
+              {plans.find((plan) => plan.id === (editForm.plan || freePlanId))?.code ===
+                "perfile" && (
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-1.5">
                     Số lượt chuyển đổi

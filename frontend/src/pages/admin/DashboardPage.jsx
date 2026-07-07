@@ -304,9 +304,13 @@ const DashboardPage = () => {
                         className="w-2.5 h-2.5 rounded-full flex-shrink-0"
                         style={{ backgroundColor: item.color }}
                       />
-                      <span className="text-xs text-gray-600 truncate">{item.name}</span>
+                      <span className="text-xs text-gray-600 truncate">
+                        {item.name}
+                      </span>
                       {item.isActive === false && (
-                        <span className="text-[10px] text-gray-400 flex-shrink-0">(ẩn)</span>
+                        <span className="text-[10px] text-gray-400 flex-shrink-0">
+                          (ẩn)
+                        </span>
                       )}
                     </div>
                     <span className="text-xs font-medium text-gray-700 flex-shrink-0">
@@ -353,7 +357,10 @@ const DashboardPage = () => {
                 <tbody>
                   {data.recentConversions.length === 0 ? (
                     <tr>
-                      <td colSpan={5} className="px-5 py-10 text-center text-sm text-gray-400">
+                      <td
+                        colSpan={5}
+                        className="px-5 py-10 text-center text-sm text-gray-400"
+                      >
                         Chưa có chuyển đổi nào
                       </td>
                     </tr>
@@ -371,7 +378,10 @@ const DashboardPage = () => {
                             <p className="text-xs text-gray-400">{row.user?.email}</p>
                           </div>
                         </td>
-                        <td className="px-5 py-3 text-sm text-gray-600 max-w-[180px] truncate" title={row.fileName}>
+                        <td
+                          className="px-5 py-3 text-sm text-gray-600 max-w-[180px] truncate"
+                          title={row.fileName}
+                        >
                           {row.fileName}
                         </td>
                         <td className="px-5 py-3">
@@ -421,7 +431,9 @@ const DashboardPage = () => {
                           {getInitials(u.name)}
                         </div>
                         <div className="min-w-0">
-                          <p className="text-sm font-medium text-gray-900 truncate">{u.name}</p>
+                          <p className="text-sm font-medium text-gray-900 truncate">
+                            {u.name}
+                          </p>
                           <p className="text-xs text-gray-400 truncate">{u.email}</p>
                         </div>
                       </div>

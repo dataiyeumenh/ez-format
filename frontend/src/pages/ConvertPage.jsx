@@ -19,6 +19,8 @@ import ChatSupport from "../components/ChatSupport";
 import Alert from "../components/ui/Alert";
 import StepProgress from "../components/ui/StepProgress";
 import PreviewTable from "../components/PreviewTable";
+import ValidationIssueTable from "../components/ValidationIssueTable";
+import ValidationReadinessCard from "../components/ValidationReadinessCard";
 import { useConverterApi } from "../hooks/useConverterApi";
 import { useAuth } from "../context/AuthContext";
 import api from "../services/api";
@@ -33,7 +35,7 @@ const STATUS = {
   ERROR: "error",
 };
 
-const STEPS = ["Tải file", "Ghép cột", "Tải file đã chuẩn hoá"];
+const STEPS = ["Tải file", "Ghép cột", "Kiểm tra lỗi", "Tải file"];
 const DEFAULT_TEMPLATE_ID = "bsn_sales";
 const EXCEL_EXT = ["xlsx", "xls"];
 const PDF_EXT = ["pdf"];
@@ -140,6 +142,7 @@ const ConvertPage = () => {
     analyzeFile,
     previewMapping,
     confirmMapping,
+    checkReadiness,
     exportConfirmed,
   } = useConverterApi();
   const { user, refreshUser } = useAuth();
@@ -150,7 +153,9 @@ const ConvertPage = () => {
   const fileCredits = Math.max(0, Number(user?.fileCredits || 0));
   const canConvert =
     !isLimitedPlan ||
-    (planCode === "free" ? dailyFileCredit > 0 : dailyFileCredit > 0 || fileCredits > 0);
+    (planCode === "free"
+      ? dailyFileCredit > 0
+      : dailyFileCredit > 0 || fileCredits > 0);
   const noCreditMessage =
     planCode === "free"
       ? "Bạn đã dùng hết lượt chuyển đổi miễn phí hôm nay. Vui lòng quay lại vào ngày mai hoặc nâng cấp gói."
@@ -169,7 +174,9 @@ const ConvertPage = () => {
   const [issues, setIssues] = useState([]);
   const [previewHeaders, setPreviewHeaders] = useState([]);
   const [previewRows, setPreviewRows] = useState([]);
-  const [previewStats, setPreviewStats] = useState(null);
+  const [readinessReport, setReadinessReport] = useState(null);
+  const [readinessLoading, setReadinessLoading] = useState(false);
+  const [acknowledgeWarnings, setAcknowledgeWarnings] = useState(false);
   const [profileId, setProfileId] = useState(null);
   const [conversionRunId, setConversionRunId] = useState(null);
   const [focusedTarget, setFocusedTarget] = useState("");
@@ -203,8 +210,10 @@ const ConvertPage = () => {
   };
   const inferFieldFromText = (text, target) => {
     const lowerText = (text || "").toLowerCase();
-    if (lowerText.includes("công thức") || lowerText.includes("formula")) return "formula";
-    if (lowerText.includes("mặc định") || lowerText.includes("default")) return "default";
+    if (lowerText.includes("công thức") || lowerText.includes("formula"))
+      return "formula";
+    if (lowerText.includes("mặc định") || lowerText.includes("default"))
+      return "default";
     if (
       lowerText.includes("excel") ||
       lowerText.includes("mapping") ||
@@ -218,21 +227,6 @@ const ConvertPage = () => {
     if (defaults[target] === undefined || defaults[target] === "") return "default";
     return "formula";
   };
-  const keyPreviewValues = useMemo(() => {
-    const firstRow = previewRows[0];
-    if (!firstRow) return [];
-    return KEY_PREVIEW_HEADERS.filter((header) => previewHeaders.includes(header)).map(
-      (header) => ({
-        header,
-        value:
-          firstRow[header] !== undefined &&
-          firstRow[header] !== null &&
-          firstRow[header] !== ""
-            ? String(firstRow[header])
-            : "—",
-      }),
-    );
-  }, [previewHeaders, previewRows]);
   const keyMappingValues = useMemo(
     () =>
       KEY_PREVIEW_HEADERS.filter((header) => targetHeaders.includes(header)).map(
@@ -265,21 +259,21 @@ const ConvertPage = () => {
       !analyzePayload
         ? []
         : targetHeaders
-        .filter((header) => header.includes("(*)"))
-        .filter((header) => {
-          const rawHeader = targetMapping[header];
-          const formula = formulas[header];
-          const defaultValue = defaults[header];
-          return !(
-            rawHeader ||
-            formula ||
-            (defaultValue !== undefined && defaultValue !== "")
-          );
-        })
-        .map((header) => ({
-          code: "missing_required_mapping_live",
-          message: `Thiếu thiết lập cho cột bắt buộc '${header}'.`,
-        })),
+            .filter((header) => header.includes("(*)"))
+            .filter((header) => {
+              const rawHeader = targetMapping[header];
+              const formula = formulas[header];
+              const defaultValue = defaults[header];
+              return !(
+                rawHeader ||
+                formula ||
+                (defaultValue !== undefined && defaultValue !== "")
+              );
+            })
+            .map((header) => ({
+              code: "missing_required_mapping_live",
+              message: `Thiếu thiết lập cho cột bắt buộc '${header}'.`,
+            })),
     [analyzePayload, defaults, formulas, targetHeaders, targetMapping],
   );
   const nonRequiredIssues = useMemo(
@@ -327,10 +321,18 @@ const ConvertPage = () => {
 
   const stepIndex =
     convStatus === STATUS.SUCCESS || convStatus === STATUS.DOWNLOADING
-      ? 2
-      : convStatus === STATUS.MAPPING || convStatus === STATUS.PREVIEW
-        ? 1
-        : 0;
+      ? 3
+      : convStatus === STATUS.PREVIEW
+        ? 2
+        : convStatus === STATUS.MAPPING
+          ? 1
+          : 0;
+
+  const hasReadinessBlockers = (readinessReport?.summary?.blocker || 0) > 0;
+  const hasUnacknowledgedWarnings =
+    (readinessReport?.summary?.warning || 0) > 0 && !acknowledgeWarnings;
+  const downloadDisabledByReadiness =
+    readinessLoading || hasReadinessBlockers || hasUnacknowledgedWarnings;
 
   useEffect(() => {
     if (!templates.length) return;
@@ -348,7 +350,9 @@ const ConvertPage = () => {
     setIssues([]);
     setPreviewHeaders([]);
     setPreviewRows([]);
-    setPreviewStats(null);
+    setReadinessReport(null);
+    setReadinessLoading(false);
+    setAcknowledgeWarnings(false);
     setProfileId(null);
     setConversionRunId(null);
   };
@@ -370,7 +374,11 @@ const ConvertPage = () => {
     }
   };
 
-  const updateConversionRunLog = async (status, payload = {}, runId = conversionRunId) => {
+  const updateConversionRunLog = async (
+    status,
+    payload = {},
+    runId = conversionRunId,
+  ) => {
     if (!runId || !localStorage.getItem("token")) return;
     try {
       await api.patch(`/conversion-runs/${runId}/status`, {
@@ -385,7 +393,8 @@ const ConvertPage = () => {
   const clearPreviewAfterMappingChange = () => {
     setPreviewHeaders([]);
     setPreviewRows([]);
-    setPreviewStats(null);
+    setReadinessReport(null);
+    setAcknowledgeWarnings(false);
     setProfileId(null);
     if (convStatus === STATUS.PREVIEW || convStatus === STATUS.SUCCESS) {
       setConvStatus(STATUS.MAPPING);
@@ -507,12 +516,35 @@ const ConvertPage = () => {
     formulas,
   });
 
+  const buildReadinessPayload = (rows = null) => {
+    const payload = buildMappingPayload();
+    if (Array.isArray(rows)) {
+      payload.rows = rows;
+    }
+    return payload;
+  };
+
+  const runReadinessCheck = async (rows = null) => {
+    if (!analyzePayload?.upload_id) return null;
+    setReadinessLoading(true);
+    try {
+      const report = await checkReadiness(buildReadinessPayload(rows));
+      setReadinessReport(report);
+      if ((report?.summary?.warning || 0) === 0) {
+        setAcknowledgeWarnings(false);
+      }
+      return report;
+    } finally {
+      setReadinessLoading(false);
+    }
+  };
+
   const createPreview = async () => {
     const result = await previewMapping(buildMappingPayload());
     setPreviewHeaders(result.headers || []);
     setPreviewRows(result.rows || []);
     setIssues(result.issues || []);
-    setPreviewStats(result.stats || null);
+    await runReadinessCheck(result.rows || []);
     return result;
   };
 
@@ -529,6 +561,25 @@ const ConvertPage = () => {
       console.error("[ConvertPage] Preview failed:", err);
       setErrorMsg(err.message || "Không thể xem trước dữ liệu.");
       setConvStatus(STATUS.MAPPING);
+    }
+  };
+
+  const handleReadinessCheck = async () => {
+    if (!analyzePayload?.upload_id) return;
+    setErrorMsg("");
+    try {
+      if (previewRows.length) {
+        await runReadinessCheck(previewRows);
+        setConvStatus(STATUS.PREVIEW);
+        return;
+      }
+      setConvStatus(STATUS.ANALYZING);
+      await createPreview();
+      setConvStatus(STATUS.PREVIEW);
+    } catch (err) {
+      console.error("[ConvertPage] Readiness check failed:", err);
+      setErrorMsg(err.message || "Không kiểm tra được lỗi trước khi tải.");
+      setConvStatus(previewRows.length ? STATUS.PREVIEW : STATUS.MAPPING);
     }
   };
 
@@ -556,12 +607,22 @@ const ConvertPage = () => {
           throw new Error("Không có dòng dữ liệu để tải.");
         }
       }
+      const readiness = await runReadinessCheck(rowsToExport);
+      if ((readiness?.summary?.blocker || 0) > 0) {
+        throw new Error("Còn lỗi cần sửa trước khi tải file MISA.");
+      }
+      if ((readiness?.summary?.warning || 0) > 0 && !acknowledgeWarnings) {
+        throw new Error(
+          "Vui lòng rà soát và xác nhận các cảnh báo trước khi tải file MISA.",
+        );
+      }
       const savedProfileId = await saveProfileIfNeeded();
       exportStarted = true;
       const { blob, filename } = await exportConfirmed(
         analyzePayload.upload_id,
         savedProfileId,
         rowsToExport,
+        acknowledgeWarnings,
       );
       const url = window.URL.createObjectURL(blob);
       const a = document.createElement("a");
@@ -580,6 +641,9 @@ const ConvertPage = () => {
       refreshUser?.().catch(() => {});
     } catch (err) {
       console.error("[ConvertPage] Download failed:", err);
+      if (err.payload?.issues) {
+        setReadinessReport(err.payload);
+      }
       if (exportStarted) {
         await updateConversionRunLog("failed", {
           converterUploadId: analyzePayload.upload_id,
@@ -620,6 +684,8 @@ const ConvertPage = () => {
   };
 
   const handlePreviewCellChange = (rowIndex, header, value) => {
+    setReadinessReport(null);
+    setAcknowledgeWarnings(false);
     setPreviewRows((prev) =>
       prev.map((row, index) =>
         index === rowIndex ? { ...row, [header]: value } : row,
@@ -628,6 +694,8 @@ const ConvertPage = () => {
   };
 
   const handlePreviewRowDelete = (rowIndex) => {
+    setReadinessReport(null);
+    setAcknowledgeWarnings(false);
     setPreviewRows((prev) => prev.filter((_, index) => index !== rowIndex));
   };
 
@@ -645,9 +713,9 @@ const ConvertPage = () => {
                 Chuyển đổi Excel → Chuẩn định dạng kế toán
               </h1>
               <p className="text-sm sm:text-base text-gray-500 mt-2 max-w-2xl mx-auto">
-                Hệ thống đọc cấu trúc file nhập liệu chuẩn của phần mềm kế toán chuyên dụng, nhận biết tên
-                cột cần có trong biểu mẫu và tự gợi ý ghép cột từ file Excel để bạn
-                kiểm tra, chỉnh sửa trước khi tải file.
+                Hệ thống đọc cấu trúc file nhập liệu chuẩn của phần mềm kế toán chuyên
+                dụng, nhận biết tên cột cần có trong biểu mẫu và tự gợi ý ghép cột từ
+                file Excel để bạn kiểm tra, chỉnh sửa trước khi tải file.
               </p>
             </div>
 
@@ -657,8 +725,8 @@ const ConvertPage = () => {
                 title="Bộ chuyển đổi chưa sẵn sàng"
                 className="mb-5"
               >
-                Chạy bộ chuyển đổi trước khi phân tích file. Nếu AI tạm thời không
-                hoạt động, bạn vẫn có thể ghép cột thủ công.
+                Chạy bộ chuyển đổi trước khi phân tích file. Nếu AI tạm thời không hoạt
+                động, bạn vẫn có thể ghép cột thủ công.
               </Alert>
             )}
 
@@ -848,11 +916,29 @@ const ConvertPage = () => {
                       </button>
                       <button
                         type="button"
+                        className="btn-secondary w-full justify-center py-3"
+                        onClick={handleReadinessCheck}
+                        disabled={
+                          convStatus === STATUS.DOWNLOADING ||
+                          convStatus === STATUS.ANALYZING ||
+                          readinessLoading
+                        }
+                      >
+                        {readinessLoading ? (
+                          <Loader2 size={16} className="animate-spin" />
+                        ) : (
+                          <CheckCircle size={16} />
+                        )}
+                        Kiểm tra lỗi
+                      </button>
+                      <button
+                        type="button"
                         className="inline-flex w-full items-center justify-center gap-2 rounded-xl bg-emerald-600 px-5 py-3 text-sm font-semibold text-white shadow-sm transition-all duration-200 hover:bg-emerald-700 hover:shadow-md active:scale-[0.98] disabled:pointer-events-none disabled:opacity-50"
                         onClick={handleDownload}
                         disabled={
                           convStatus === STATUS.DOWNLOADING ||
                           convStatus === STATUS.ANALYZING ||
+                          downloadDisabledByReadiness ||
                           (!canConvert && convStatus !== STATUS.SUCCESS)
                         }
                       >
@@ -861,11 +947,12 @@ const ConvertPage = () => {
                         ) : (
                           <Download size={16} />
                         )}
-                        {convStatus === STATUS.SUCCESS ? "Tải lại file kết quả" : "Tải file kết quả"}
+                        {convStatus === STATUS.SUCCESS
+                          ? "Tải lại file kết quả"
+                          : "Tải file kết quả"}
                       </button>
                     </div>
                   )}
-
                 </div>
 
                 <p className="text-center text-xs text-gray-400">
@@ -928,8 +1015,8 @@ const ConvertPage = () => {
                       Chưa có gợi ý ghép cột
                     </h2>
                     <p className="text-sm text-gray-500 mt-1">
-                      Tải file lên rồi bấm phân tích để hệ thống đọc cấu trúc cột và
-                      gợi ý ghép cột.
+                      Tải file lên rồi bấm phân tích để hệ thống đọc cấu trúc cột và gợi
+                      ý ghép cột.
                     </p>
                   </div>
                 )}
@@ -955,12 +1042,13 @@ const ConvertPage = () => {
                         </h2>
                         <p className="mt-1 text-sm leading-relaxed text-gray-600">
                           Với <strong>mỗi dòng cột theo chuẩn</strong>, bạn chỉ chọn{" "}
-                          <strong>1 trong 3 ô</strong>: <strong>Cột từ file Excel</strong>,{" "}
+                          <strong>1 trong 3 ô</strong>:{" "}
+                          <strong>Cột từ file Excel</strong>,{" "}
                           <strong>Giá trị mặc định</strong> hoặc{" "}
                           <strong>Công thức tự động</strong>. Sau khi đã chọn 1 cách,
-                          bạn có thể <strong>để trống 2 ô còn lại</strong>. Ví dụ:
-                          nếu đã chọn cột từ Excel thì không cần nhập giá trị mặc định
-                          hay công thức cho cùng dòng đó.
+                          bạn có thể <strong>để trống 2 ô còn lại</strong>. Ví dụ: nếu
+                          đã chọn cột từ Excel thì không cần nhập giá trị mặc định hay
+                          công thức cho cùng dòng đó.
                         </p>
                       </div>
                     </div>
@@ -1009,11 +1097,25 @@ const ConvertPage = () => {
                       </div>
                     )}
 
+                    {(readinessReport || readinessLoading) && (
+                      <div className="space-y-3 border-b border-gray-100 bg-white px-5 py-4 sm:px-6">
+                        <ValidationReadinessCard
+                          report={readinessReport}
+                          loading={readinessLoading}
+                          acknowledgeWarnings={acknowledgeWarnings}
+                          onAcknowledgeWarningsChange={setAcknowledgeWarnings}
+                        />
+                        <ValidationIssueTable issues={readinessReport?.issues || []} />
+                      </div>
+                    )}
+
                     <div ref={mappingTableRef} className="overflow-auto max-h-[620px]">
                       <table className="min-w-[1180px] text-sm">
                         <thead className="sticky top-0 z-10 bg-gray-50 text-xs text-gray-500 uppercase">
                           <tr>
-                            <th className="px-4 py-3 text-left w-[24%]">Cột theo định dạng chuẩn</th>
+                            <th className="px-4 py-3 text-left w-[24%]">
+                              Cột theo định dạng chuẩn
+                            </th>
                             <th className="px-4 py-3 text-left w-[24%]">
                               Cột từ file Excel
                               <ColumnHelp text="Chọn cột dữ liệu tương ứng từ file Excel của bạn." />
@@ -1024,7 +1126,11 @@ const ConvertPage = () => {
                             </th>
                             <th className="px-4 py-3 text-left w-[32%]">
                               Công thức tự động
-                              <ColumnHelp text={"Dùng để tự tạo giá trị theo mẫu.\nBạn có thể gõ chữ thường và chèn dữ liệu bằng cú pháp ${Tên cột}.\n\nVí dụ:\n- XK_${Số chứng từ (*)}\n- ${Mã khách hàng}_${Ngày chứng từ (*)}\n\nNếu không cần công thức, bạn có thể để trống ô này."} />
+                              <ColumnHelp
+                                text={
+                                  "Dùng để tự tạo giá trị theo mẫu.\nBạn có thể gõ chữ thường và chèn dữ liệu bằng cú pháp ${Tên cột}.\n\nVí dụ:\n- XK_${Số chứng từ (*)}\n- ${Mã khách hàng}_${Ngày chứng từ (*)}\n\nNếu không cần công thức, bạn có thể để trống ô này."
+                                }
+                              />
                             </th>
                           </tr>
                         </thead>
@@ -1049,16 +1155,14 @@ const ConvertPage = () => {
                                 <td className="px-4 py-3">
                                   <select
                                     ref={(node) => {
-                                      if (node) targetFieldRefs.current.raw[target] = node;
+                                      if (node)
+                                        targetFieldRefs.current.raw[target] = node;
                                       else delete targetFieldRefs.current.raw[target];
                                     }}
                                     className="w-full min-w-[190px] rounded-xl border border-gray-200 bg-white px-3 py-2.5 text-sm text-gray-800 shadow-sm focus:border-primary-500 focus:outline-none focus:ring-2 focus:ring-primary-500/20"
                                     value={matchedRaw}
                                     onChange={(e) =>
-                                      setTargetMapping((prev) => ({
-                                        ...prev,
-                                        [target]: e.target.value,
-                                      }))
+                                      updateTargetMapping(target, e.target.value)
                                     }
                                   >
                                     <option value="">— Không lấy từ Excel —</option>
@@ -1074,17 +1178,15 @@ const ConvertPage = () => {
                                     ref={(node) => {
                                       if (node)
                                         targetFieldRefs.current.default[target] = node;
-                                      else delete targetFieldRefs.current.default[target];
+                                      else
+                                        delete targetFieldRefs.current.default[target];
                                     }}
                                     type="text"
                                     className="w-full min-w-[160px] rounded-xl border border-gray-200 bg-white px-3 py-2.5 text-sm text-gray-800 shadow-sm focus:border-primary-500 focus:outline-none focus:ring-2 focus:ring-primary-500/20"
                                     placeholder="Giá trị mặc định"
                                     value={defaults[target] ?? ""}
                                     onChange={(e) =>
-                                      setDefaults((prev) => ({
-                                        ...prev,
-                                        [target]: e.target.value,
-                                      }))
+                                      updateDefault(target, e.target.value)
                                     }
                                   />
                                 </td>
@@ -1093,17 +1195,15 @@ const ConvertPage = () => {
                                     ref={(node) => {
                                       if (node)
                                         targetFieldRefs.current.formula[target] = node;
-                                      else delete targetFieldRefs.current.formula[target];
+                                      else
+                                        delete targetFieldRefs.current.formula[target];
                                     }}
                                     type="text"
                                     className="w-full min-w-[320px] rounded-xl border border-gray-200 bg-white px-3 py-2.5 text-sm text-gray-800 shadow-sm focus:border-primary-500 focus:outline-none focus:ring-2 focus:ring-primary-500/20"
                                     placeholder="VD: XK_${Số chứng từ (*)}"
                                     value={formulas[target] ?? ""}
                                     onChange={(e) =>
-                                      setFormulas((prev) => ({
-                                        ...prev,
-                                        [target]: e.target.value,
-                                      }))
+                                      updateFormula(target, e.target.value)
                                     }
                                   />
                                 </td>
@@ -1137,9 +1237,27 @@ const ConvertPage = () => {
                             </button>
                             <button
                               type="button"
+                              className="btn-secondary justify-center"
+                              onClick={handleReadinessCheck}
+                              disabled={
+                                convStatus === STATUS.DOWNLOADING || readinessLoading
+                              }
+                            >
+                              {readinessLoading ? (
+                                <Loader2 size={16} className="animate-spin" />
+                              ) : (
+                                <CheckCircle size={16} />
+                              )}
+                              Kiểm tra lỗi
+                            </button>
+                            <button
+                              type="button"
                               className="inline-flex items-center justify-center gap-2 rounded-xl bg-emerald-600 px-5 py-2.5 text-sm font-semibold text-white shadow-sm transition-all duration-200 hover:bg-emerald-700 hover:shadow-md active:scale-[0.98] disabled:pointer-events-none disabled:opacity-50"
                               onClick={handleDownload}
-                              disabled={convStatus === STATUS.DOWNLOADING}
+                              disabled={
+                                convStatus === STATUS.DOWNLOADING ||
+                                downloadDisabledByReadiness
+                              }
                             >
                               {convStatus === STATUS.DOWNLOADING ? (
                                 <Loader2 size={16} className="animate-spin" />
@@ -1168,8 +1286,8 @@ const ConvertPage = () => {
                         title="Đã xuất file kết quả"
                         className="rounded-none border-0 border-t border-emerald-100"
                       >
-                        Thiết lập ghép cột đã được lưu. Nếu chưa lưu được file (lỡ
-                        bấm hủy hộp thoại lưu), bạn có thể bấm{" "}
+                        Thiết lập ghép cột đã được lưu. Nếu chưa lưu được file (lỡ bấm
+                        hủy hộp thoại lưu), bạn có thể bấm{" "}
                         <strong>Tải lại file kết quả</strong> để tải lại mà không tốn
                         thêm lượt.
                       </Alert>
@@ -1183,11 +1301,7 @@ const ConvertPage = () => {
       </main>
 
       <Footer />
-      <ChatSupport
-        initialMessages={[
-          { from: "bot", text: "Coming soon..." },
-        ]}
-      />
+      <ChatSupport initialMessages={[{ from: "bot", text: "Coming soon..." }]} />
     </div>
   );
 };

@@ -355,7 +355,9 @@ const RevenuePage = () => {
                             </span>
                           </td>
                           <td className="px-5 py-4 text-sm text-gray-500">
-                            <div className="font-medium text-gray-700">#{t.orderCode}</div>
+                            <div className="font-medium text-gray-700">
+                              #{t.orderCode}
+                            </div>
                             <div className="max-w-[160px] truncate text-xs text-gray-400">
                               {t.paymentLinkId || "—"}
                             </div>
