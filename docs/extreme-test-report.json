@@ -1,39 +1,39 @@
 {
-  "failed": [],
   "ok": true,
+  "timestamp": "2026-07-07 22:08:18",
+  "failed": [],
   "steps": {
     "QA fast gate": {
-      "seconds": 5.7310256,
+      "seconds": 5.6163432,
       "status": "pass"
     },
     "UI lint gate": {
-      "seconds": 5.2287882,
+      "seconds": 5.3174404,
       "status": "pass"
     },
     "E2E extreme pytest": {
-      "seconds": 11.0951266,
+      "seconds": 11.1625935,
       "status": "pass"
     },
     "Specialized 1000 (VAT cell, PDF, OCR, corrupt, multisheet)": {
-      "seconds": 33.3540711,
+      "seconds": 32.6920301,
       "status": "pass"
     },
     "Stress 999 matrix (99.9% use cases)": {
-      "seconds": 26.3931091,
+      "seconds": 26.2265913,
       "status": "pass"
     },
     "Messy 1000 records": {
-      "seconds": 12.3818356,
+      "seconds": 12.5692885,
       "status": "pass"
     },
     "Full converter pytest (43+)": {
-      "seconds": 109.4914732,
+      "seconds": 110.1562024,
       "status": "pass"
     },
     "Live HTTP converter": {
-      "seconds": 4.7512489,
+      "seconds": 4.740883,
       "status": "pass"
     }
-  },
-  "timestamp": "2026-07-07 21:36:55"
+  }
 }
