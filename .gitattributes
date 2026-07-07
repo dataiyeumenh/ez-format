@@ -1,0 +1,6 @@
+frontend/src/**/* text eol=lf
+frontend/index.html text eol=lf
+frontend/src/**/*.png binary
+frontend/src/**/*.jpg binary
+frontend/src/**/*.jpeg binary
+frontend/src/**/*.webp binary
