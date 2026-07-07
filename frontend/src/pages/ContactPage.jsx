@@ -53,8 +53,8 @@ const ContactPage = () => {
               Liên hệ chúng tôi
             </h1>
             <p className="mx-auto mt-4 max-w-2xl text-base leading-relaxed text-gray-600">
-              Cần hỗ trợ chuyển đổi Excel sang Misa, bảng giá hoặc tài khoản? Gửi
-              thông tin cho chúng tôi, EzFormat sẽ phản hồi nhanh nhất có thể.
+              Cần hỗ trợ chuyển đổi Excel sang Misa, bảng giá hoặc tài khoản? Gửi thông
+              tin cho chúng tôi, EzFormat sẽ phản hồi nhanh nhất có thể.
             </p>
           </div>
         </section>
@@ -64,24 +64,24 @@ const ContactPage = () => {
           <div className="max-w-6xl mx-auto grid grid-cols-1 md:grid-cols-[1fr_0.9fr] gap-8 items-stretch">
             <div>
               <div className="h-full rounded-[2rem] border border-white/80 bg-white/85 p-6 shadow-card backdrop-blur sm:p-8">
-              <h2 className="text-4xl font-black text-gray-900 leading-tight mb-4">
-                Chúng tôi luôn sẵn sàng hỗ trợ bạn.
-              </h2>
-              <p className="text-gray-600 text-base leading-relaxed">
-                Dù bạn có thắc mắc kỹ thuật hay cần giải pháp nhận dạng, chúng tôi luôn
-                sẵn sàng hỗ trợ để bạn nhanh chóng tập trung vào những công việc quan
-                trọng hơn.
-              </p>
-              <div className="mt-8 grid gap-3 sm:grid-cols-2">
-                {["Phản hồi rõ ràng", "Hỗ trợ quy trình chuyển đổi"].map((item) => (
-                  <div
-                    key={item}
-                    className="rounded-2xl border border-primary-100 bg-primary-50/60 px-4 py-3 text-sm font-semibold text-primary-700"
-                  >
-                    {item}
-                  </div>
-                ))}
-              </div>
+                <h2 className="text-4xl font-black text-gray-900 leading-tight mb-4">
+                  Chúng tôi luôn sẵn sàng hỗ trợ bạn.
+                </h2>
+                <p className="text-gray-600 text-base leading-relaxed">
+                  Dù bạn có thắc mắc kỹ thuật hay cần giải pháp nhận dạng, chúng tôi
+                  luôn sẵn sàng hỗ trợ để bạn nhanh chóng tập trung vào những công việc
+                  quan trọng hơn.
+                </p>
+                <div className="mt-8 grid gap-3 sm:grid-cols-2">
+                  {["Phản hồi rõ ràng", "Hỗ trợ quy trình chuyển đổi"].map((item) => (
+                    <div
+                      key={item}
+                      className="rounded-2xl border border-primary-100 bg-primary-50/60 px-4 py-3 text-sm font-semibold text-primary-700"
+                    >
+                      {item}
+                    </div>
+                  ))}
+                </div>
               </div>
             </div>
 

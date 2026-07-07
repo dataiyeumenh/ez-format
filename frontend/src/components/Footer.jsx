@@ -1,5 +1,5 @@
 import { Link } from "react-router-dom";
-import ezFormatLogo from "../assets/ezformat-main-logo.png";
+import ezFormatLogo from "../assets/ezformat-logo-64.webp";
 
 const Footer = () => {
   return (
@@ -16,15 +16,15 @@ const Footer = () => {
               <span className="font-bold text-white text-lg">EzFormat</span>
             </Link>
             <p className="text-sm text-gray-400 leading-relaxed">
-              Chuẩn hoá dữ liệu kế toán — chuyển Excel sang form nhập của phần mềm kế toán ưa dùng hiện nay một cách nhanh chóng và
-              chính xác.
+              Chuẩn hoá dữ liệu kế toán — chuyển Excel sang form nhập của phần mềm kế
+              toán ưa dùng hiện nay một cách nhanh chóng và chính xác.
             </p>
           </div>
 
           <div className="pl-20 space-y-3">
-            <h4 className="font-semibold text-white text-sm uppercase tracking-wider">
+            <p className="font-semibold text-white text-sm uppercase tracking-wider">
               Hỗ trợ
-            </h4>
+            </p>
             <ul className="space-y-2">
               <li>
                 <Link
@@ -54,9 +54,9 @@ const Footer = () => {
           </div>
 
           <div className="space-y-3">
-            <h4 className="font-semibold text-white text-sm uppercase tracking-wider">
+            <p className="font-semibold text-white text-sm uppercase tracking-wider">
               Pháp lý
-            </h4>
+            </p>
             <ul className="space-y-2 text-sm text-gray-400">
               <li>Quyền riêng tư (sắp có)</li>
               <li>Điều khoản dịch vụ (sắp có)</li>

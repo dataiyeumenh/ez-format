@@ -155,6 +155,7 @@ def test_analyze_preview_and_export_purchase_file(tmp_path, monkeypatch):
         json={
             "upload_id": payload["upload_id"],
             "profile_id": confirm.json()["profile_id"],
+            "acknowledge_warnings": True,
         },
     )
     assert export.status_code == 200

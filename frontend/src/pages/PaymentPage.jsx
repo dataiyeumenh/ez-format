@@ -61,7 +61,9 @@ const PaymentPage = () => {
   const plan = useMemo(
     () => ({
       name: selectedPlan?.name || location.state?.planName || "Gói EzFormat",
-      price: selectedPlan?.price ? formatVnd(selectedPlan.price) : location.state?.planPrice || "",
+      price: selectedPlan?.price
+        ? formatVnd(selectedPlan.price)
+        : location.state?.planPrice || "",
       description:
         selectedPlan?.code === "perfile"
           ? `Cộng ${selectedPlan.fileCredits || 1} lượt chuyển đổi`

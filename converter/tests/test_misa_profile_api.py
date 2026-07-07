@@ -127,7 +127,11 @@ def test_analyze_preview_confirm_export_learns_profile(tmp_path, monkeypatch):
 
     export = client.post(
         "/api/v1/conversions/export",
-        json={"upload_id": analyze_payload["upload_id"], "profile_id": profile_id},
+        json={
+            "upload_id": analyze_payload["upload_id"],
+            "profile_id": profile_id,
+            "acknowledge_warnings": True,
+        },
     )
     assert export.status_code == 200
     assert export.headers["content-type"].startswith("application/vnd.ms-excel")
@@ -194,6 +198,61 @@ def test_high_confidence_heuristic_skips_remote_ai(tmp_path, monkeypatch):
     assert response.status_code == 200
     suggestion = response.json()["mapping_suggestion"]
     assert suggestion["source"] == "heuristic"
+
+
+def test_analyze_repairs_stale_profile_missing_required_mapping(tmp_path, monkeypatch):
+    monkeypatch.setenv("MAPPING_DB_PATH", str(tmp_path / "profiles.sqlite"))
+    monkeypatch.setenv("AI_PROVIDER", "disabled")
+
+    with (SAMPLES / "raw_sales_sample.xlsx").open("rb") as handle:
+        first_analyze = client.post(
+            "/api/v1/uploads/analyze",
+            data={"target_template_id": "bsn_sales"},
+            files={
+                "file": (
+                    "raw_sales_sample.xlsx",
+                    handle,
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                )
+            },
+        )
+    assert first_analyze.status_code == 200
+    first_payload = first_analyze.json()
+    suggestion = first_payload["mapping_suggestion"]
+    broken_mapping = dict(suggestion["mapping"])
+    broken_mapping.pop("Mã hàng", None)
+
+    confirm = client.post(
+        "/api/v1/mappings/confirm",
+        json={
+            "upload_id": first_payload["upload_id"],
+            "target_template_id": "bsn_sales",
+            "mapping": broken_mapping,
+            "defaults": suggestion["defaults"],
+            "formulas": suggestion["formulas"],
+            "profile_name": "Broken stale profile",
+        },
+    )
+    assert confirm.status_code == 200
+
+    with (SAMPLES / "raw_sales_sample.xlsx").open("rb") as handle:
+        repaired = client.post(
+            "/api/v1/uploads/analyze",
+            data={"target_template_id": "bsn_sales"},
+            files={
+                "file": (
+                    "raw_sales_sample.xlsx",
+                    handle,
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                )
+            },
+        )
+
+    assert repaired.status_code == 200
+    repaired_suggestion = repaired.json()["mapping_suggestion"]
+    assert repaired_suggestion["source"] == "mixed"
+    assert repaired_suggestion["mapping"]["Mã hàng"] == "Mã hàng (*)"
+    assert not any(issue["code"] == "missing_required_mapping" for issue in repaired.json()["issues"])
 
 
 def test_high_confidence_unknown_schema_still_uses_remote_ai(tmp_path, monkeypatch):
@@ -307,14 +366,14 @@ def test_ai_gateway_requires_bearer_token(monkeypatch):
     assert response.status_code == 401
 
 
-def test_converter_ai_mapping_timeout_caps_legacy_long_timeout(monkeypatch):
+def test_converter_ai_mapping_timeout_accepts_legacy_long_timeout(monkeypatch):
     from app.ai_mapping_client import mapping_timeout_seconds
 
     monkeypatch.delenv("AI_MAPPING_TIMEOUT_SECONDS", raising=False)
     monkeypatch.setenv("AI_TIMEOUT_SECONDS", "120")
     monkeypatch.delenv("AI_MAPPING_TIMEOUT_CAP_SECONDS", raising=False)
 
-    assert mapping_timeout_seconds() == 20.0
+    assert mapping_timeout_seconds() == 120.0
 
 
 def test_ai_gateway_normalizes_reversed_mapping_and_percent_confidence():

@@ -162,7 +162,7 @@ const PlansPage = () => {
               >
                 {plan.isPopular && (
                   <span className="absolute right-4 top-4 rounded-full bg-blue-600 px-2.5 py-1 text-[10px] font-bold uppercase text-white">
-                  PHỔ BIẾN
+                    PHỔ BIẾN
                   </span>
                 )}
                 {!plan.isActive && (
@@ -184,7 +184,8 @@ const PlansPage = () => {
                   <span className="text-xs text-gray-400">{plan.periodLabel}</span>
                 </div>
                 <p className="mb-2 text-xs text-gray-500">
-                  Giá thật: <span className="font-semibold">{formatVnd(plan.price)} VND</span>
+                  Giá thật:{" "}
+                  <span className="font-semibold">{formatVnd(plan.price)} VND</span>
                 </p>
                 <p className="mb-2 text-xs text-gray-500">
                   Active Users{" "}
@@ -235,7 +236,10 @@ const PlansPage = () => {
               </button>
             </div>
 
-            <form onSubmit={handleSubmit} className="grid grid-cols-1 gap-4 md:grid-cols-2">
+            <form
+              onSubmit={handleSubmit}
+              className="grid grid-cols-1 gap-4 md:grid-cols-2"
+            >
               <div>
                 <label className="mb-1.5 block text-sm font-medium text-gray-700">
                   Mã gói (Code)

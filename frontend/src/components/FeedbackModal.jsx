@@ -66,7 +66,9 @@ const FeedbackModal = ({ open, onClose }) => {
             <div className="flex h-14 w-14 items-center justify-center rounded-full bg-green-50 text-green-600">
               <CheckCircle2 size={30} />
             </div>
-            <h2 className="mt-4 text-lg font-bold text-gray-900">Cảm ơn bạn đã góp ý!</h2>
+            <h2 className="mt-4 text-lg font-bold text-gray-900">
+              Cảm ơn bạn đã góp ý!
+            </h2>
             <p className="mt-1 text-sm text-gray-500">
               Góp ý của bạn đã được gửi tới đội ngũ EzFormat.
             </p>
@@ -127,7 +129,9 @@ const FeedbackModal = ({ open, onClose }) => {
                 <textarea
                   id="feedback-message"
                   value={message}
-                  onChange={(event) => setMessage(event.target.value.slice(0, MAX_LENGTH))}
+                  onChange={(event) =>
+                    setMessage(event.target.value.slice(0, MAX_LENGTH))
+                  }
                   rows={5}
                   placeholder="Bạn gặp lỗi gì, hoặc mong muốn tính năng nào?"
                   className="w-full resize-none rounded-xl border border-gray-200 px-3 py-2.5 text-sm text-gray-700 placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500/20"

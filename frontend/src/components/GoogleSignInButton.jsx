@@ -9,9 +9,7 @@ const loadGoogleScript = () => {
   if (googleScriptPromise) return googleScriptPromise;
 
   googleScriptPromise = new Promise((resolve, reject) => {
-    const existingScript = document.querySelector(
-      `script[src="${GOOGLE_SCRIPT_SRC}"]`,
-    );
+    const existingScript = document.querySelector(`script[src="${GOOGLE_SCRIPT_SRC}"]`);
     if (existingScript) {
       if (existingScript.dataset.loaded === "true") {
         resolve();

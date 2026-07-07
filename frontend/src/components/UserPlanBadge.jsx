@@ -24,8 +24,7 @@ const UserPlanBadge = ({ user, compact = false }) => {
   const legacyPlan = planCode
     ? String(planCode).charAt(0).toUpperCase() + String(planCode).slice(1)
     : "Free";
-  const normalizedLegacyPlan =
-    legacyPlan === "Perfile" ? "PerFile" : legacyPlan;
+  const normalizedLegacyPlan = legacyPlan === "Perfile" ? "PerFile" : legacyPlan;
   const planLabel =
     plan?.name || planLabels[normalizedLegacyPlan] || user.plan || "Gói miễn phí";
   const credits = Number(user.fileCredits || 0);

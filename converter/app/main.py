@@ -13,8 +13,9 @@ try:
 except ImportError:
     pass  # python-dotenv not installed, rely on system env vars
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 from starlette.concurrency import run_in_threadpool
@@ -26,16 +27,38 @@ from app.converter import convert_file, export_rows, preview_file, validate_file
 from app.error_check import check_file_for_errors
 from app.misa_workflow import (
     EXPORT_MEDIA_TYPE,
+    ReadinessGateError,
     analyze_upload,
     confirm_mapping,
     export_confirmed_profile,
     preview_mapping,
+    readiness_mapping,
     templates_payload,
 )
 from app.models import ExportRowsRequest, PreviewResponse, ValidationReport
 
 
 app = FastAPI(title="EzFormat Converter API")
+
+
+def _sanitize_validation_payload(value):
+    if isinstance(value, bytes):
+        return "<binary>"
+    if isinstance(value, dict):
+        return {key: _sanitize_validation_payload(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_sanitize_validation_payload(item) for item in value]
+    return value
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(
+    request: Request, exc: RequestValidationError
+) -> JSONResponse:
+    return JSONResponse(
+        status_code=422,
+        content={"detail": _sanitize_validation_payload(exc.errors())},
+    )
 
 
 def _get_cors_origins() -> list[str]:
@@ -147,6 +170,26 @@ async def preview_misa_mapping(body: dict) -> JSONResponse:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+@app.post("/api/v1/mappings/readiness")
+async def readiness_misa_mapping(body: dict) -> JSONResponse:
+    try:
+        edited_rows = body.get("rows")
+        payload = await run_in_threadpool(
+            readiness_mapping,
+            upload_id=str(body["upload_id"]),
+            target_template_id=str(body["target_template_id"]),
+            mapping=body.get("mapping") or {},
+            defaults=body.get("defaults") or {},
+            formulas=body.get("formulas") or {},
+            edited_rows=edited_rows if isinstance(edited_rows, list) else None,
+        )
+        return JSONResponse(jsonable_encoder(payload))
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @app.post("/api/v1/mappings/confirm")
 async def confirm_misa_mapping(body: dict) -> JSONResponse:
     try:
@@ -220,9 +263,15 @@ async def export_conversion_rows(body: dict) -> Response:
                 upload_id=str(body["upload_id"]),
                 profile_id=str(body["profile_id"]),
                 edited_rows=edited_rows if isinstance(edited_rows, list) and edited_rows else None,
+                acknowledge_warnings=bool(body.get("acknowledge_warnings")),
             )
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ReadinessGateError as exc:
+            return JSONResponse(
+                status_code=422,
+                content=jsonable_encoder(exc.report.model_dump(mode="json")),
+            )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return Response(

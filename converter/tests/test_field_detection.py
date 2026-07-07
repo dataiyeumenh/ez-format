@@ -7,10 +7,19 @@ from pathlib import Path
 import openpyxl
 from fastapi.testclient import TestClient
 
-from app.field_detection import detect_columns
+from app.field_detection import detect_columns, semantic_value
 from app.main import app
 
 client = TestClient(app)
+
+
+def test_semantic_value_uses_exact_source_header_without_normalizing_every_key(monkeypatch):
+    def fail_if_called(_record):
+        raise AssertionError("exact source-header lookup must not normalize the whole record")
+
+    monkeypatch.setattr("app.field_detection.normalize_record_keys", fail_if_called)
+
+    assert semantic_value({"Mã hàng": "SKU-001"}, {"item_code": "Mã hàng"}, "item_code") == "SKU-001"
 
 
 def test_detect_purchase_common_headers():

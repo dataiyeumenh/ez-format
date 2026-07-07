@@ -231,6 +231,25 @@ def test_convert_endpoint_returns_xls_file_and_cleans_temp_storage():
     assert not temp_root.exists() or not any(temp_root.iterdir())
 
 
+def test_export_rows_endpoint_rejects_multipart_without_server_error():
+    with (SAMPLES / "raw_sales_sample.xlsx").open("rb") as handle:
+        response = client.post(
+            "/api/v1/conversions/export",
+            data={"conversion_type": "bsn_sales"},
+            files={
+                "file": (
+                    "raw_sales_sample.xlsx",
+                    handle,
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                )
+            },
+        )
+
+    assert response.status_code == 422
+    assert response.headers["content-type"].startswith("application/json")
+    assert "detail" in response.json()
+
+
 def test_validate_endpoint_returns_calculation_warnings(tmp_path):
     input_path = _write_warning_workbook(tmp_path / "warning.xlsx")
 

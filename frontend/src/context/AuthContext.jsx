@@ -29,7 +29,10 @@ export const AuthProvider = ({ children }) => {
   const login = useCallback(async (email, password) => {
     const response = await api.post("/auth/login", { email, password });
     const { token, user, isFirstLogin } = response.data;
-    const sessionUser = { ...user, isFirstLogin: Boolean(isFirstLogin ?? user?.isFirstLogin) };
+    const sessionUser = {
+      ...user,
+      isFirstLogin: Boolean(isFirstLogin ?? user?.isFirstLogin),
+    };
     localStorage.setItem("token", token);
     localStorage.setItem("user", JSON.stringify(sessionUser));
     setToken(token);
@@ -49,7 +52,10 @@ export const AuthProvider = ({ children }) => {
   const loginWithGoogle = useCallback(async (credential) => {
     const response = await api.post("/auth/google", { credential });
     const { token, user, isFirstLogin } = response.data;
-    const sessionUser = { ...user, isFirstLogin: Boolean(isFirstLogin ?? user?.isFirstLogin) };
+    const sessionUser = {
+      ...user,
+      isFirstLogin: Boolean(isFirstLogin ?? user?.isFirstLogin),
+    };
     localStorage.setItem("token", token);
     localStorage.setItem("user", JSON.stringify(sessionUser));
     setToken(token);
