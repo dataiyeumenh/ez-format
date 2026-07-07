@@ -6,7 +6,7 @@ import Navbar from "../components/Navbar";
 import Footer from "../components/Footer";
 import Alert from "../components/ui/Alert";
 import { getApiErrorMessage } from "../utils/apiError";
-import ezFormatMainLogo from "../assets/ezformat-main-logo.png";
+import ezFormatMainLogo from "../assets/ezformat-logo-128.webp";
 
 const ResetPasswordPage = () => {
   const navigate = useNavigate();

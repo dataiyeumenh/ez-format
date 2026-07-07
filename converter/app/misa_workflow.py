@@ -16,6 +16,7 @@ from app.conversion_types import BACKEND_ROOT
 from app.excel_io import InputTable, read_input_table, write_xls_from_template
 from app.misa_mapping import (
     BSN_SALES_DIRECT_MAPPING,
+    MappingSuggestion,
     SourceSignature,
     ai_suggestion_payload,
     apply_mapping,
@@ -28,8 +29,10 @@ from app.misa_mapping import (
     source_signature,
     validate_mapping,
 )
+from app.misa_readiness import build_readiness_report
 from app.misa_profiles import ProfileStore
 from app.misa_templates import get_misa_template, list_misa_templates
+from app.models import MisaReadinessReport
 from app.normalization import normalize_header
 
 
@@ -43,6 +46,12 @@ DETERMINISTIC_BSN_SALES_RAW_HEADERS = (
     "Số lượng",
     "Đơn giá",
 )
+
+
+class ReadinessGateError(ValueError):
+    def __init__(self, report: MisaReadinessReport) -> None:
+        self.report = report
+        super().__init__("MISA readiness gate failed")
 
 
 def templates_payload() -> dict[str, Any]:
@@ -96,6 +105,14 @@ def analyze_upload(
     if profile:
         store.mark_used(profile.id)
         suggestion = profile_suggestion(profile)
+        profile_issues = validate_mapping(target_template_id, suggestion.mapping, template.headers)
+        if _has_missing_required_mapping(profile_issues):
+            suggestion = _repair_profile_suggestion_with_heuristic(
+                table=table,
+                target_template_id=target_template_id,
+                template_headers=template.headers,
+                suggestion=suggestion,
+            )
     else:
         suggestion = heuristic_suggestion(table, target_template_id, template.headers)
         heuristic_issues = validate_mapping(target_template_id, suggestion.mapping, template.headers)
@@ -185,6 +202,27 @@ def preview_mapping(
     }
 
 
+def readiness_mapping(
+    *,
+    upload_id: str,
+    target_template_id: str,
+    mapping: dict[str, Any],
+    defaults: dict[str, Any] | None = None,
+    formulas: dict[str, str] | None = None,
+    edited_rows: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    table = _read_upload_table(upload_id)
+    report = build_readiness_report(
+        table,
+        target_template_id,
+        mapping,
+        defaults or {},
+        formulas or {},
+        edited_rows=edited_rows,
+    )
+    return report.model_dump(mode="json")
+
+
 def confirm_mapping(
     *,
     upload_id: str,
@@ -250,20 +288,39 @@ def export_confirmed_profile(
     upload_id: str,
     profile_id: str,
     edited_rows: list[dict[str, Any]] | None = None,
+    acknowledge_warnings: bool = False,
 ) -> tuple[bytes, str]:
     table = _read_upload_table(upload_id)
     profile = ProfileStore().get_profile(profile_id)
     template = get_misa_template(profile.target_template_id)
+    clean_mapping = sanitize_mapping_for_template(profile.target_template_id, profile.mapping)
+    clean_defaults = sanitize_defaults_for_template(
+        profile.target_template_id,
+        profile.defaults,
+        template.headers,
+    )
     if edited_rows:
         rows = edited_rows
     else:
         rows = apply_mapping(
             table,
             template.headers,
-            sanitize_mapping_for_template(profile.target_template_id, profile.mapping),
-            sanitize_defaults_for_template(profile.target_template_id, profile.defaults, template.headers),
+            clean_mapping,
+            clean_defaults,
             profile.formulas,
         )
+    readiness = build_readiness_report(
+        table,
+        profile.target_template_id,
+        clean_mapping,
+        clean_defaults,
+        profile.formulas,
+        edited_rows=rows,
+    )
+    if readiness.summary.blocker > 0:
+        raise ReadinessGateError(readiness)
+    if readiness.summary.warning > 0 and not acknowledge_warnings:
+        raise ReadinessGateError(readiness)
     output_path = _upload_dir(upload_id) / "misa_export.xls"
     write_xls_from_template(template.workbook, rows, output_path)
     return output_path.read_bytes(), f"Import misa {upload_id[:8]}.xls"
@@ -287,6 +344,55 @@ def _should_request_ai_mapping(
     if issues or suggestion.warnings:
         return True
     return not _is_known_deterministic_schema(table, target_template_id, suggestion)
+
+
+def _has_missing_required_mapping(issues: list[dict[str, str]]) -> bool:
+    return any(issue.get("code") == "missing_required_mapping" for issue in issues)
+
+
+def _repair_profile_suggestion_with_heuristic(
+    *,
+    table: InputTable,
+    target_template_id: str,
+    template_headers: list[str],
+    suggestion: MappingSuggestion,
+) -> MappingSuggestion:
+    heuristic = heuristic_suggestion(table, target_template_id, template_headers)
+    mapped_targets = _mapped_targets_for_workflow(suggestion.mapping)
+    repaired_mapping = dict(suggestion.mapping)
+    repaired_defaults = {**heuristic.defaults, **suggestion.defaults}
+    repaired_formulas = {**heuristic.formulas, **suggestion.formulas}
+
+    for raw_header, target_spec in heuristic.mapping.items():
+        targets = target_spec if isinstance(target_spec, list) else [target_spec]
+        missing_targets = [target for target in targets if str(target) not in mapped_targets]
+        if not missing_targets:
+            continue
+        repaired_mapping[raw_header] = missing_targets[0] if len(missing_targets) == 1 else missing_targets
+        mapped_targets.update(str(target) for target in missing_targets)
+
+    return MappingSuggestion(
+        source="mixed",
+        confidence=min(1.0, max(suggestion.confidence, heuristic.confidence)),
+        mapping=repaired_mapping,
+        defaults=repaired_defaults,
+        formulas=repaired_formulas,
+        warnings=[
+            *suggestion.warnings,
+            "Profile đã lưu thiếu cột bắt buộc; hệ thống đã tự bổ sung bằng heuristic, vui lòng rà soát lại.",
+        ],
+        profile_id=suggestion.profile_id,
+    )
+
+
+def _mapped_targets_for_workflow(mapping: dict[str, Any]) -> set[str]:
+    targets: set[str] = set()
+    for target_spec in mapping.values():
+        if isinstance(target_spec, list):
+            targets.update(str(target) for target in target_spec)
+        elif target_spec:
+            targets.add(str(target_spec))
+    return targets
 
 
 def _is_known_deterministic_schema(

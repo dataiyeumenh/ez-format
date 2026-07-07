@@ -1,49 +1,12 @@
 {
-  "timestamp": "2026-05-30 00:47:39",
-  "steps": [
-    {
-      "name": "Prerequisites",
-      "status": "ok",
-      "seconds": 1.102154
-    },
-    "........                                                                 [100%]",
-    "8 passed in 27.61s",
-    {
-      "name": "Specialized 1000 (VAT/PDF/OCR/corrupt/multisheet)",
-      "status": "ok",
-      "seconds": 28.3187849
-    },
-    "..........................                                               [100%]",
-    "26 passed in 28.63s",
-    {
-      "name": "Stress 999 matrix",
-      "status": "ok",
-      "seconds": 29.4878095
-    },
-    ".......                                                                  [100%]",
-    "7 passed in 51.94s",
-    {
-      "name": "E2E extreme",
-      "status": "ok",
-      "seconds": 52.7203664
-    },
-    "..                                                                       [100%]",
-    "2 passed in 40.80s",
-    {
-      "name": "Messy 1000",
-      "status": "ok",
-      "seconds": 41.5306508
-    },
-    "........................................................................ [ 83%]",
-    "..............                                                           [100%]",
-    "86 passed in 181.96s (0:03:01)",
-    {
-      "name": "Full converter pytest",
-      "status": "ok",
-      "seconds": 182.4243081
-    }
+  "requirements": [
+    "specialized_1000",
+    "stress_999",
+    "e2e_extreme",
+    "messy_1000",
+    "full_pytest"
   ],
-  "ok": true,
+  "timestamp": "2026-07-07 20:58:31",
   "passed": [
     "Prerequisites",
     "Specialized 1000 (VAT/PDF/OCR/corrupt/multisheet)",
@@ -52,12 +15,49 @@
     "Messy 1000",
     "Full converter pytest"
   ],
-  "failed": [],
-  "requirements": [
-    "specialized_1000",
-    "stress_999",
-    "e2e_extreme",
-    "messy_1000",
-    "full_pytest"
-  ]
+  "ok": true,
+  "steps": [
+    {
+      "seconds": 1.134364,
+      "name": "Prerequisites",
+      "status": "ok"
+    },
+    "........                                                                 [100%]",
+    "8 passed in 34.60s",
+    {
+      "seconds": 35.0214729,
+      "name": "Specialized 1000 (VAT/PDF/OCR/corrupt/multisheet)",
+      "status": "ok"
+    },
+    ".............................                                            [100%]",
+    "29 passed in 43.86s",
+    {
+      "seconds": 44.3445929,
+      "name": "Stress 999 matrix",
+      "status": "ok"
+    },
+    ".......                                                                  [100%]",
+    "7 passed in 57.73s",
+    {
+      "seconds": 58.7584878,
+      "name": "E2E extreme",
+      "status": "ok"
+    },
+    "..                                                                       [100%]",
+    "2 passed in 45.24s",
+    {
+      "seconds": 46.0582729,
+      "name": "Messy 1000",
+      "status": "ok"
+    },
+    "........................................................................ [ 52%]",
+    "................................................................         [100%]",
+    "136 passed in 260.73s (0:04:20)",
+    {
+      "seconds": 261.3154167,
+      "name": "Full converter pytest",
+      "status": "ok"
+    }
+  ],
+  "failed": []
 }

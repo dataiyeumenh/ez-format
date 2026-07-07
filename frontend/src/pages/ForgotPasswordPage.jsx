@@ -6,7 +6,7 @@ import Navbar from "../components/Navbar";
 import Footer from "../components/Footer";
 import Alert from "../components/ui/Alert";
 import { getApiErrorMessage } from "../utils/apiError";
-import ezFormatMainLogo from "../assets/ezformat-main-logo.png";
+import ezFormatMainLogo from "../assets/ezformat-logo-128.webp";
 
 const ForgotPasswordPage = () => {
   const [email, setEmail] = useState("");
@@ -51,8 +51,8 @@ const ForgotPasswordPage = () => {
                 <MailCheck size={28} />
               </div>
               <p className="text-sm leading-relaxed text-gray-600">
-                Nếu email tồn tại trong hệ thống, chúng tôi đã gửi hướng dẫn đặt lại
-                mật khẩu. Vui lòng kiểm tra hộp thư (kể cả mục Spam).
+                Nếu email tồn tại trong hệ thống, chúng tôi đã gửi hướng dẫn đặt lại mật
+                khẩu. Vui lòng kiểm tra hộp thư (kể cả mục Spam).
               </p>
               <Link
                 to="/login"

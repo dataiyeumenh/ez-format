@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { fetchConverterStatus } from "./useConverterApi.js";
+import {
+  DEFAULT_CONVERTER_TEMPLATES,
+  fetchConverterStatus,
+} from "./useConverterApi.js";
 
 function response(ok, payload, status = ok ? 200 : 500) {
   return {
@@ -36,15 +39,15 @@ test("converter status stays online when health succeeds but templates fail", as
 
   assert.equal(status.serviceOnline, true);
   assert.equal(status.aiOnline, true);
-  assert.deepEqual(status.templates, []);
+  assert.deepEqual(status.templates, DEFAULT_CONVERTER_TEMPLATES);
 });
 
-test("converter status is offline only when all status endpoints fail", async () => {
+test("converter status is offline but keeps default templates when all status endpoints fail", async () => {
   const fetchImpl = async () => response(false, {}, 503);
 
   const status = await fetchConverterStatus(fetchImpl);
 
   assert.equal(status.serviceOnline, false);
   assert.equal(status.aiOnline, null);
-  assert.deepEqual(status.templates, []);
+  assert.deepEqual(status.templates, DEFAULT_CONVERTER_TEMPLATES);
 });

@@ -65,7 +65,9 @@ function buildCsv(rows) {
     formatDateTime(row.createdAt),
   ]);
   return [headers, ...lines]
-    .map((line) => line.map((cell) => `"${String(cell).replace(/"/g, '""')}"`).join(","))
+    .map((line) =>
+      line.map((cell) => `"${String(cell).replace(/"/g, '""')}"`).join(","),
+    )
     .join("\n");
 }
 
@@ -139,8 +141,18 @@ const LogsPage = () => {
   };
 
   const statCards = [
-    { label: "TỔNG GÓP Ý", value: stats.total || 0, icon: "💬", color: "text-blue-600 bg-blue-50" },
-    { label: "LỖI", value: stats.bug || 0, icon: "🐞", color: "text-red-600 bg-red-50" },
+    {
+      label: "TỔNG GÓP Ý",
+      value: stats.total || 0,
+      icon: "💬",
+      color: "text-blue-600 bg-blue-50",
+    },
+    {
+      label: "LỖI",
+      value: stats.bug || 0,
+      icon: "🐞",
+      color: "text-red-600 bg-red-50",
+    },
     {
       label: "TÍNH NĂNG",
       value: stats.feature || 0,
@@ -177,7 +189,10 @@ const LogsPage = () => {
         {/* Stats */}
         <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
           {statCards.map((s) => (
-            <div key={s.label} className="bg-white rounded-xl p-4 border border-gray-100">
+            <div
+              key={s.label}
+              className="bg-white rounded-xl p-4 border border-gray-100"
+            >
               <div className="flex items-center justify-between mb-2">
                 <span
                   className={`text-xl w-9 h-9 flex items-center justify-center rounded-lg ${s.color}`}
@@ -286,11 +301,15 @@ const LogsPage = () => {
                         <span
                           className={`text-xs font-semibold px-2.5 py-1 rounded-full ${categoryStyle[item.category] || "bg-gray-100 text-gray-600"}`}
                         >
-                          {item.categoryLabel || categoryLabels[item.category] || item.category}
+                          {item.categoryLabel ||
+                            categoryLabels[item.category] ||
+                            item.category}
                         </span>
                       </td>
                       <td className="px-5 py-4 text-sm text-gray-700 max-w-md">
-                        <p className="whitespace-pre-wrap break-words">{item.message}</p>
+                        <p className="whitespace-pre-wrap break-words">
+                          {item.message}
+                        </p>
                       </td>
                       <td className="px-5 py-4 text-sm text-gray-500 whitespace-nowrap">
                         {formatDateTime(item.createdAt)}

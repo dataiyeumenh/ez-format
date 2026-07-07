@@ -1,7 +1,6 @@
 import { Link } from "react-router-dom";
 import { useAuth } from "../context/AuthContext";
 import {
-  FileSpreadsheet,
   Shield,
   ArrowRight,
   FileText,
@@ -109,9 +108,12 @@ const LandingPage = () => {
             </h1>
             <p className="text-gray-500 text-base sm:text-lg max-w-3xl mx-auto leading-relaxed mb-8">
               <span className="block">
-                Nền tảng chuyển đổi file bán/mua hàng sang form nhập Chuẩn phần mềm kế toán.
+                Nền tảng chuyển đổi file bán/mua hàng sang form nhập Chuẩn phần mềm kế
+                toán.
               </span>
-              <span className="block">Xem trước, chỉnh sửa và tải về trong vài bước.</span>
+              <span className="block">
+                Xem trước, chỉnh sửa và tải về trong vài bước.
+              </span>
             </p>
 
             {!user && (
@@ -178,7 +180,9 @@ const LandingPage = () => {
                       </svg>
                     </div>
                     <div className="rounded-2xl border border-cyan-100 bg-cyan-50/80 p-3">
-                      <p className="mb-2 text-xs font-bold text-cyan-700">File kết quả</p>
+                      <p className="mb-2 text-xs font-bold text-cyan-700">
+                        File kết quả
+                      </p>
                       <div className="space-y-2" aria-hidden="true">
                         <span className="block h-2 rounded-full bg-cyan-300" />
                         <span className="block h-2 w-4/5 rounded-full bg-cyan-200" />
@@ -269,8 +273,8 @@ const LandingPage = () => {
                 </h2>
                 <p className="mt-4 text-base leading-relaxed text-gray-600">
                   EzFormat được thiết kế để người dùng yên tâm khi xử lý dữ liệu kế
-                  toán, hạn chế thao tác thủ công và giảm rủi ro lộ thông tin trong
-                  quá trình chuẩn hóa file.
+                  toán, hạn chế thao tác thủ công và giảm rủi ro lộ thông tin trong quá
+                  trình chuẩn hóa file.
                 </p>
               </div>
 

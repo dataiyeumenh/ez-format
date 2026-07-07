@@ -8,7 +8,7 @@ import Alert from "../components/ui/Alert";
 import GoogleSignInButton from "../components/GoogleSignInButton";
 import { getApiErrorMessage } from "../utils/apiError";
 import { getPostLoginPath } from "../utils/authRedirect";
-import ezFormatMainLogo from "../assets/ezformat-main-logo.png";
+import ezFormatMainLogo from "../assets/ezformat-logo-128.webp";
 
 const LoginPage = () => {
   const navigate = useNavigate();
@@ -211,9 +211,7 @@ const LoginPage = () => {
             <h2 className="mb-2 text-lg font-bold text-gray-900">
               Tài khoản đã bị khoá
             </h2>
-            <p className="mb-5 text-sm leading-relaxed text-gray-500">
-              {banPopup}
-            </p>
+            <p className="mb-5 text-sm leading-relaxed text-gray-500">{banPopup}</p>
             <button
               type="button"
               onClick={() => setBanPopup("")}
@@ -230,12 +228,8 @@ const LoginPage = () => {
             <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-2xl bg-red-50 text-red-600">
               <AlertCircle size={28} />
             </div>
-            <h2 className="mb-2 text-lg font-bold text-gray-900">
-              Đăng nhập thất bại
-            </h2>
-            <p className="mb-5 text-sm leading-relaxed text-gray-500">
-              {errorPopup}
-            </p>
+            <h2 className="mb-2 text-lg font-bold text-gray-900">Đăng nhập thất bại</h2>
+            <p className="mb-5 text-sm leading-relaxed text-gray-500">{errorPopup}</p>
             <button
               type="button"
               onClick={() => setErrorPopup("")}

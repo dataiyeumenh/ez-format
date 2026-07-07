@@ -15,7 +15,7 @@ import {
   ChevronDown,
 } from "lucide-react";
 import { useAuth } from "../../context/AuthContext";
-import ezFormatMainLogo from "../../assets/ezformat-main-logo.png";
+import ezFormatMainLogo from "../../assets/ezformat-logo-128.webp";
 
 const navItems = [
   { icon: LayoutDashboard, label: "Tổng quan", path: "/admin" },

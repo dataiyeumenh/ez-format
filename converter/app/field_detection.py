@@ -180,5 +180,7 @@ def semantic_value(record: dict[str, Any], detected_columns: dict[str, str], fie
     source_header = detected_columns.get(field)
     if not source_header:
         return None
+    if source_header in record:
+        return record[source_header]
     normalized_record = normalize_record_keys(record)
     return normalized_record.get(normalize_header(source_header))

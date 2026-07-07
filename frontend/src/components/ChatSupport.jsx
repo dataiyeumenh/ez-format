@@ -1,9 +1,7 @@
 import { useState } from "react";
 import { MessageCircle, Send, X } from "lucide-react";
 
-const DEFAULT_MESSAGES = [
-  { from: "bot", text: "Coming soon..." },
-];
+const DEFAULT_MESSAGES = [{ from: "bot", text: "Coming soon..." }];
 
 const ChatSupport = ({ initialMessages = DEFAULT_MESSAGES }) => {
   const [chatOpen, setChatOpen] = useState(false);
