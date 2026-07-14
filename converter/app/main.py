@@ -4,6 +4,7 @@ import json
 import os
 import shutil
 import uuid
+import hmac
 from pathlib import Path
 from typing import Annotated
 
@@ -13,7 +14,7 @@ try:
 except ImportError:
     pass  # python-dotenv not installed, rely on system env vars
 
-from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi import FastAPI, File, Form, Header, HTTPException, Request, UploadFile
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
@@ -35,6 +36,7 @@ from app.misa_workflow import (
     readiness_mapping,
     templates_payload,
 )
+from app.master_data import parse_master_data_file
 from app.models import ExportRowsRequest, PreviewResponse, ValidationReport
 
 
@@ -134,10 +136,38 @@ def conversion_types() -> dict[str, list[dict[str, str]]]:
     }
 
 
+@app.post("/api/v1/master-data/parse")
+async def parse_master_data_upload(
+    file: Annotated[UploadFile, File()],
+    catalog_type: Annotated[str, Form()],
+    x_converter_service_token: Annotated[str | None, Header()] = None,
+) -> JSONResponse:
+    expected_token = os.getenv("CONVERTER_SERVICE_TOKEN", "").strip()
+    if expected_token and not hmac.compare_digest(
+        x_converter_service_token or "", expected_token
+    ):
+        raise HTTPException(status_code=401, detail="Service token không hợp lệ")
+    workdir = _create_workdir()
+    try:
+        input_path = await _save_upload(file, workdir)
+        payload = await run_in_threadpool(
+            parse_master_data_file,
+            input_path,
+            catalog_type,
+        )
+        return JSONResponse(jsonable_encoder(payload))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+        _cleanup_tmp_root()
+
+
 @app.post("/api/v1/uploads/analyze")
 async def analyze_raw_upload(
     file: Annotated[UploadFile, File()],
     target_template_id: Annotated[str | None, Form()] = None,
+    conversion_context_token: Annotated[str | None, Form()] = None,
 ) -> JSONResponse:
     try:
         content = await file.read()
@@ -146,6 +176,7 @@ async def analyze_raw_upload(
             filename=file.filename or "upload.xlsx",
             content=content,
             requested_target_template_id=target_template_id,
+            conversion_context_token=conversion_context_token,
         )
         return JSONResponse(jsonable_encoder(payload))
     except ValueError as exc:
@@ -162,6 +193,7 @@ async def preview_misa_mapping(body: dict) -> JSONResponse:
             mapping=body.get("mapping") or {},
             defaults=body.get("defaults") or {},
             formulas=body.get("formulas") or {},
+            conversion_context_token=body.get("conversion_context_token"),
         )
         return JSONResponse(jsonable_encoder(payload))
     except KeyError as exc:
@@ -182,6 +214,7 @@ async def readiness_misa_mapping(body: dict) -> JSONResponse:
             defaults=body.get("defaults") or {},
             formulas=body.get("formulas") or {},
             edited_rows=edited_rows if isinstance(edited_rows, list) else None,
+            conversion_context_token=body.get("conversion_context_token"),
         )
         return JSONResponse(jsonable_encoder(payload))
     except KeyError as exc:
@@ -201,6 +234,7 @@ async def confirm_misa_mapping(body: dict) -> JSONResponse:
             defaults=body.get("defaults") or {},
             formulas=body.get("formulas") or {},
             profile_name=body.get("profile_name"),
+            conversion_context_token=body.get("conversion_context_token"),
         )
         return JSONResponse(jsonable_encoder(payload))
     except KeyError as exc:
@@ -264,6 +298,7 @@ async def export_conversion_rows(body: dict) -> Response:
                 profile_id=str(body["profile_id"]),
                 edited_rows=edited_rows if isinstance(edited_rows, list) and edited_rows else None,
                 acknowledge_warnings=bool(body.get("acknowledge_warnings")),
+                conversion_context_token=body.get("conversion_context_token"),
             )
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc

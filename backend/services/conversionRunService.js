@@ -71,6 +71,13 @@ function serializeConversionRun(run) {
     status: run.status,
     targetTemplateId: run.targetTemplateId || "",
     converterUploadId: run.converterUploadId || "",
+    workspace: run.workspace
+      ? {
+          id: String(run.workspace?._id || run.workspace),
+          name: run.workspaceNameSnapshot || run.workspace?.name || "",
+        }
+      : null,
+    snapshotSetHash: run.snapshotSetHash || "",
     errorMessage: run.errorMessage || "",
     startedAt: run.startedAt || null,
     completedAt: run.completedAt || null,

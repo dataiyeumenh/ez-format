@@ -51,6 +51,24 @@ const conversionRunSchema = new mongoose.Schema(
       trim: true,
       default: "",
     },
+    workspace: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "AccountingWorkspace",
+      default: null,
+      index: true,
+    },
+    workspaceNameSnapshot: {
+      type: String,
+      trim: true,
+      default: "",
+      maxlength: 160,
+    },
+    snapshotSetHash: {
+      type: String,
+      trim: true,
+      default: "",
+      maxlength: 128,
+    },
     errorMessage: {
       type: String,
       trim: true,

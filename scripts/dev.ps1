@@ -13,7 +13,27 @@ $ErrorActionPreference = "Stop"
 $resolvedRepo = (Resolve-Path -LiteralPath $RepoRoot).Path
 $artifactDir  = Join-Path $resolvedRepo ".artifacts\local-ai"
 $tokenPath    = Join-Path $artifactDir "AI_GATEWAY_TOKEN.txt"
+$contextSecretPath = Join-Path $artifactDir "CONVERSION_CONTEXT_SECRET.txt"
+$converterServiceTokenPath = Join-Path $artifactDir "CONVERTER_SERVICE_TOKEN.txt"
 $misaDir      = if ($MisaTemplateDir) { $MisaTemplateDir } else { Join-Path $resolvedRepo "converter\fixtures\templates" }
+
+function Get-OrCreateSecret([string]$Path) {
+    if (Test-Path -LiteralPath $Path) {
+        $existing = (Get-Content -LiteralPath $Path -Raw).Trim()
+        if ($existing) { return $existing }
+    }
+    New-Item -ItemType Directory -Path (Split-Path -Parent $Path) -Force | Out-Null
+    $bytes = New-Object byte[] 32
+    $generator = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+    try {
+        $generator.GetBytes($bytes)
+    } finally {
+        $generator.Dispose()
+    }
+    $secret = ([BitConverter]::ToString($bytes) -replace "-", "").ToLowerInvariant()
+    Set-Content -LiteralPath $Path -Value $secret -NoNewline -Encoding utf8
+    return $secret
+}
 
 function Test-HttpOk([string]$Uri, [int]$TimeoutSec = 3) {
     try {
@@ -122,6 +142,11 @@ if ($ollamaOnline -and (Test-Path -LiteralPath $tokenPath)) {
     Write-Host "[converter] AI disabled" -ForegroundColor DarkGray
 }
 $env:MISA_TEMPLATE_DIR = $misaDir
+$env:CONVERSION_CONTEXT_SECRET = Get-OrCreateSecret -Path $contextSecretPath
+$env:CONVERTER_SERVICE_TOKEN = Get-OrCreateSecret -Path $converterServiceTokenPath
+$env:CONVERTER_INTERNAL_URL = "http://127.0.0.1:$ConverterPort"
+$env:NODE_INTERNAL_API_URL = "http://127.0.0.1:$BackendPort/api/internal"
+$env:MASTER_DATA_WORKSPACES_ENABLED = "true"
 
 # --- 4. Free stale local dev ports ---
 Stop-ManagedPort `
@@ -144,10 +169,16 @@ Write-Host "Note: Frontend must be started separately with 'npm --prefix fronten
 Write-Host ""
 
 Set-Location $resolvedRepo
+$backendDevCommand = if (Test-Path -LiteralPath (Join-Path $resolvedRepo "backend\node_modules\.bin\nodemon.cmd")) {
+    "npm --prefix backend run dev:only"
+} else {
+    Write-Host "[backend] nodemon not installed; using npm start" -ForegroundColor Yellow
+    "npm --prefix backend start"
+}
 
 & npx concurrently `
     "--kill-others-on-fail" `
     "--names" "backend,converter" `
     "--prefix-colors" "blue.bold,green.bold" `
-    "npm --prefix backend run dev:only" `
+    $backendDevCommand `
     "npm --prefix converter run dev"

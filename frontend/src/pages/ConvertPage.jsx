@@ -21,7 +21,12 @@ import StepProgress from "../components/ui/StepProgress";
 import PreviewTable from "../components/PreviewTable";
 import ValidationIssueTable from "../components/ValidationIssueTable";
 import ValidationReadinessCard from "../components/ValidationReadinessCard";
+import WorkspaceSelector from "../components/accounting/WorkspaceSelector";
+import WorkspaceSetupModal from "../components/accounting/WorkspaceSetupModal";
+import MasterDataManager from "../components/accounting/MasterDataManager";
+import MasterDataResolutionTable from "../components/accounting/MasterDataResolutionTable";
 import { useConverterApi } from "../hooks/useConverterApi";
+import { useAccountingWorkspaces } from "../hooks/useAccountingWorkspaces";
 import { useAuth } from "../context/AuthContext";
 import api from "../services/api";
 
@@ -35,7 +40,7 @@ const STATUS = {
   ERROR: "error",
 };
 
-const STEPS = ["Tải file", "Ghép cột", "Kiểm tra lỗi", "Tải file"];
+const STEPS = ["Tải file", "Ghép cột", "Kiểm tra lỗi", "Tải MISA"];
 const DEFAULT_TEMPLATE_ID = "bsn_sales";
 const EXCEL_EXT = ["xlsx", "xls"];
 const PDF_EXT = ["pdf"];
@@ -146,6 +151,22 @@ const ConvertPage = () => {
     exportConfirmed,
   } = useConverterApi();
   const { user, refreshUser } = useAuth();
+  const {
+    enabled: workspacesEnabled,
+    workspaces,
+    selectedWorkspace,
+    selectedWorkspaceId,
+    setSelectedWorkspaceId,
+    snapshots,
+    loading: workspacesLoading,
+    error: workspacesError,
+    createWorkspace,
+    importCatalog,
+    searchCatalog,
+    activateSnapshot,
+    saveAlias,
+    createConversionContext,
+  } = useAccountingWorkspaces();
 
   const planCode = String(user?.plan?.code || user?.plan || "free").toLowerCase();
   const isLimitedPlan = planCode === "free" || planCode === "perfile";
@@ -180,6 +201,10 @@ const ConvertPage = () => {
   const [profileId, setProfileId] = useState(null);
   const [conversionRunId, setConversionRunId] = useState(null);
   const [focusedTarget, setFocusedTarget] = useState("");
+  const [workspaceSetupOpen, setWorkspaceSetupOpen] = useState(false);
+  const [masterDataManagerOpen, setMasterDataManagerOpen] = useState(false);
+  const [conversionContext, setConversionContext] = useState(null);
+  const [masterDataState, setMasterDataState] = useState(null);
 
   const inputRef = useRef(null);
   const mappingTableRef = useRef(null);
@@ -355,15 +380,19 @@ const ConvertPage = () => {
     setAcknowledgeWarnings(false);
     setProfileId(null);
     setConversionRunId(null);
+    setConversionContext(null);
+    setMasterDataState(null);
   };
 
-  const createConversionRunLog = async (file, templateId) => {
+  const createConversionRunLog = async (file, templateId, context = null) => {
     if (!localStorage.getItem("token")) return null;
     try {
       const { data } = await api.post("/conversion-runs", {
         fileName: file.name,
         fileSizeBytes: file.size,
         targetTemplateId: templateId,
+        workspaceId: context?.workspace?.id || "",
+        snapshotSetHash: context?.snapshotSetHash || "",
       });
       const runId = data.run?.id || null;
       setConversionRunId(runId);
@@ -475,9 +504,14 @@ const ConvertPage = () => {
     setConvStatus(STATUS.ANALYZING);
     setErrorMsg("");
     resetAnalysis();
-    const runId = await createConversionRunLog(file, templateId);
+    let runId = null;
     try {
-      const result = await analyzeFile(file, templateId);
+      const context = selectedWorkspaceId
+        ? await createConversionContext(selectedWorkspaceId)
+        : null;
+      setConversionContext(context);
+      runId = await createConversionRunLog(file, templateId, context);
+      const result = await analyzeFile(file, templateId, context?.contextToken || null);
       const suggestion = result.mapping_suggestion || {};
       setAnalyzePayload(result);
       setTargetTemplateId(result.target_template_id || templateId);
@@ -487,6 +521,7 @@ const ConvertPage = () => {
       setWarnings(suggestion.warnings || []);
       setIssues(result.issues || []);
       setProfileId(suggestion.profile_id || null);
+      setMasterDataState(result.master_data || null);
       setConvStatus(STATUS.MAPPING);
       await updateConversionRunLog(
         "processing",
@@ -514,6 +549,7 @@ const ConvertPage = () => {
     mapping: targetMappingToRawMapping(targetMapping),
     defaults,
     formulas,
+    conversion_context_token: conversionContext?.contextToken || null,
   });
 
   const buildReadinessPayload = (rows = null) => {
@@ -530,6 +566,7 @@ const ConvertPage = () => {
     try {
       const report = await checkReadiness(buildReadinessPayload(rows));
       setReadinessReport(report);
+      setMasterDataState(report.master_data || null);
       if ((report?.summary?.warning || 0) === 0) {
         setAcknowledgeWarnings(false);
       }
@@ -544,6 +581,7 @@ const ConvertPage = () => {
     setPreviewHeaders(result.headers || []);
     setPreviewRows(result.rows || []);
     setIssues(result.issues || []);
+    setMasterDataState(result.master_data || null);
     await runReadinessCheck(result.rows || []);
     return result;
   };
@@ -623,6 +661,7 @@ const ConvertPage = () => {
         savedProfileId,
         rowsToExport,
         acknowledgeWarnings,
+        conversionContext?.contextToken || null,
       );
       const url = window.URL.createObjectURL(blob);
       const a = document.createElement("a");
@@ -661,6 +700,40 @@ const ConvertPage = () => {
     resetAnalysis();
     setConvStatus(STATUS.IDLE);
     setErrorMsg("");
+  };
+
+  const handleWorkspaceChange = (workspaceId) => {
+    setSelectedWorkspaceId(workspaceId);
+    resetAnalysis();
+    setSelectedFile(null);
+    setConvStatus(STATUS.IDLE);
+    setErrorMsg("");
+  };
+
+  const handleConfirmMasterDataAlias = async (resolution, targetCode) => {
+    if (!selectedWorkspaceId) return;
+    await saveAlias(selectedWorkspaceId, {
+      type: resolution.catalog_type,
+      rawValue: resolution.raw_value,
+      targetCode,
+      sourceSystem: analyzePayload?.detected?.source_signature_hash || "default",
+    });
+    const refreshedContext = await createConversionContext(selectedWorkspaceId);
+    setConversionContext(refreshedContext);
+    const payload = {
+      ...buildMappingPayload(),
+      conversion_context_token: refreshedContext.contextToken,
+    };
+    const result = await previewMapping(payload);
+    setPreviewHeaders(result.headers || []);
+    setPreviewRows(result.rows || []);
+    setMasterDataState(result.master_data || null);
+    const readiness = await checkReadiness({
+      ...payload,
+      rows: result.rows || [],
+    });
+    setReadinessReport(readiness);
+    setMasterDataState(readiness.master_data || result.master_data || null);
   };
 
   const updateTargetMapping = (target, rawHeader) => {
@@ -753,6 +826,25 @@ const ConvertPage = () => {
 
             <div className="grid gap-5 xl:grid-cols-[minmax(320px,380px)_minmax(0,1fr)]">
               <div className="space-y-4 xl:sticky xl:top-24 xl:self-start">
+                {workspacesEnabled && (
+                  <>
+                    <WorkspaceSelector
+                      workspaces={workspaces}
+                      selectedWorkspaceId={selectedWorkspaceId}
+                      selectedWorkspace={selectedWorkspace}
+                      loading={workspacesLoading}
+                      onSelect={handleWorkspaceChange}
+                      onCreate={() => setWorkspaceSetupOpen(true)}
+                      onManage={() => setMasterDataManagerOpen(true)}
+                    />
+                    {workspacesError && (
+                      <Alert variant="warning" className="text-left">
+                        {workspacesError}
+                      </Alert>
+                    )}
+                  </>
+                )}
+
                 <div
                   className={`rounded-3xl border-2 border-dashed p-6 sm:p-8 text-center transition-all ${
                     dragActive
@@ -1109,6 +1201,18 @@ const ConvertPage = () => {
                       </div>
                     )}
 
+                    {masterDataState?.resolutions?.length > 0 && (
+                      <div className="border-b border-gray-100 bg-gray-50/70 px-5 py-4 sm:px-6">
+                        <MasterDataResolutionTable
+                          masterData={masterDataState}
+                          onConfirmAlias={handleConfirmMasterDataAlias}
+                          onSearchCandidates={(type, query) =>
+                            searchCatalog(selectedWorkspaceId, type, query)
+                          }
+                        />
+                      </div>
+                    )}
+
                     <div ref={mappingTableRef} className="overflow-auto max-h-[620px]">
                       <table className="min-w-[1180px] text-sm">
                         <thead className="sticky top-0 z-10 bg-gray-50 text-xs text-gray-500 uppercase">
@@ -1302,6 +1406,25 @@ const ConvertPage = () => {
 
       <Footer />
       <ChatSupport initialMessages={[{ from: "bot", text: "Coming soon..." }]} />
+      {workspacesEnabled && (
+        <>
+          <WorkspaceSetupModal
+            open={workspaceSetupOpen}
+            onClose={() => setWorkspaceSetupOpen(false)}
+            onCreate={createWorkspace}
+          />
+          <MasterDataManager
+            open={masterDataManagerOpen}
+            workspace={selectedWorkspace}
+            snapshots={snapshots}
+            onClose={() => setMasterDataManagerOpen(false)}
+            onImport={(type, file) => importCatalog(selectedWorkspaceId, type, file)}
+            onActivate={(snapshotId) =>
+              activateSnapshot(selectedWorkspaceId, snapshotId)
+            }
+          />
+        </>
+      )}
     </div>
   );
 };

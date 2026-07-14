@@ -15,6 +15,7 @@ from app.models import (
     MisaReadinessReport,
     MisaReadinessSummary,
 )
+from app.master_data_resolver import MasterDataResolution
 from app.normalization import is_blank, normalize_header
 from app.parsing import parse_date, parse_number
 
@@ -568,3 +569,112 @@ def _status(summary: MisaReadinessSummary) -> str:
 def _score(summary: MisaReadinessSummary) -> int:
     score = 100 - summary.blocker * 25 - summary.warning * 5 - min(summary.info, 10)
     return max(0, min(100, score))
+
+
+def add_master_data_resolutions(
+    report: MisaReadinessReport,
+    resolutions: list[MasterDataResolution],
+    *,
+    context_status: str,
+    context_message: str | None = None,
+) -> MisaReadinessReport:
+    issues = list(report.issues)
+    not_checked_types: set[str] = set()
+    for resolution in resolutions:
+        if resolution.status == "verified":
+            continue
+        if resolution.status == "not_checked":
+            not_checked_types.add(resolution.catalog_type)
+            continue
+
+        if resolution.status == "conflict":
+            severity = "blocker"
+            code = "master_data_code_conflict"
+            message = (
+                f"Giá trị {resolution.raw_value} khớp với nhiều mã trong danh mục "
+                "MISA; cần chọn đúng mã trước khi tải file."
+            )
+        elif resolution.status == "missing" and resolution.required:
+            severity = "blocker"
+            code = "master_data_required_code_missing"
+            message = (
+                f"Giá trị {resolution.raw_value} chưa tồn tại trong danh mục MISA "
+                "đang hoạt động."
+            )
+        elif resolution.status == "missing":
+            severity = "warning"
+            code = "master_data_optional_code_missing"
+            message = (
+                f"Giá trị {resolution.raw_value} chưa được tìm thấy trong danh mục MISA."
+            )
+        else:
+            severity = "warning"
+            code = "master_data_confirmation_required"
+            message = (
+                f"Giá trị {resolution.raw_value} có mã MISA gợi ý nhưng cần kế toán xác nhận."
+            )
+
+        issues.append(
+            MisaReadinessIssue(
+                severity=severity,
+                category="master_data",
+                code=code,
+                field=resolution.field,
+                actual=resolution.raw_value,
+                expected=(
+                    resolution.candidates[0].get("code")
+                    if len(resolution.candidates) == 1
+                    else "Mã tồn tại và đúng đối tượng trong danh mục MISA"
+                ),
+                message=message,
+                fix_hint=(
+                    "Chọn mã MISA phù hợp và lưu alias, hoặc bổ sung danh mục trên MISA."
+                ),
+                source_url=MISA_IMPORT_SOURCE_URL,
+            )
+        )
+
+    if context_status != "connected" or not_checked_types:
+        types = ", ".join(sorted(not_checked_types))
+        issues.append(
+            MisaReadinessIssue(
+                severity="warning",
+                category="master_data",
+                code="master_data_not_checked",
+                message=(
+                    context_message
+                    or (
+                        f"Chưa có snapshot danh mục MISA cho: {types}."
+                        if types
+                        else "File chưa được đối chiếu với danh mục MISA của doanh nghiệp."
+                    )
+                ),
+                expected="Danh mục MISA đang hoạt động",
+                fix_hint="Tải danh mục MISA lên hồ sơ doanh nghiệp hoặc xác nhận tiếp tục không đối chiếu.",
+                source_url=MISA_IMPORT_SOURCE_URL,
+            )
+        )
+
+    summary = MisaReadinessSummary(
+        blocker=sum(1 for issue in issues if issue.severity == "blocker"),
+        warning=sum(1 for issue in issues if issue.severity == "warning"),
+        info=sum(1 for issue in issues if issue.severity == "info"),
+    )
+    report.issues = issues
+    report.summary = summary
+    report.ok = summary.blocker == 0
+    report.status = _status(summary)
+    report.score = _score(summary)
+    report.master_data = {
+        "status": context_status,
+        "message": context_message,
+        "summary": {
+            "verified": sum(1 for item in resolutions if item.status == "verified"),
+            "suggested": sum(1 for item in resolutions if item.status == "suggested"),
+            "missing": sum(1 for item in resolutions if item.status == "missing"),
+            "conflict": sum(1 for item in resolutions if item.status == "conflict"),
+            "not_checked": sum(1 for item in resolutions if item.status == "not_checked"),
+        },
+        "resolutions": [item.to_dict() for item in resolutions],
+    }
+    return report

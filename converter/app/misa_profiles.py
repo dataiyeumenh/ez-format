@@ -37,6 +37,7 @@ class MappingProfile:
     formulas: dict[str, Any]
     confidence: float
     usage_count: int
+    workspace_id: str = ""
 
 
 class ProfileStore:
@@ -70,8 +71,6 @@ class ProfileStore:
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
-                CREATE INDEX IF NOT EXISTS idx_mapping_profiles_signature
-                    ON mapping_profiles(target_template_id, source_signature_hash);
 
                 CREATE TABLE IF NOT EXISTS conversion_runs (
                     id TEXT PRIMARY KEY,
@@ -93,19 +92,37 @@ class ProfileStore:
                 );
                 """
             )
+            columns = {
+                row["name"]
+                for row in connection.execute("PRAGMA table_info(mapping_profiles)").fetchall()
+            }
+            if "workspace_id" not in columns:
+                connection.execute(
+                    "ALTER TABLE mapping_profiles ADD COLUMN workspace_id TEXT NOT NULL DEFAULT ''"
+                )
+            connection.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_mapping_profiles_workspace_signature
+                ON mapping_profiles(workspace_id, target_template_id, source_signature_hash)
+                """
+            )
 
     def find_by_signature(
-        self, *, target_template_id: str, source_signature_hash: str
+        self,
+        *,
+        target_template_id: str,
+        source_signature_hash: str,
+        workspace_id: str = "",
     ) -> MappingProfile | None:
         with self._connect() as connection:
             row = connection.execute(
                 """
                 SELECT * FROM mapping_profiles
-                WHERE target_template_id = ? AND source_signature_hash = ?
+                WHERE workspace_id = ? AND target_template_id = ? AND source_signature_hash = ?
                 ORDER BY updated_at DESC
                 LIMIT 1
                 """,
-                (target_template_id, source_signature_hash),
+                (workspace_id, target_template_id, source_signature_hash),
             ).fetchone()
         return self._row_to_profile(row) if row else None
 
@@ -123,10 +140,12 @@ class ProfileStore:
         formulas: dict[str, Any],
         confidence: float,
         previous: dict[str, Any] | None = None,
+        workspace_id: str = "",
     ) -> MappingProfile:
         existing = self.find_by_signature(
             target_template_id=target_template_id,
             source_signature_hash=source_signature_hash,
+            workspace_id=workspace_id,
         )
         now = utc_now()
         profile_id = existing.id if existing else str(uuid.uuid4())
@@ -157,15 +176,16 @@ class ProfileStore:
                 connection.execute(
                     """
                     INSERT INTO mapping_profiles (
-                        id, name, target_template_id, source_signature_hash,
+                        id, name, workspace_id, target_template_id, source_signature_hash,
                         source_headers_json, sheet_name, header_row, mapping_json,
                         defaults_json, formulas_json, confidence, usage_count,
                         created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
                     """,
                     (
                         profile_id,
                         name,
+                        workspace_id,
                         target_template_id,
                         source_signature_hash,
                         json.dumps(source_headers, ensure_ascii=False),
@@ -269,4 +289,5 @@ class ProfileStore:
             formulas=json.loads(row["formulas_json"]),
             confidence=float(row["confidence"]),
             usage_count=int(row["usage_count"]),
+            workspace_id=str(row["workspace_id"] or ""),
         )
