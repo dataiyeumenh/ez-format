@@ -7,6 +7,11 @@ import UserPlanBadge from "./UserPlanBadge";
 import FeedbackModal from "./FeedbackModal";
 import ChangePasswordModal from "./ChangePasswordModal";
 
+const workspacesEnabled =
+  String(
+    import.meta.env.VITE_MASTER_DATA_WORKSPACES_ENABLED || "true",
+  ).toLowerCase() !== "false";
+
 const Logo = () => (
   <Link to="/" className="flex items-center gap-2.5 group">
     <img
@@ -152,6 +157,15 @@ const Navbar = () => {
                         {user.name}
                       </p>
                       <UserPlanBadge user={user} />
+                      {workspacesEnabled && (
+                        <Link
+                          to="/workspaces"
+                          onClick={closeUserMenu}
+                          className="mt-1 block rounded-xl px-3 py-2 text-sm font-semibold text-gray-700 hover:bg-gray-50"
+                        >
+                          Hồ sơ doanh nghiệp
+                        </Link>
+                      )}
                       <Link
                         to="/pricing"
                         onClick={closeUserMenu}
@@ -253,6 +267,18 @@ const Navbar = () => {
                 {userMenuOpen && (
                   <div className="px-1">
                     <UserPlanBadge user={user} />
+                    {workspacesEnabled && (
+                      <Link
+                        to="/workspaces"
+                        className="mt-2 block rounded-xl px-3 py-2 text-sm font-semibold text-gray-700 hover:bg-gray-50"
+                        onClick={() => {
+                          closeUserMenu();
+                          closeMobile();
+                        }}
+                      >
+                        Hồ sơ doanh nghiệp
+                      </Link>
+                    )}
                     <Link
                       to="/pricing"
                       className="mt-2 block rounded-xl px-3 py-2 text-sm font-semibold text-blue-700 hover:bg-blue-50"

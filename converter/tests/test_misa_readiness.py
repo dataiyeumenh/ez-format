@@ -175,6 +175,7 @@ def test_readiness_blocks_conflicting_duplicate_document_key():
             "TK Tiền/Chi phí/Nợ (*)": "131",
             "TK Doanh thu/Có (*)": "5111",
             "Thành tiền": 1000,
+            "Tổng tiền thanh toán": 3000,
         },
         {
             "Số chứng từ (*)": "HD001",
@@ -189,6 +190,7 @@ def test_readiness_blocks_conflicting_duplicate_document_key():
             "TK Tiền/Chi phí/Nợ (*)": "131",
             "TK Doanh thu/Có (*)": "5111",
             "Thành tiền": 2000,
+            "Tổng tiền thanh toán": "",
         },
     ]
 
@@ -202,6 +204,112 @@ def test_readiness_blocks_conflicting_duplicate_document_key():
     )
 
     assert any(issue.code == "duplicate_document_key" for issue in report.issues)
+
+
+def test_readiness_allows_multiple_detail_lines_for_the_same_invoice():
+    rows = [
+        {
+            "Số chứng từ (*)": "HD001",
+            "Ngày hạch toán (*)": "01/01/2026",
+            "Ngày chứng từ (*)": "01/01/2026",
+            "Ngày hóa đơn": "01/01/2026",
+            "Ký hiệu HĐ": "AA/26E",
+            "Số hóa đơn": "000001",
+            "Mã số thuế": "0100101",
+            "Mã hàng (*)": "SP01",
+            "Hình thức bán hàng": "Bán hàng hóa trong nước",
+            "Phương thức thanh toán": "Chưa thu tiền",
+            "TK Tiền/Chi phí/Nợ (*)": "131",
+            "TK Doanh thu/Có (*)": "5111",
+            "Thành tiền": 1000,
+            "Tổng tiền thanh toán": 3000,
+        },
+        {
+            "Số chứng từ (*)": "HD001",
+            "Ngày hạch toán (*)": "01/01/2026",
+            "Ngày chứng từ (*)": "01/01/2026",
+            "Ngày hóa đơn": "01/01/2026",
+            "Ký hiệu HĐ": "AA/26E",
+            "Số hóa đơn": "000001",
+            "Mã số thuế": "0100101",
+            "Mã hàng (*)": "SP02",
+            "Hình thức bán hàng": "Bán hàng hóa trong nước",
+            "Phương thức thanh toán": "Chưa thu tiền",
+            "TK Tiền/Chi phí/Nợ (*)": "131",
+            "TK Doanh thu/Có (*)": "5111",
+            "Thành tiền": 2000,
+            "Tổng tiền thanh toán": "",
+        },
+    ]
+
+    report = build_readiness_report(
+        _table(["dummy"], [{"dummy": "x"}, {"dummy": "y"}]),
+        "bsn_sales",
+        mapping={},
+        defaults={},
+        formulas={},
+        edited_rows=rows,
+    )
+
+    assert not any(issue.code == "duplicate_document_key" for issue in report.issues)
+
+
+def test_readiness_accepts_misa_non_taxable_vat_markers():
+    base = {
+        "Số phiếu nhập (*)": "PN001",
+        "Ngày hạch toán (*)": "01/01/2026",
+        "Ngày chứng từ (*)": "01/01/2026",
+        "Mã hàng (*)": "DV01",
+        "Hình thức mua hàng": "Mua hàng trong nước không qua kho",
+        "Phương thức thanh toán": "Chưa thanh toán",
+        "TK kho/TK chi phí (*)": "6428",
+        "TK công nợ/TK tiền (*)": "331",
+        "Thành tiền": 1000,
+        "Tiền thuế GTGT": 0,
+    }
+    rows = [
+        {**base, "% thuế GTGT": "KCT"},
+        {**base, "Số phiếu nhập (*)": "PN002", "% thuế GTGT": "KKKNT"},
+    ]
+
+    report = build_readiness_report(
+        _table(["dummy"], [{"dummy": "x"}, {"dummy": "y"}]),
+        "misa_purchase_domestic",
+        mapping={},
+        defaults={},
+        formulas={},
+        edited_rows=rows,
+    )
+
+    assert not any(issue.code == "number_unparseable" for issue in report.issues)
+    assert not any(issue.code == "vat_amount_mismatch" for issue in report.issues)
+
+
+def test_readiness_accepts_amount_explained_by_unit_price_rounding():
+    row = {
+        "Số phiếu nhập (*)": "PN001",
+        "Ngày hạch toán (*)": "01/01/2026",
+        "Ngày chứng từ (*)": "01/01/2026",
+        "Mã hàng (*)": "HH01",
+        "Hình thức mua hàng": "Mua hàng trong nước nhập kho",
+        "Phương thức thanh toán": "Chưa thanh toán",
+        "TK kho/TK chi phí (*)": "1561",
+        "TK công nợ/TK tiền (*)": "331",
+        "Số lượng": 1500,
+        "Đơn giá": 213.33,
+        "Thành tiền": 320000,
+    }
+
+    report = build_readiness_report(
+        _table(["dummy"], [{"dummy": "x"}]),
+        "misa_purchase_domestic",
+        mapping={},
+        defaults={},
+        formulas={},
+        edited_rows=[row],
+    )
+
+    assert not any(issue.code == "line_amount_mismatch" for issue in report.issues)
 
 
 def test_readiness_warns_master_data_review_only():

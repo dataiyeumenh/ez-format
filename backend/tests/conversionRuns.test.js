@@ -17,6 +17,9 @@ test("conversion run model stores metadata only and defaults to MISA processing"
     userEmailSnapshot: "hoanganh@example.com",
     fileName: "raw.xlsx",
     fileSizeBytes: 1234567,
+    workspace: new mongoose.Types.ObjectId(),
+    workspaceNameSnapshot: "BAE Foods",
+    snapshotSetHash: "snapshot-hash",
   });
 
   assert.equal(run.outputFormat, "MISA");
@@ -24,6 +27,7 @@ test("conversion run model stores metadata only and defaults to MISA processing"
   assert.equal(run.fileName, "raw.xlsx");
   assert.equal(run.fileSizeBytes, 1234567);
   assert.equal(run.uploadBlob, undefined);
+  assert.equal(run.workspaceNameSnapshot, "BAE Foods");
   assert.equal(run.validateSync(), undefined);
 });
 
@@ -52,6 +56,9 @@ test("conversion run serializer formats admin row", () => {
     createdAt: new Date("2026-06-15T08:30:00.000Z"),
     startedAt: new Date("2026-06-15T08:30:00.000Z"),
     completedAt: new Date("2026-06-15T08:31:00.000Z"),
+    workspace: new mongoose.Types.ObjectId(),
+    workspaceNameSnapshot: "BAE Foods",
+    snapshotSetHash: "snapshot-hash",
   };
 
   const payload = serializeConversionRun(run);
@@ -62,6 +69,8 @@ test("conversion run serializer formats admin row", () => {
   assert.equal(payload.format, "MISA");
   assert.equal(payload.size, "1 MB");
   assert.equal(payload.status, "completed");
+  assert.equal(payload.workspace.name, "BAE Foods");
+  assert.equal(payload.snapshotSetHash, "snapshot-hash");
 });
 
 test("conversion run stats count statuses", () => {

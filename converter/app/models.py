@@ -164,3 +164,4 @@ class MisaReadinessReport(BaseModel):
     issues: list[MisaReadinessIssue]
     reconciliation: MisaReconciliationReport
     disclaimer: str
+    master_data: dict[str, Any] | None = None

@@ -15,6 +15,7 @@ from app.models import (
     MisaReadinessReport,
     MisaReadinessSummary,
 )
+from app.master_data_resolver import MasterDataResolution
 from app.normalization import is_blank, normalize_header
 from app.parsing import parse_date, parse_number
 
@@ -56,9 +57,20 @@ DOCUMENT_FINGERPRINT_HEADERS = (
     "ten_khach_hang",
     "ma_nha_cung_cap",
     "ten_nha_cung_cap",
-    "thanh_tien",
-    "tien_thue_gtgt",
+    "loai_tien",
+    "ty_gia",
+    "tong_tien_hang",
+    "tong_tien_thanh_toan",
 )
+VAT_RATE_HEADER_HINTS = ("percent_thue_gtgt", "thue_suat")
+ZERO_VAT_MARKERS = {
+    "kct",
+    "kkknt",
+    "khong chiu thue",
+    "không chịu thuế",
+    "khong ke khai nop thue",
+    "không kê khai nộp thuế",
+}
 
 
 def build_readiness_report(
@@ -210,7 +222,11 @@ def _check_parseable_values(
                         source_url=MISA_IMPORT_ERROR_SOURCE_URL,
                     )
                 )
-            if _is_number_header(normalized) and parse_number(value) is None:
+            if (
+                _is_number_header(normalized)
+                and parse_number(value) is None
+                and not _valid_vat_marker(normalized, value)
+            ):
                 issues.append(
                     _issue(
                         severity="blocker",
@@ -258,7 +274,11 @@ def _check_source_parseable_values(
                             source_url=MISA_IMPORT_ERROR_SOURCE_URL,
                         )
                     )
-                if _is_number_header(normalized) and parse_number(value) is None:
+                if (
+                    _is_number_header(normalized)
+                    and parse_number(value) is None
+                    and not _valid_vat_marker(normalized, value)
+                ):
                     issues.append(
                         _issue(
                             severity="blocker",
@@ -286,12 +306,13 @@ def _check_amount_math(issues: list[MisaReadinessIssue], rows: list[dict[str, An
             continue
 
         gross = _money(quantity * unit_price)
+        tolerance = _line_amount_tolerance(quantity, _field(row, "don_gia"))
         accepted = {gross}
         discount = _decimal(_field(row, "tien_chiet_khau"))
         if discount is not None:
             accepted.add(_money(gross - discount))
         actual = _money(amount)
-        if all(abs(actual - expected) > MONEY_TOLERANCE for expected in accepted):
+        if all(abs(actual - expected) > tolerance for expected in accepted):
             closest = min(accepted, key=lambda expected: abs(actual - expected))
             issues.append(
                 _issue(
@@ -349,7 +370,7 @@ def _check_duplicate_documents(
     issues: list[MisaReadinessIssue],
     rows: list[dict[str, Any]],
 ) -> None:
-    seen: dict[str, tuple[int, tuple[Any, ...]]] = {}
+    seen: dict[str, tuple[int, dict[str, Any]]] = {}
     for row_number, row in enumerate(rows, start=1):
         key = _document_key(row)
         if not key:
@@ -360,7 +381,12 @@ def _check_duplicate_documents(
             seen[key] = (row_number, fingerprint)
             continue
         previous_row, previous_fingerprint = previous
-        if fingerprint != previous_fingerprint:
+        conflicting_fields = [
+            header
+            for header, value in fingerprint.items()
+            if header in previous_fingerprint and previous_fingerprint[header] != value
+        ]
+        if conflicting_fields:
             issues.append(
                 _issue(
                     severity="blocker",
@@ -376,6 +402,8 @@ def _check_duplicate_documents(
                     source_url=MISA_IMPORT_ERROR_SOURCE_URL,
                 )
             )
+            continue
+        seen[key] = (previous_row, {**previous_fingerprint, **fingerprint})
 
 
 def _add_review_warnings(
@@ -472,6 +500,12 @@ def _is_number_header(normalized_header: str) -> bool:
     return any(hint in normalized_header for hint in NUMBER_HEADER_HINTS)
 
 
+def _valid_vat_marker(normalized_header: str, value: Any) -> bool:
+    return any(hint in normalized_header for hint in VAT_RATE_HEADER_HINTS) and (
+        str(value).strip().lower() in ZERO_VAT_MARKERS
+    )
+
+
 def _field(row: dict[str, Any], normalized_name: str) -> Any:
     for header, value in row.items():
         if normalize_header(header) == normalized_name:
@@ -500,11 +534,20 @@ def _money(value: Decimal) -> Decimal:
     return value.quantize(Decimal("1"), rounding=ROUND_HALF_UP)
 
 
+def _line_amount_tolerance(quantity: Decimal, raw_unit_price: Any) -> Decimal:
+    parsed_unit_price = parse_number(raw_unit_price)
+    if parsed_unit_price is None:
+        return MONEY_TOLERANCE
+    decimal_price = Decimal(str(parsed_unit_price))
+    quantum = Decimal("1").scaleb(decimal_price.as_tuple().exponent)
+    return max(MONEY_TOLERANCE, abs(quantity) * quantum / 2)
+
+
 def _vat_rate(value: Any) -> Decimal | None:
     if is_blank(value):
         return None
     text = str(value).strip().lower()
-    if text in {"kct", "không chịu thuế", "khong chiu thue"}:
+    if text in ZERO_VAT_MARKERS:
         return Decimal("0")
     parsed = _decimal(value)
     if parsed is None:
@@ -541,8 +584,12 @@ def _document_key(row: dict[str, Any]) -> str | None:
     return "|".join([*qualifiers, invoice_number])
 
 
-def _document_fingerprint(row: dict[str, Any]) -> tuple[Any, ...]:
-    return tuple(_normalize_fingerprint_value(_field(row, header)) for header in DOCUMENT_FINGERPRINT_HEADERS)
+def _document_fingerprint(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        header: _normalize_fingerprint_value(value)
+        for header in DOCUMENT_FINGERPRINT_HEADERS
+        if not is_blank(value := _field(row, header))
+    }
 
 
 def _normalize_fingerprint_value(value: Any) -> Any:
@@ -568,3 +615,112 @@ def _status(summary: MisaReadinessSummary) -> str:
 def _score(summary: MisaReadinessSummary) -> int:
     score = 100 - summary.blocker * 25 - summary.warning * 5 - min(summary.info, 10)
     return max(0, min(100, score))
+
+
+def add_master_data_resolutions(
+    report: MisaReadinessReport,
+    resolutions: list[MasterDataResolution],
+    *,
+    context_status: str,
+    context_message: str | None = None,
+) -> MisaReadinessReport:
+    issues = list(report.issues)
+    not_checked_types: set[str] = set()
+    for resolution in resolutions:
+        if resolution.status == "verified":
+            continue
+        if resolution.status == "not_checked":
+            not_checked_types.add(resolution.catalog_type)
+            continue
+
+        if resolution.status == "conflict":
+            severity = "blocker"
+            code = "master_data_code_conflict"
+            message = (
+                f"Giá trị {resolution.raw_value} khớp với nhiều mã trong danh mục "
+                "MISA; cần chọn đúng mã trước khi tải file."
+            )
+        elif resolution.status == "missing" and resolution.required:
+            severity = "blocker"
+            code = "master_data_required_code_missing"
+            message = (
+                f"Giá trị {resolution.raw_value} chưa tồn tại trong danh mục MISA "
+                "đang hoạt động."
+            )
+        elif resolution.status == "missing":
+            severity = "warning"
+            code = "master_data_optional_code_missing"
+            message = (
+                f"Giá trị {resolution.raw_value} chưa được tìm thấy trong danh mục MISA."
+            )
+        else:
+            severity = "warning"
+            code = "master_data_confirmation_required"
+            message = (
+                f"Giá trị {resolution.raw_value} có mã MISA gợi ý nhưng cần kế toán xác nhận."
+            )
+
+        issues.append(
+            MisaReadinessIssue(
+                severity=severity,
+                category="master_data",
+                code=code,
+                field=resolution.field,
+                actual=resolution.raw_value,
+                expected=(
+                    resolution.candidates[0].get("code")
+                    if len(resolution.candidates) == 1
+                    else "Mã tồn tại và đúng đối tượng trong danh mục MISA"
+                ),
+                message=message,
+                fix_hint=(
+                    "Chọn mã MISA phù hợp và lưu alias, hoặc bổ sung danh mục trên MISA."
+                ),
+                source_url=MISA_IMPORT_SOURCE_URL,
+            )
+        )
+
+    if context_status != "connected" or not_checked_types:
+        types = ", ".join(sorted(not_checked_types))
+        issues.append(
+            MisaReadinessIssue(
+                severity="warning",
+                category="master_data",
+                code="master_data_not_checked",
+                message=(
+                    context_message
+                    or (
+                        f"Chưa có snapshot danh mục MISA cho: {types}."
+                        if types
+                        else "File chưa được đối chiếu với danh mục MISA của doanh nghiệp."
+                    )
+                ),
+                expected="Danh mục MISA đang hoạt động",
+                fix_hint="Tải danh mục MISA lên hồ sơ doanh nghiệp hoặc xác nhận tiếp tục không đối chiếu.",
+                source_url=MISA_IMPORT_SOURCE_URL,
+            )
+        )
+
+    summary = MisaReadinessSummary(
+        blocker=sum(1 for issue in issues if issue.severity == "blocker"),
+        warning=sum(1 for issue in issues if issue.severity == "warning"),
+        info=sum(1 for issue in issues if issue.severity == "info"),
+    )
+    report.issues = issues
+    report.summary = summary
+    report.ok = summary.blocker == 0
+    report.status = _status(summary)
+    report.score = _score(summary)
+    report.master_data = {
+        "status": context_status,
+        "message": context_message,
+        "summary": {
+            "verified": sum(1 for item in resolutions if item.status == "verified"),
+            "suggested": sum(1 for item in resolutions if item.status == "suggested"),
+            "missing": sum(1 for item in resolutions if item.status == "missing"),
+            "conflict": sum(1 for item in resolutions if item.status == "conflict"),
+            "not_checked": sum(1 for item in resolutions if item.status == "not_checked"),
+        },
+        "resolutions": [item.to_dict() for item in resolutions],
+    }
+    return report

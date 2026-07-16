@@ -51,6 +51,37 @@ const conversionRunSchema = new mongoose.Schema(
       trim: true,
       default: "",
     },
+    mode: {
+      type: String,
+      enum: ["mapping", "reconstruction"],
+      default: "mapping",
+    },
+    reconstructionRun: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "VoucherReconstructionRun",
+      default: null,
+    },
+    documentCount: { type: Number, min: 0, default: 0 },
+    reviewCount: { type: Number, min: 0, default: 0 },
+    creditChargedAt: { type: Date, default: null },
+    workspace: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "AccountingWorkspace",
+      default: null,
+      index: true,
+    },
+    workspaceNameSnapshot: {
+      type: String,
+      trim: true,
+      default: "",
+      maxlength: 160,
+    },
+    snapshotSetHash: {
+      type: String,
+      trim: true,
+      default: "",
+      maxlength: 128,
+    },
     errorMessage: {
       type: String,
       trim: true,

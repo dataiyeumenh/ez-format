@@ -36,10 +36,13 @@ export function formatApiError(payload, fallback) {
   return fallback;
 }
 
-function buildUploadFormData(file, targetTemplateId) {
+function buildUploadFormData(file, targetTemplateId, conversionContextToken = null) {
   const formData = new FormData();
   formData.append("file", file);
   if (targetTemplateId) formData.append("target_template_id", targetTemplateId);
+  if (conversionContextToken) {
+    formData.append("conversion_context_token", conversionContextToken);
+  }
   return formData;
 }
 
@@ -120,13 +123,16 @@ export function useConverterApi() {
     };
   }, []);
 
-  const analyzeFile = useCallback(async (file, targetTemplateId) => {
-    const response = await fetch(`${pythonBaseURL}/api/v1/uploads/analyze`, {
-      method: "POST",
-      body: buildUploadFormData(file, targetTemplateId),
-    });
-    return readJsonResponse(response, "Không thể phân tích file Excel.");
-  }, []);
+  const analyzeFile = useCallback(
+    async (file, targetTemplateId, conversionContextToken = null) => {
+      const response = await fetch(`${pythonBaseURL}/api/v1/uploads/analyze`, {
+        method: "POST",
+        body: buildUploadFormData(file, targetTemplateId, conversionContextToken),
+      });
+      return readJsonResponse(response, "Không thể phân tích file Excel.");
+    },
+    [],
+  );
 
   const previewMapping = useCallback(async (payload) => {
     const response = await fetch(`${pythonBaseURL}/api/v1/mappings/preview`, {
@@ -159,11 +165,18 @@ export function useConverterApi() {
   }, []);
 
   const exportConfirmed = useCallback(
-    async (uploadId, profileId, rows, acknowledgeWarnings = false) => {
+    async (
+      uploadId,
+      profileId,
+      rows,
+      acknowledgeWarnings = false,
+      conversionContextToken = null,
+    ) => {
       const payload = {
         upload_id: uploadId,
         profile_id: profileId,
         acknowledge_warnings: acknowledgeWarnings,
+        conversion_context_token: conversionContextToken,
       };
       if (Array.isArray(rows) && rows.length > 0) {
         payload.rows = rows;

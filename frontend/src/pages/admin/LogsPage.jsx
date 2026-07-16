@@ -215,6 +215,7 @@ const LogsPage = () => {
             <div className="flex items-center gap-2">
               <span className="text-sm text-gray-500 font-medium">Bộ lọc:</span>
               <select
+                aria-label="Lọc góp ý theo loại"
                 value={filterCategory}
                 onChange={(e) => {
                   setFilterCategory(e.target.value);

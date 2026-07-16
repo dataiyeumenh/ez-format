@@ -230,6 +230,7 @@ const FilesPage = () => {
           <div className="flex flex-wrap items-center gap-3 px-5 py-4 border-b border-gray-100">
             <span className="text-sm text-gray-500 font-medium">Bộ lọc:</span>
             <select
+              aria-label="Lọc lịch sử chuyển đổi theo trạng thái"
               value={status}
               onChange={(event) => {
                 setStatus(event.target.value);

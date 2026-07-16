@@ -29,7 +29,20 @@ from app.misa_mapping import (
     source_signature,
     validate_mapping,
 )
-from app.misa_readiness import build_readiness_report
+from app.master_data_client import (
+    ConversionContextError,
+    fetch_master_data_context,
+    verify_conversion_context_token,
+)
+from app.master_data_resolver import resolve_master_data
+from app.mapping_profile_client import (
+    MappingProfileClientError,
+    find_mapping_profile,
+    get_mapping_profile,
+    mark_mapping_profile_used,
+    save_mapping_profile,
+)
+from app.misa_readiness import add_master_data_resolutions, build_readiness_report
 from app.misa_profiles import ProfileStore
 from app.misa_templates import get_misa_template, list_misa_templates
 from app.models import MisaReadinessReport
@@ -90,20 +103,43 @@ def analyze_upload(
     filename: str,
     content: bytes,
     requested_target_template_id: str | None = None,
+    conversion_context_token: str | None = None,
 ) -> dict[str, Any]:
     upload_id, input_path = save_upload(filename, content)
     table = read_input_table(input_path)
     target_template_id = detect_target_template_id(table, requested_target_template_id)
     template = get_misa_template(target_template_id)
     signature = source_signature(table)
-    store = ProfileStore()
-
-    profile = store.find_by_signature(
-        target_template_id=target_template_id,
-        source_signature_hash=signature.hash,
+    context, context_status, context_message, context_claims = _context_for_analyze(
+        conversion_context_token
     )
+    workspace_id = str((context_claims or {}).get("workspace_id") or "")
+    store = ProfileStore()
+    profile_warning: str | None = None
+    if workspace_id and conversion_context_token:
+        try:
+            profile = find_mapping_profile(
+                conversion_context_token,
+                target_template_id=target_template_id,
+                source_signature_hash=signature.hash,
+            )
+            if profile:
+                try:
+                    mark_mapping_profile_used(conversion_context_token, profile.id)
+                except MappingProfileClientError as exc:
+                    profile_warning = f"Không cập nhật được lượt dùng mapping profile: {exc}"
+        except MappingProfileClientError as exc:
+            profile = None
+            profile_warning = f"Không tải được mapping profile doanh nghiệp; dùng heuristic: {exc}"
+    else:
+        profile = store.find_by_signature(
+            target_template_id=target_template_id,
+            source_signature_hash=signature.hash,
+            workspace_id="",
+        )
     if profile:
-        store.mark_used(profile.id)
+        if not workspace_id:
+            store.mark_used(profile.id)
         suggestion = profile_suggestion(profile)
         profile_issues = validate_mapping(target_template_id, suggestion.mapping, template.headers)
         if _has_missing_required_mapping(profile_issues):
@@ -136,6 +172,8 @@ def analyze_upload(
                 if ai_required():
                     raise
                 suggestion.warnings.append(f"AI Gateway unavailable, dùng heuristic: {exc}")
+    if profile_warning:
+        suggestion.warnings.append(profile_warning)
 
     issues = validate_mapping(target_template_id, suggestion.mapping, template.headers)
     metadata = _read_metadata(upload_id)
@@ -145,6 +183,14 @@ def analyze_upload(
             "signature": signature.__dict__,
             "suggestion": suggestion.model_dump(),
             "issues": issues,
+            "conversion_context": (
+                {
+                    "workspace_id": workspace_id,
+                    "snapshot_set_hash": context_claims.get("snapshot_set_hash"),
+                }
+                if context_claims
+                else None
+            ),
         }
     )
     _write_metadata(upload_id, metadata)
@@ -170,6 +216,12 @@ def analyze_upload(
         "target_headers": template.headers,
         "mapping_suggestion": suggestion.model_dump(),
         "issues": issues,
+        "master_data": _master_data_payload(
+            context,
+            [],
+            status=context_status,
+            message=context_message,
+        ),
     }
 
 
@@ -180,6 +232,7 @@ def preview_mapping(
     mapping: dict[str, Any],
     defaults: dict[str, Any] | None = None,
     formulas: dict[str, str] | None = None,
+    conversion_context_token: str | None = None,
 ) -> dict[str, Any]:
     table = _read_upload_table(upload_id)
     template = get_misa_template(target_template_id)
@@ -191,14 +244,28 @@ def preview_mapping(
         sanitize_defaults_for_template(target_template_id, defaults, template.headers),
         formulas,
     )
+    context, context_status, context_message = _context_for_upload(
+        upload_id, conversion_context_token
+    )
+    resolution = resolve_master_data(
+        rows,
+        context,
+        source_system=_source_system_for_upload(upload_id),
+    )
     return {
         "headers": template.headers,
-        "rows": rows,
+        "rows": resolution.rows,
         "issues": issues,
         "stats": {
             "source_rows": len(table.rows),
             "output_rows": len(rows),
         },
+        "master_data": _master_data_payload(
+            context,
+            resolution.resolutions,
+            status=context_status,
+            message=context_message,
+        ),
     }
 
 
@@ -210,15 +277,38 @@ def readiness_mapping(
     defaults: dict[str, Any] | None = None,
     formulas: dict[str, str] | None = None,
     edited_rows: list[dict[str, Any]] | None = None,
+    conversion_context_token: str | None = None,
 ) -> dict[str, Any]:
     table = _read_upload_table(upload_id)
+    template = get_misa_template(target_template_id)
+    rows = edited_rows or apply_mapping(
+        table,
+        template.headers,
+        mapping,
+        sanitize_defaults_for_template(target_template_id, defaults, template.headers),
+        formulas,
+    )
+    context, context_status, context_message = _context_for_upload(
+        upload_id, conversion_context_token
+    )
+    resolution = resolve_master_data(
+        rows,
+        context,
+        source_system=_source_system_for_upload(upload_id),
+    )
     report = build_readiness_report(
         table,
         target_template_id,
         mapping,
         defaults or {},
         formulas or {},
-        edited_rows=edited_rows,
+        edited_rows=resolution.rows,
+    )
+    report = add_master_data_resolutions(
+        report,
+        resolution.resolutions,
+        context_status=context_status,
+        context_message=context_message,
     )
     return report.model_dump(mode="json")
 
@@ -231,8 +321,10 @@ def confirm_mapping(
     defaults: dict[str, Any] | None = None,
     formulas: dict[str, str] | None = None,
     profile_name: str | None = None,
+    conversion_context_token: str | None = None,
 ) -> dict[str, Any]:
     metadata = _read_metadata(upload_id)
+    _context_for_upload(upload_id, conversion_context_token)
     signature_payload = metadata.get("signature")
     if isinstance(signature_payload, dict):
         signature = SourceSignature(
@@ -244,7 +336,6 @@ def confirm_mapping(
         )
     else:
         signature = source_signature(_read_upload_table(upload_id))
-    store = ProfileStore()
     previous = metadata.get("suggestion")
     template = get_misa_template(target_template_id)
     clean_defaults = sanitize_defaults_for_template(
@@ -252,19 +343,43 @@ def confirm_mapping(
         defaults,
         template.headers,
     )
-    profile = store.save_profile(
-        name=profile_name or f"{target_template_id} profile",
-        target_template_id=target_template_id,
-        source_signature_hash=signature.hash,
-        source_headers=signature.headers,
-        sheet_name=signature.sheet_name,
-        header_row=signature.header_row,
-        mapping=mapping,
-        defaults=clean_defaults,
-        formulas=formulas or {},
-        confidence=1.0,
-        previous=previous,
+    workspace_id = str(
+        ((metadata.get("conversion_context") or {}).get("workspace_id") or "")
     )
+    if workspace_id:
+        if not conversion_context_token:
+            raise ValueError("Thiếu conversion context của hồ sơ doanh nghiệp")
+        try:
+            profile = save_mapping_profile(
+                conversion_context_token,
+                name=profile_name or f"{target_template_id} profile",
+                target_template_id=target_template_id,
+                source_signature_hash=signature.hash,
+                source_headers=signature.headers,
+                sheet_name=signature.sheet_name,
+                header_row=signature.header_row,
+                mapping=mapping,
+                defaults=clean_defaults,
+                formulas=formulas or {},
+                confidence=1.0,
+            )
+        except MappingProfileClientError as exc:
+            raise ValueError(str(exc)) from exc
+    else:
+        profile = ProfileStore().save_profile(
+            name=profile_name or f"{target_template_id} profile",
+            target_template_id=target_template_id,
+            source_signature_hash=signature.hash,
+            source_headers=signature.headers,
+            sheet_name=signature.sheet_name,
+            header_row=signature.header_row,
+            mapping=mapping,
+            defaults=clean_defaults,
+            formulas=formulas or {},
+            confidence=1.0,
+            previous=previous,
+            workspace_id="",
+        )
     metadata["profile_id"] = profile.id
     metadata["confirmed"] = {
         "mapping": mapping,
@@ -272,7 +387,7 @@ def confirm_mapping(
         "formulas": formulas or {},
     }
     _write_metadata(upload_id, metadata)
-    store.record_run(
+    ProfileStore().record_run(
         run_id=upload_id,
         upload_filename=metadata.get("filename", ""),
         target_template_id=target_template_id,
@@ -289,9 +404,27 @@ def export_confirmed_profile(
     profile_id: str,
     edited_rows: list[dict[str, Any]] | None = None,
     acknowledge_warnings: bool = False,
+    conversion_context_token: str | None = None,
 ) -> tuple[bytes, str]:
     table = _read_upload_table(upload_id)
-    profile = ProfileStore().get_profile(profile_id)
+    metadata = _read_metadata(upload_id)
+    context, context_status, context_message = _context_for_upload(
+        upload_id, conversion_context_token
+    )
+    workspace_id = str(
+        ((metadata.get("conversion_context") or {}).get("workspace_id") or "")
+    )
+    if workspace_id:
+        if not conversion_context_token:
+            raise ValueError("Thiếu conversion context của hồ sơ doanh nghiệp")
+        try:
+            profile = get_mapping_profile(conversion_context_token, profile_id)
+        except MappingProfileClientError as exc:
+            raise ValueError(str(exc)) from exc
+        if profile.workspace_id != workspace_id:
+            raise ValueError("Mapping profile không thuộc hồ sơ doanh nghiệp đang xử lý")
+    else:
+        profile = ProfileStore().get_profile(profile_id)
     template = get_misa_template(profile.target_template_id)
     clean_mapping = sanitize_mapping_for_template(profile.target_template_id, profile.mapping)
     clean_defaults = sanitize_defaults_for_template(
@@ -309,6 +442,12 @@ def export_confirmed_profile(
             clean_defaults,
             profile.formulas,
         )
+    resolution = resolve_master_data(
+        rows,
+        context,
+        source_system=_source_system_for_upload(upload_id),
+    )
+    rows = resolution.rows
     readiness = build_readiness_report(
         table,
         profile.target_template_id,
@@ -317,6 +456,12 @@ def export_confirmed_profile(
         profile.formulas,
         edited_rows=rows,
     )
+    readiness = add_master_data_resolutions(
+        readiness,
+        resolution.resolutions,
+        context_status=context_status,
+        context_message=context_message,
+    )
     if readiness.summary.blocker > 0:
         raise ReadinessGateError(readiness)
     if readiness.summary.warning > 0 and not acknowledge_warnings:
@@ -324,6 +469,75 @@ def export_confirmed_profile(
     output_path = _upload_dir(upload_id) / "misa_export.xls"
     write_xls_from_template(template.workbook, rows, output_path)
     return output_path.read_bytes(), f"Import misa {upload_id[:8]}.xls"
+
+
+def _context_for_analyze(
+    token: str | None,
+) -> tuple[dict[str, Any] | None, str, str | None, dict[str, Any] | None]:
+    if not token:
+        return None, "not_configured", None, None
+    claims = verify_conversion_context_token(token)
+    try:
+        return fetch_master_data_context(token), "connected", None, claims
+    except ConversionContextError as exc:
+        if exc.status_code == 409:
+            raise ValueError(str(exc)) from exc
+        return None, "unavailable", str(exc), claims
+
+
+def _context_for_upload(
+    upload_id: str, token: str | None
+) -> tuple[dict[str, Any] | None, str, str | None]:
+    metadata = _read_metadata(upload_id)
+    expected = metadata.get("conversion_context")
+    if not expected:
+        if token:
+            raise ValueError("Conversion context không khớp với lần phân tích ban đầu")
+        return None, "not_configured", None
+    if not token:
+        raise ValueError("Thiếu conversion context của hồ sơ doanh nghiệp")
+    claims = verify_conversion_context_token(token)
+    if (
+        str(claims.get("workspace_id")) != str(expected.get("workspace_id"))
+        or str(claims.get("snapshot_set_hash"))
+        != str(expected.get("snapshot_set_hash"))
+    ):
+        raise ValueError("Conversion context không khớp với lần phân tích ban đầu")
+    try:
+        return fetch_master_data_context(token), "connected", None
+    except ConversionContextError as exc:
+        if exc.status_code == 409:
+            raise ValueError(str(exc)) from exc
+        return None, "unavailable", str(exc)
+
+
+def _source_system_for_upload(upload_id: str) -> str:
+    signature = (_read_metadata(upload_id).get("signature") or {})
+    if isinstance(signature, dict):
+        return str(signature.get("hash") or "default")
+    return "default"
+
+
+def _master_data_payload(
+    context: dict[str, Any] | None,
+    resolutions: list[Any],
+    *,
+    status: str,
+    message: str | None,
+) -> dict[str, Any]:
+    return {
+        "status": status,
+        "message": message,
+        "workspace": (context or {}).get("workspace"),
+        "summary": {
+            "verified": sum(1 for item in resolutions if item.status == "verified"),
+            "suggested": sum(1 for item in resolutions if item.status == "suggested"),
+            "missing": sum(1 for item in resolutions if item.status == "missing"),
+            "conflict": sum(1 for item in resolutions if item.status == "conflict"),
+            "not_checked": sum(1 for item in resolutions if item.status == "not_checked"),
+        },
+        "resolutions": [item.to_dict() for item in resolutions],
+    }
 
 
 def purge_uploads() -> None:
