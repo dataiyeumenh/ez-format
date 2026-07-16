@@ -1,6 +1,7 @@
 const express = require("express");
 const cors = require("cors");
 const dotenv = require("dotenv");
+const crypto = require("crypto");
 const connectDB = require("./config/db");
 const { getRevenue } = require("./controllers/adminController");
 const { protect, adminOnly } = require("./middleware/auth");
@@ -19,6 +20,9 @@ const app = express();
 const masterDataWorkspacesEnabled =
   String(process.env.MASTER_DATA_WORKSPACES_ENABLED || "true").toLowerCase() !==
   "false";
+const voucherReconstructionEnabled =
+  String(process.env.VOUCHER_RECONSTRUCTION_ENABLED || "false").toLowerCase() ===
+  "true";
 
 // CORS config: allow localhost for dev + Vercel production URL
 const allowedOrigins = [
@@ -34,8 +38,15 @@ app.use(
   cors({
     origin: allowedOrigins,
     credentials: true,
+    exposedHeaders: ["X-Request-ID"],
   }),
 );
+app.use((req, res, next) => {
+  const supplied = String(req.headers["x-request-id"] || "").trim();
+  req.requestId = supplied.slice(0, 128) || crypto.randomUUID();
+  res.setHeader("X-Request-ID", req.requestId);
+  next();
+});
 app.use(express.json({ limit: "50mb" }));
 app.use(express.urlencoded({ extended: true, limit: "50mb" }));
 
@@ -52,6 +63,11 @@ if (masterDataWorkspacesEnabled) {
     "/api/accounting-workspaces",
     require("./routes/accountingWorkspaces"),
   );
+}
+if (voucherReconstructionEnabled) {
+  app.use("/api/reconstructions", require("./routes/reconstructions"));
+}
+if (masterDataWorkspacesEnabled || voucherReconstructionEnabled) {
   app.use("/api/internal", require("./routes/internal"));
 }
 
@@ -64,7 +80,10 @@ app.get("/api/health", (req, res) => {
   res.json({
     status: "OK",
     message: "EzFormat API is running",
-    capabilities: { masterDataWorkspaces: masterDataWorkspacesEnabled },
+    capabilities: {
+      masterDataWorkspaces: masterDataWorkspacesEnabled,
+      voucherReconstruction: voucherReconstructionEnabled,
+    },
   });
 });
 

@@ -9,6 +9,11 @@ const {
 } = require("../controllers/accountingWorkspaceController");
 
 const router = express.Router();
+const {
+  checkInternalReconstructionProfile,
+  findInternalReconstructionProfile,
+  recordInternalReconstructionEvent,
+} = require("../controllers/reconstructionController");
 router.get("/master-data/context/:snapshotSetHash", (req, res, next) => {
   Promise.resolve(getInternalMasterDataContext(req, res, next)).catch(next);
 });
@@ -28,6 +33,19 @@ router.post("/mapping-profiles", (req, res, next) => {
 });
 router.post("/mapping-profiles/:profileId/used", (req, res, next) => {
   Promise.resolve(markInternalMappingProfileUsed(req, res, next)).catch(next);
+});
+router.get("/reconstruction-profiles/by-signature", (req, res, next) => {
+  Promise.resolve(findInternalReconstructionProfile(req, res, next)).catch(
+    next,
+  );
+});
+router.get("/reconstruction-profiles/:profileId/current", (req, res, next) => {
+  Promise.resolve(checkInternalReconstructionProfile(req, res, next)).catch(next);
+});
+router.post("/reconstructions/:id/events", (req, res, next) => {
+  Promise.resolve(recordInternalReconstructionEvent(req, res, next)).catch(
+    next,
+  );
 });
 
 module.exports = router;

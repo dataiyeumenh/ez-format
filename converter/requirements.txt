@@ -10,3 +10,4 @@ pdfplumber
 fpdf2
 pytest
 httpx
+redis

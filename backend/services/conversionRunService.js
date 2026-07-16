@@ -71,6 +71,12 @@ function serializeConversionRun(run) {
     status: run.status,
     targetTemplateId: run.targetTemplateId || "",
     converterUploadId: run.converterUploadId || "",
+    mode: run.mode || "mapping",
+    reconstructionRunId: run.reconstructionRun
+      ? String(run.reconstructionRun?._id || run.reconstructionRun)
+      : null,
+    documentCount: Number(run.documentCount || 0),
+    reviewCount: Number(run.reviewCount || 0),
     workspace: run.workspace
       ? {
           id: String(run.workspace?._id || run.workspace),

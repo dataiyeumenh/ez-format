@@ -1,39 +1,39 @@
 {
+  "ok": true,
   "steps": [
     {
-      "seconds": 0.0067561,
+      "status": "ok",
       "name": "Prerequisites",
-      "status": "ok"
+      "seconds": 0.0088169
     },
     {
-      "seconds": 0.0054931,
+      "status": "ok",
       "name": "Fixtures templates",
-      "status": "ok"
+      "seconds": 0.0077484
     },
     {
-      "seconds": 0.2754276,
+      "status": "ok",
       "name": "Backend syntax",
-      "status": "ok"
+      "seconds": 0.3876333
     },
     {
-      "seconds": 3.9347276,
+      "status": "ok",
       "name": "Frontend build",
-      "status": "ok"
+      "seconds": 3.9698726
     },
     {
-      "seconds": 1.7920168,
+      "status": "ok",
       "name": "Converter API smoke",
-      "status": "ok"
+      "seconds": 3.0365275
     }
   ],
+  "failed": [],
+  "timestamp": "2026-07-16 11:05:38",
   "passed": [
     "Prerequisites",
     "Fixtures templates",
     "Backend syntax",
     "Frontend build",
     "Converter API smoke"
-  ],
-  "timestamp": "2026-07-14 13:40:00",
-  "ok": true,
-  "failed": []
+  ]
 }

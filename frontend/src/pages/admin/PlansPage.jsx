@@ -230,6 +230,7 @@ const PlansPage = () => {
               <button
                 type="button"
                 onClick={closeModal}
+                aria-label="Đóng"
                 className="rounded-lg p-2 text-gray-400 hover:bg-gray-50"
               >
                 <X size={18} />
@@ -245,6 +246,7 @@ const PlansPage = () => {
                   Mã gói (Code)
                 </label>
                 <input
+                  aria-label="Mã gói (Code)"
                   value={form.code}
                   onChange={(event) => updateForm("code", event.target.value)}
                   disabled={isEditing}
@@ -258,6 +260,7 @@ const PlansPage = () => {
                   Tên gói
                 </label>
                 <input
+                  aria-label="Tên gói"
                   value={form.name}
                   onChange={(event) => updateForm("name", event.target.value)}
                   required
@@ -271,6 +274,7 @@ const PlansPage = () => {
                 </label>
                 <input
                   type="number"
+                  aria-label="Giá thanh toán"
                   min="0"
                   value={form.price}
                   onChange={(event) => updateForm("price", event.target.value)}
@@ -283,6 +287,7 @@ const PlansPage = () => {
                   Giá hiển thị
                 </label>
                 <input
+                  aria-label="Giá hiển thị"
                   value={form.displayPrice}
                   onChange={(event) => updateForm("displayPrice", event.target.value)}
                   required
@@ -295,6 +300,7 @@ const PlansPage = () => {
                   Chu kỳ hiển thị
                 </label>
                 <input
+                  aria-label="Chu kỳ hiển thị"
                   value={form.periodLabel}
                   onChange={(event) => updateForm("periodLabel", event.target.value)}
                   placeholder="/tháng"
@@ -307,6 +313,7 @@ const PlansPage = () => {
                 </label>
                 <input
                   type="number"
+                  aria-label="Sắp xếp"
                   min="0"
                   value={form.sortOrder}
                   onChange={(event) => updateForm("sortOrder", event.target.value)}
@@ -319,6 +326,7 @@ const PlansPage = () => {
                 </label>
                 <input
                   type="number"
+                  aria-label="Thời hạn (ngày)"
                   min="0"
                   value={form.durationDays}
                   onChange={(event) => updateForm("durationDays", event.target.value)}
@@ -331,6 +339,7 @@ const PlansPage = () => {
                 </label>
                 <input
                   type="number"
+                  aria-label="Lượt chuyển đổi (dành cho gói PerFile)"
                   min="0"
                   value={form.fileCredits}
                   onChange={(event) => updateForm("fileCredits", event.target.value)}
@@ -342,6 +351,7 @@ const PlansPage = () => {
                   Mô tả
                 </label>
                 <textarea
+                  aria-label="Mô tả"
                   rows={2}
                   value={form.description}
                   onChange={(event) => updateForm("description", event.target.value)}
@@ -353,6 +363,7 @@ const PlansPage = () => {
                   Tính năng, mỗi dòng một quyền lợi
                 </label>
                 <textarea
+                  aria-label="Tính năng, mỗi dòng một quyền lợi"
                   rows={4}
                   value={form.featuresText}
                   onChange={(event) => updateForm("featuresText", event.target.value)}
