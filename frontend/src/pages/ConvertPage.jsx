@@ -25,6 +25,7 @@ import WorkspaceSelector from "../components/accounting/WorkspaceSelector";
 import WorkspaceSetupModal from "../components/accounting/WorkspaceSetupModal";
 import MasterDataManager from "../components/accounting/MasterDataManager";
 import MasterDataResolutionTable from "../components/accounting/MasterDataResolutionTable";
+import SmartReconstructionPanel from "../components/reconstruction/SmartReconstructionPanel";
 import { useConverterApi } from "../hooks/useConverterApi";
 import { useAccountingWorkspaces } from "../hooks/useAccountingWorkspaces";
 import { useAuth } from "../context/AuthContext";
@@ -44,6 +45,42 @@ const STEPS = ["Tải file", "Ghép cột", "Kiểm tra lỗi", "Tải MISA"];
 const DEFAULT_TEMPLATE_ID = "bsn_sales";
 const EXCEL_EXT = ["xlsx", "xls"];
 const PDF_EXT = ["pdf"];
+const RECONSTRUCTION_ENABLED =
+  String(
+    import.meta.env.VITE_VOUCHER_RECONSTRUCTION_ENABLED || "false",
+  ).toLowerCase() === "true";
+
+function ConversionModeTabs({ value, onChange }) {
+  if (!RECONSTRUCTION_ENABLED) return null;
+  return (
+    <div className="border-b border-slate-200 bg-white/90 backdrop-blur">
+      <div className="container-custom flex gap-2 py-3">
+        <button
+          type="button"
+          onClick={() => onChange("mapping")}
+          className={`rounded-xl px-4 py-2 text-sm font-bold transition ${
+            value === "mapping"
+              ? "bg-slate-950 text-white"
+              : "text-slate-600 hover:bg-slate-100"
+          }`}
+        >
+          Ghép cột truyền thống
+        </button>
+        <button
+          type="button"
+          onClick={() => onChange("reconstruction")}
+          className={`rounded-xl px-4 py-2 text-sm font-bold transition ${
+            value === "reconstruction"
+              ? "bg-emerald-800 text-white"
+              : "text-slate-600 hover:bg-emerald-50"
+          }`}
+        >
+          Tái tạo chứng từ thông minh
+        </button>
+      </div>
+    </div>
+  );
+}
 
 const ColumnHelp = ({ text }) => {
   const iconRef = useRef(null);
@@ -205,6 +242,7 @@ const ConvertPage = () => {
   const [masterDataManagerOpen, setMasterDataManagerOpen] = useState(false);
   const [conversionContext, setConversionContext] = useState(null);
   const [masterDataState, setMasterDataState] = useState(null);
+  const [conversionMode, setConversionMode] = useState("mapping");
 
   const inputRef = useRef(null);
   const mappingTableRef = useRef(null);
@@ -775,633 +813,663 @@ const ConvertPage = () => {
   return (
     <div className="min-h-screen flex flex-col bg-mesh">
       <Navbar />
+      <ConversionModeTabs value={conversionMode} onChange={setConversionMode} />
 
       <main className="flex-1 pb-20 sm:pb-0">
-        <section className="py-8 sm:py-12 px-4">
-          <div className="max-w-[1440px] mx-auto">
-            <StepProgress steps={STEPS} current={stepIndex} />
+        {conversionMode === "reconstruction" && RECONSTRUCTION_ENABLED ? (
+          <SmartReconstructionPanel
+            templates={templates}
+            serviceOnline={serviceOnline}
+            canConvert={canConvert}
+            noCreditMessage={noCreditMessage}
+            workspacesEnabled={workspacesEnabled}
+            workspaces={workspaces}
+            selectedWorkspaceId={selectedWorkspaceId}
+            selectedWorkspace={selectedWorkspace}
+            onWorkspaceChange={handleWorkspaceChange}
+            onOpenWorkspaceSetup={() => setWorkspaceSetupOpen(true)}
+            onOpenMasterData={() => setMasterDataManagerOpen(true)}
+            searchCatalog={searchCatalog}
+            refreshUser={refreshUser}
+          />
+        ) : (
+          <section className="py-8 sm:py-12 px-4">
+            <div className="max-w-[1440px] mx-auto">
+              <StepProgress steps={STEPS} current={stepIndex} />
 
-            <div className="text-center mb-6 sm:mb-8">
-              <h1 className="text-2xl sm:text-3xl font-bold text-gray-900 tracking-tight">
-                Chuyển đổi Excel → Chuẩn định dạng kế toán
-              </h1>
-              <p className="text-sm sm:text-base text-gray-500 mt-2 max-w-2xl mx-auto">
-                Hệ thống đọc cấu trúc file nhập liệu chuẩn của phần mềm kế toán chuyên
-                dụng, nhận biết tên cột cần có trong biểu mẫu và tự gợi ý ghép cột từ
-                file Excel để bạn kiểm tra, chỉnh sửa trước khi tải file.
-              </p>
-            </div>
-
-            {serviceOnline === false && (
-              <Alert
-                variant="warning"
-                title="Bộ chuyển đổi chưa sẵn sàng"
-                className="mb-5"
-              >
-                Chạy bộ chuyển đổi trước khi phân tích file. Nếu AI tạm thời không hoạt
-                động, bạn vẫn có thể ghép cột thủ công.
-              </Alert>
-            )}
-
-            {serviceOnline === true && (
-              <div className="flex items-center justify-center gap-4 mb-4 flex-wrap">
-                <p className="flex items-center gap-1.5 text-xs text-emerald-700">
-                  <Server size={14} />
-                  Bộ chuyển đổi đang hoạt động
+              <div className="text-center mb-6 sm:mb-8">
+                <h1 className="text-2xl sm:text-3xl font-bold text-gray-900 tracking-tight">
+                  Chuyển đổi Excel → Chuẩn định dạng kế toán
+                </h1>
+                <p className="text-sm sm:text-base text-gray-500 mt-2 max-w-2xl mx-auto">
+                  Hệ thống đọc cấu trúc file nhập liệu chuẩn của phần mềm kế toán chuyên
+                  dụng, nhận biết tên cột cần có trong biểu mẫu và tự gợi ý ghép cột từ
+                  file Excel để bạn kiểm tra, chỉnh sửa trước khi tải file.
                 </p>
-                {aiOnline === true && (
-                  <p className="flex items-center gap-1.5 text-xs text-violet-700">
-                    <span className="inline-block w-2 h-2 rounded-full bg-violet-500 animate-pulse" />
-                    AI đang hoạt động
-                  </p>
-                )}
-                {aiOnline === false && (
-                  <p className="flex items-center gap-1.5 text-xs text-amber-600">
-                    <span className="inline-block w-2 h-2 rounded-full bg-amber-400" />
-                    AI tạm thời không hoạt động — ghép cột thủ công
-                  </p>
-                )}
               </div>
-            )}
 
-            <div className="grid gap-5 xl:grid-cols-[minmax(320px,380px)_minmax(0,1fr)]">
-              <div className="space-y-4 xl:sticky xl:top-24 xl:self-start">
-                {workspacesEnabled && (
-                  <>
-                    <WorkspaceSelector
-                      workspaces={workspaces}
-                      selectedWorkspaceId={selectedWorkspaceId}
-                      selectedWorkspace={selectedWorkspace}
-                      loading={workspacesLoading}
-                      onSelect={handleWorkspaceChange}
-                      onCreate={() => setWorkspaceSetupOpen(true)}
-                      onManage={() => setMasterDataManagerOpen(true)}
-                    />
-                    {workspacesError && (
-                      <Alert variant="warning" className="text-left">
-                        {workspacesError}
-                      </Alert>
-                    )}
-                  </>
-                )}
-
-                <div
-                  className={`rounded-3xl border-2 border-dashed p-6 sm:p-8 text-center transition-all ${
-                    dragActive
-                      ? "border-primary-500 bg-primary-50/80"
-                      : selectedFile
-                        ? "border-primary-300 bg-white shadow-card"
-                        : "border-gray-200 bg-white/90 hover:border-primary-300 hover:shadow-card"
-                  }`}
-                  onDragEnter={handleDrag}
-                  onDragLeave={handleDrag}
-                  onDragOver={handleDrag}
-                  onDrop={handleDrop}
-                  onClick={() => !selectedFile && inputRef.current?.click()}
+              {serviceOnline === false && (
+                <Alert
+                  variant="warning"
+                  title="Bộ chuyển đổi chưa sẵn sàng"
+                  className="mb-5"
                 >
-                  <input
-                    ref={inputRef}
-                    type="file"
-                    accept=".xlsx,.xls,.pdf"
-                    className="hidden"
-                    onChange={handleFileInput}
-                  />
-                  <div className="flex flex-col items-center gap-4">
-                    <div className="w-16 h-16 rounded-2xl bg-gray-100 flex items-center justify-center text-gray-400">
-                      <UploadCloud size={30} />
-                    </div>
-                    {selectedFile ? (
-                      <>
-                        <div>
-                          <p className="text-sm font-semibold text-gray-800">
-                            {selectedFile.name}
-                          </p>
-                          <p className="text-xs text-gray-400 mt-1">
-                            {(selectedFile.size / 1024 / 1024).toFixed(2)} MB
-                          </p>
-                        </div>
-                        <button
-                          type="button"
-                          className="text-xs text-gray-500 hover:text-red-600 underline-offset-2 hover:underline"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            handleReset();
-                          }}
-                        >
-                          Chọn file khác
-                        </button>
-                      </>
-                    ) : (
-                      <>
-                        <div>
-                          <p className="text-sm font-semibold text-gray-800">
-                            Kéo thả file Excel thô vào đây
-                          </p>
-                          <p className="text-xs text-gray-400 mt-1">
-                            .xlsx hoặc .xls — tối đa 20 MB
-                          </p>
-                        </div>
-                        <button
-                          type="button"
-                          className="btn-primary w-full sm:w-auto"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            inputRef.current?.click();
-                          }}
-                        >
-                          <FileSpreadsheet size={16} />
-                          Chọn file Excel
-                        </button>
-                      </>
-                    )}
-                  </div>
-                </div>
+                  Chạy bộ chuyển đổi trước khi phân tích file. Nếu AI tạm thời không
+                  hoạt động, bạn vẫn có thể ghép cột thủ công.
+                </Alert>
+              )}
 
-                <div className="rounded-2xl border border-gray-200 bg-white p-4 shadow-card space-y-3">
-                  <label className="block text-sm font-medium text-gray-700">
-                    Template chuẩn từ phần mềm kế toán
-                    <select
-                      className="mt-1.5 w-full rounded-xl border border-gray-200 bg-white px-3 py-2.5 text-sm text-gray-800 shadow-sm focus:border-primary-500 focus:outline-none focus:ring-2 focus:ring-primary-500/20"
-                      value={targetTemplateId}
-                      onChange={(e) => {
-                        setTargetTemplateId(e.target.value);
-                        resetAnalysis();
-                        setConvStatus(STATUS.IDLE);
-                        setErrorMsg("");
-                      }}
-                    >
-                      {(templates.length
-                        ? templates
-                        : [
-                            {
-                              id: DEFAULT_TEMPLATE_ID,
-                              label: "BSN - Form import bán hàng",
-                            },
-                          ]
-                      ).map((template) => (
-                        <option key={template.id} value={template.id}>
-                          {template.label}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-
-                  <button
-                    type="button"
-                    className="btn-primary w-full py-3"
-                    onClick={handleAnalyze}
-                    disabled={
-                      !selectedFile ||
-                      serviceOnline === false ||
-                      convStatus === STATUS.ANALYZING ||
-                      !canConvert
-                    }
-                  >
-                    {convStatus === STATUS.ANALYZING && !analyzePayload ? (
-                      <Loader2 size={18} className="animate-spin" />
-                    ) : (
-                      <Wand2 size={18} />
-                    )}
-                    Phân tích & gợi ý ghép cột
-                  </button>
-
-                  {isLimitedPlan && !canConvert && (
-                    <Alert variant="warning" className="text-left">
-                      {noCreditMessage}
-                    </Alert>
+              {serviceOnline === true && (
+                <div className="flex items-center justify-center gap-4 mb-4 flex-wrap">
+                  <p className="flex items-center gap-1.5 text-xs text-emerald-700">
+                    <Server size={14} />
+                    Bộ chuyển đổi đang hoạt động
+                  </p>
+                  {aiOnline === true && (
+                    <p className="flex items-center gap-1.5 text-xs text-violet-700">
+                      <span className="inline-block w-2 h-2 rounded-full bg-violet-500 animate-pulse" />
+                      AI đang hoạt động
+                    </p>
                   )}
-
-                  {analyzePayload && (
-                    <div className="rounded-xl bg-gray-50 p-3 text-xs text-gray-600 space-y-1">
-                      <p>
-                        Trang tính:{" "}
-                        <span className="font-medium">
-                          {analyzePayload.detected?.sheet_name}
-                        </span>
-                      </p>
-                      <p>
-                        Dòng dữ liệu:{" "}
-                        <span className="font-medium">
-                          {analyzePayload.detected?.row_count}
-                        </span>
-                      </p>
-                      <p>
-                        Nguồn gợi ý:{" "}
-                        <span className="font-medium">
-                          {mappingSourceLabel}
-                          {mappingConfidenceLabel}
-                        </span>
-                      </p>
-                    </div>
-                  )}
-
-                  {analyzePayload && (
-                    <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-1">
-                      <button
-                        type="button"
-                        className="btn-secondary w-full justify-center py-3"
-                        onClick={handlePreview}
-                        disabled={convStatus === STATUS.DOWNLOADING}
-                      >
-                        <Wand2 size={16} />
-                        Xem trước
-                      </button>
-                      <button
-                        type="button"
-                        className="btn-secondary w-full justify-center py-3"
-                        onClick={handleReadinessCheck}
-                        disabled={
-                          convStatus === STATUS.DOWNLOADING ||
-                          convStatus === STATUS.ANALYZING ||
-                          readinessLoading
-                        }
-                      >
-                        {readinessLoading ? (
-                          <Loader2 size={16} className="animate-spin" />
-                        ) : (
-                          <CheckCircle size={16} />
-                        )}
-                        Kiểm tra lỗi
-                      </button>
-                      <button
-                        type="button"
-                        className="inline-flex w-full items-center justify-center gap-2 rounded-xl bg-emerald-600 px-5 py-3 text-sm font-semibold text-white shadow-sm transition-all duration-200 hover:bg-emerald-700 hover:shadow-md active:scale-[0.98] disabled:pointer-events-none disabled:opacity-50"
-                        onClick={handleDownload}
-                        disabled={
-                          convStatus === STATUS.DOWNLOADING ||
-                          convStatus === STATUS.ANALYZING ||
-                          downloadDisabledByReadiness ||
-                          (!canConvert && convStatus !== STATUS.SUCCESS)
-                        }
-                      >
-                        {convStatus === STATUS.DOWNLOADING ? (
-                          <Loader2 size={16} className="animate-spin" />
-                        ) : (
-                          <Download size={16} />
-                        )}
-                        {convStatus === STATUS.SUCCESS
-                          ? "Tải lại file kết quả"
-                          : "Tải file kết quả"}
-                      </button>
-                    </div>
+                  {aiOnline === false && (
+                    <p className="flex items-center gap-1.5 text-xs text-amber-600">
+                      <span className="inline-block w-2 h-2 rounded-full bg-amber-400" />
+                      AI tạm thời không hoạt động — ghép cột thủ công
+                    </p>
                   )}
                 </div>
+              )}
 
-                <p className="text-center text-xs text-gray-400">
-                  <Link to="/" className="text-primary-600 hover:underline">
-                    ← Về trang chủ
-                  </Link>
-                </p>
-              </div>
-
-              <div className="space-y-4 min-w-0">
-                {convStatus === STATUS.ERROR && errorMsg && (
-                  <Alert variant="error" className="text-left">
-                    {errorMsg}
-                  </Alert>
-                )}
-
-                {attentionItems.length > 0 && (
-                  <Alert
-                    variant="warning"
-                    title={`Cần kiểm tra · ${attentionItems.length} mục`}
-                    className="text-left"
-                  >
-                    <div className="space-y-3">
-                      {attentionItems.length > 0 && (
-                        <ul className="list-disc pl-4 space-y-2">
-                          {attentionItems.map((item) => (
-                            <li key={item.id}>
-                              <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:gap-3">
-                                <div>{item.message}</div>
-                                {item.targets.length > 0 && (
-                                  <div className="flex shrink-0 flex-wrap gap-2">
-                                    {item.targets.map((target) => (
-                                      <button
-                                        key={`${item.id}-${target}`}
-                                        type="button"
-                                        className="inline-flex items-center gap-2 rounded-full border border-amber-300 bg-white px-3.5 py-1.5 text-sm font-bold text-amber-800 shadow-sm hover:bg-amber-50"
-                                        onClick={() =>
-                                          focusTargetRow(target, item.message)
-                                        }
-                                      >
-                                        Đi tới
-                                        <MoveRight size={15} />
-                                      </button>
-                                    ))}
-                                  </div>
-                                )}
-                              </div>
-                            </li>
-                          ))}
-                        </ul>
+              <div className="grid gap-5 xl:grid-cols-[minmax(320px,380px)_minmax(0,1fr)]">
+                <div className="space-y-4 xl:sticky xl:top-24 xl:self-start">
+                  {workspacesEnabled && (
+                    <>
+                      <WorkspaceSelector
+                        workspaces={workspaces}
+                        selectedWorkspaceId={selectedWorkspaceId}
+                        selectedWorkspace={selectedWorkspace}
+                        loading={workspacesLoading}
+                        onSelect={handleWorkspaceChange}
+                        onCreate={() => setWorkspaceSetupOpen(true)}
+                        onManage={() => setMasterDataManagerOpen(true)}
+                      />
+                      {workspacesError && (
+                        <Alert variant="warning" className="text-left">
+                          {workspacesError}
+                        </Alert>
                       )}
-                    </div>
-                  </Alert>
-                )}
+                    </>
+                  )}
 
-                {!analyzePayload && convStatus !== STATUS.ANALYZING && (
-                  <div className="rounded-3xl border border-gray-200 bg-white p-8 sm:p-12 shadow-card text-center">
-                    <AlertTriangle size={36} className="mx-auto text-gray-300 mb-3" />
-                    <h2 className="text-base font-semibold text-gray-800">
-                      Chưa có gợi ý ghép cột
-                    </h2>
-                    <p className="text-sm text-gray-500 mt-1">
-                      Tải file lên rồi bấm phân tích để hệ thống đọc cấu trúc cột và gợi
-                      ý ghép cột.
-                    </p>
-                  </div>
-                )}
-
-                {convStatus === STATUS.ANALYZING && (
-                  <div className="rounded-3xl border border-primary-100 bg-white p-8 sm:p-12 shadow-card flex flex-col items-center gap-4">
-                    <Loader2 size={40} className="text-primary-500 animate-spin" />
-                    <p className="text-sm font-semibold text-gray-800 text-center">
-                      Đang xử lý…
-                    </p>
-                    <p className="text-xs text-gray-400 text-center">
-                      File lớn có thể mất vài chục giây.
-                    </p>
-                  </div>
-                )}
-
-                {analyzePayload && convStatus !== STATUS.ANALYZING && (
-                  <div className="rounded-3xl border border-gray-200 bg-white shadow-card overflow-hidden">
-                    <div className="px-5 sm:px-6 py-5 border-b border-gray-100 flex flex-col lg:flex-row lg:items-start lg:justify-between gap-4">
-                      <div className="min-w-0">
-                        <h2 className="text-2xl font-black text-gray-900">
-                          Ghép cột Excel → Chuẩn định dạng kế toán
-                        </h2>
-                        <p className="mt-1 text-sm leading-relaxed text-gray-600">
-                          Với <strong>mỗi dòng cột theo chuẩn</strong>, bạn chỉ chọn{" "}
-                          <strong>1 trong 3 ô</strong>:{" "}
-                          <strong>Cột từ file Excel</strong>,{" "}
-                          <strong>Giá trị mặc định</strong> hoặc{" "}
-                          <strong>Công thức tự động</strong>. Sau khi đã chọn 1 cách,
-                          bạn có thể <strong>để trống 2 ô còn lại</strong>. Ví dụ: nếu
-                          đã chọn cột từ Excel thì không cần nhập giá trị mặc định hay
-                          công thức cho cùng dòng đó.
-                        </p>
+                  <div
+                    className={`rounded-3xl border-2 border-dashed p-6 sm:p-8 text-center transition-all ${
+                      dragActive
+                        ? "border-primary-500 bg-primary-50/80"
+                        : selectedFile
+                          ? "border-primary-300 bg-white shadow-card"
+                          : "border-gray-200 bg-white/90 hover:border-primary-300 hover:shadow-card"
+                    }`}
+                    onDragEnter={handleDrag}
+                    onDragLeave={handleDrag}
+                    onDragOver={handleDrag}
+                    onDrop={handleDrop}
+                    onClick={() => !selectedFile && inputRef.current?.click()}
+                  >
+                    <input
+                      ref={inputRef}
+                      type="file"
+                      accept=".xlsx,.xls,.pdf"
+                      className="hidden"
+                      onChange={handleFileInput}
+                    />
+                    <div className="flex flex-col items-center gap-4">
+                      <div className="w-16 h-16 rounded-2xl bg-gray-100 flex items-center justify-center text-gray-400">
+                        <UploadCloud size={30} />
                       </div>
-                    </div>
-
-                    {keyMappingValues.length > 0 && (
-                      <div className="border-b border-blue-100 bg-blue-50/60 px-5 py-4 sm:px-6">
-                        <div className="mb-3 flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
+                      {selectedFile ? (
+                        <>
                           <div>
-                            <p className="text-lg font-bold text-blue-950">
-                              Tự động ghép cột quan trọng
+                            <p className="text-sm font-semibold text-gray-800">
+                              {selectedFile.name}
                             </p>
-                            <p className="text-sm text-blue-700">
-                              {keyMappingOkCount}/{keyMappingValues.length} trường quan
-                              trọng đã được thiết lập.
+                            <p className="text-xs text-gray-400 mt-1">
+                              {(selectedFile.size / 1024 / 1024).toFixed(2)} MB
                             </p>
                           </div>
-                          <span className="inline-flex w-fit rounded-full bg-white px-3.5 py-1.5 text-sm font-semibold text-blue-700 ring-1 ring-blue-100">
+                          <button
+                            type="button"
+                            className="text-xs text-gray-500 hover:text-red-600 underline-offset-2 hover:underline"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleReset();
+                            }}
+                          >
+                            Chọn file khác
+                          </button>
+                        </>
+                      ) : (
+                        <>
+                          <div>
+                            <p className="text-sm font-semibold text-gray-800">
+                              Kéo thả file Excel thô vào đây
+                            </p>
+                            <p className="text-xs text-gray-400 mt-1">
+                              .xlsx hoặc .xls — tối đa 20 MB
+                            </p>
+                          </div>
+                          <button
+                            type="button"
+                            className="btn-primary w-full sm:w-auto"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              inputRef.current?.click();
+                            }}
+                          >
+                            <FileSpreadsheet size={16} />
+                            Chọn file Excel
+                          </button>
+                        </>
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="rounded-2xl border border-gray-200 bg-white p-4 shadow-card space-y-3">
+                    <label className="block text-sm font-medium text-gray-700">
+                      Template chuẩn từ phần mềm kế toán
+                      <select
+                        className="mt-1.5 w-full rounded-xl border border-gray-200 bg-white px-3 py-2.5 text-sm text-gray-800 shadow-sm focus:border-primary-500 focus:outline-none focus:ring-2 focus:ring-primary-500/20"
+                        value={targetTemplateId}
+                        onChange={(e) => {
+                          setTargetTemplateId(e.target.value);
+                          resetAnalysis();
+                          setConvStatus(STATUS.IDLE);
+                          setErrorMsg("");
+                        }}
+                      >
+                        {(templates.length
+                          ? templates
+                          : [
+                              {
+                                id: DEFAULT_TEMPLATE_ID,
+                                label: "BSN - Form import bán hàng",
+                              },
+                            ]
+                        ).map((template) => (
+                          <option key={template.id} value={template.id}>
+                            {template.label}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+
+                    <button
+                      type="button"
+                      className="btn-primary w-full py-3"
+                      onClick={handleAnalyze}
+                      disabled={
+                        !selectedFile ||
+                        serviceOnline === false ||
+                        convStatus === STATUS.ANALYZING ||
+                        !canConvert
+                      }
+                    >
+                      {convStatus === STATUS.ANALYZING && !analyzePayload ? (
+                        <Loader2 size={18} className="animate-spin" />
+                      ) : (
+                        <Wand2 size={18} />
+                      )}
+                      Phân tích & gợi ý ghép cột
+                    </button>
+
+                    {isLimitedPlan && !canConvert && (
+                      <Alert variant="warning" className="text-left">
+                        {noCreditMessage}
+                      </Alert>
+                    )}
+
+                    {analyzePayload && (
+                      <div className="rounded-xl bg-gray-50 p-3 text-xs text-gray-600 space-y-1">
+                        <p>
+                          Trang tính:{" "}
+                          <span className="font-medium">
+                            {analyzePayload.detected?.sheet_name}
+                          </span>
+                        </p>
+                        <p>
+                          Dòng dữ liệu:{" "}
+                          <span className="font-medium">
+                            {analyzePayload.detected?.row_count}
+                          </span>
+                        </p>
+                        <p>
+                          Nguồn gợi ý:{" "}
+                          <span className="font-medium">
                             {mappingSourceLabel}
                             {mappingConfidenceLabel}
                           </span>
-                        </div>
-                        <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-2">
-                          {keyMappingValues.map((item) => (
-                            <div
-                              key={item.header}
-                              className={`rounded-xl border px-3 py-2 ${
-                                item.ok
-                                  ? "border-emerald-100 bg-white"
-                                  : "border-amber-200 bg-amber-50"
-                              }`}
-                            >
-                              <div className="text-[11px] uppercase tracking-wide text-gray-500">
-                                {item.header}
-                              </div>
-                              <div
-                                className={`mt-1 truncate text-sm font-semibold ${
-                                  item.ok ? "text-gray-900" : "text-amber-700"
-                                }`}
-                                title={item.value}
-                              >
-                                {item.value}
-                              </div>
-                            </div>
-                          ))}
-                        </div>
+                        </p>
                       </div>
                     )}
 
-                    {(readinessReport || readinessLoading) && (
-                      <div className="space-y-3 border-b border-gray-100 bg-white px-5 py-4 sm:px-6">
-                        <ValidationReadinessCard
-                          report={readinessReport}
-                          loading={readinessLoading}
-                          acknowledgeWarnings={acknowledgeWarnings}
-                          onAcknowledgeWarningsChange={setAcknowledgeWarnings}
-                        />
-                        <ValidationIssueTable issues={readinessReport?.issues || []} />
-                      </div>
-                    )}
-
-                    {masterDataState?.resolutions?.length > 0 && (
-                      <div className="border-b border-gray-100 bg-gray-50/70 px-5 py-4 sm:px-6">
-                        <MasterDataResolutionTable
-                          masterData={masterDataState}
-                          onConfirmAlias={handleConfirmMasterDataAlias}
-                          onSearchCandidates={(type, query) =>
-                            searchCatalog(selectedWorkspaceId, type, query)
+                    {analyzePayload && (
+                      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-1">
+                        <button
+                          type="button"
+                          className="btn-secondary w-full justify-center py-3"
+                          onClick={handlePreview}
+                          disabled={convStatus === STATUS.DOWNLOADING}
+                        >
+                          <Wand2 size={16} />
+                          Xem trước
+                        </button>
+                        <button
+                          type="button"
+                          className="btn-secondary w-full justify-center py-3"
+                          onClick={handleReadinessCheck}
+                          disabled={
+                            convStatus === STATUS.DOWNLOADING ||
+                            convStatus === STATUS.ANALYZING ||
+                            readinessLoading
                           }
-                        />
+                        >
+                          {readinessLoading ? (
+                            <Loader2 size={16} className="animate-spin" />
+                          ) : (
+                            <CheckCircle size={16} />
+                          )}
+                          Kiểm tra lỗi
+                        </button>
+                        <button
+                          type="button"
+                          className="inline-flex w-full items-center justify-center gap-2 rounded-xl bg-emerald-600 px-5 py-3 text-sm font-semibold text-white shadow-sm transition-all duration-200 hover:bg-emerald-700 hover:shadow-md active:scale-[0.98] disabled:pointer-events-none disabled:opacity-50"
+                          onClick={handleDownload}
+                          disabled={
+                            convStatus === STATUS.DOWNLOADING ||
+                            convStatus === STATUS.ANALYZING ||
+                            downloadDisabledByReadiness ||
+                            (!canConvert && convStatus !== STATUS.SUCCESS)
+                          }
+                        >
+                          {convStatus === STATUS.DOWNLOADING ? (
+                            <Loader2 size={16} className="animate-spin" />
+                          ) : (
+                            <Download size={16} />
+                          )}
+                          {convStatus === STATUS.SUCCESS
+                            ? "Tải lại file kết quả"
+                            : "Tải file kết quả"}
+                        </button>
                       </div>
-                    )}
-
-                    <div ref={mappingTableRef} className="overflow-auto max-h-[620px]">
-                      <table className="min-w-[1180px] text-sm">
-                        <thead className="sticky top-0 z-10 bg-gray-50 text-xs text-gray-500 uppercase">
-                          <tr>
-                            <th className="px-4 py-3 text-left w-[24%]">
-                              Cột theo định dạng chuẩn
-                            </th>
-                            <th className="px-4 py-3 text-left w-[24%]">
-                              Cột từ file Excel
-                              <ColumnHelp text="Chọn cột dữ liệu tương ứng từ file Excel của bạn." />
-                            </th>
-                            <th className="px-4 py-3 text-left w-[20%]">
-                              Giá trị mặc định
-                              <ColumnHelp text="Dùng khi bạn muốn điền sẵn một giá trị cố định cho mọi dòng của cột này." />
-                            </th>
-                            <th className="px-4 py-3 text-left w-[32%]">
-                              Công thức tự động
-                              <ColumnHelp
-                                text={
-                                  "Dùng để tự tạo giá trị theo mẫu.\nBạn có thể gõ chữ thường và chèn dữ liệu bằng cú pháp ${Tên cột}.\n\nVí dụ:\n- XK_${Số chứng từ (*)}\n- ${Mã khách hàng}_${Ngày chứng từ (*)}\n\nNếu không cần công thức, bạn có thể để trống ô này."
-                                }
-                              />
-                            </th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {targetHeaders.map((target) => {
-                            const matchedRaw = targetMapping[target] || "";
-                            const isHighlighted = focusedTarget === target;
-                            return (
-                              <tr
-                                key={target}
-                                ref={(node) => {
-                                  if (node) targetRowRefs.current[target] = node;
-                                  else delete targetRowRefs.current[target];
-                                }}
-                                className={`border-t border-gray-100 align-top transition-colors ${
-                                  isHighlighted ? "bg-amber-50/80" : "bg-white"
-                                }`}
-                              >
-                                <td className="px-4 py-3 font-semibold text-gray-800">
-                                  {target}
-                                </td>
-                                <td className="px-4 py-3">
-                                  <select
-                                    ref={(node) => {
-                                      if (node)
-                                        targetFieldRefs.current.raw[target] = node;
-                                      else delete targetFieldRefs.current.raw[target];
-                                    }}
-                                    className="w-full min-w-[190px] rounded-xl border border-gray-200 bg-white px-3 py-2.5 text-sm text-gray-800 shadow-sm focus:border-primary-500 focus:outline-none focus:ring-2 focus:ring-primary-500/20"
-                                    value={matchedRaw}
-                                    onChange={(e) =>
-                                      updateTargetMapping(target, e.target.value)
-                                    }
-                                  >
-                                    <option value="">— Không lấy từ Excel —</option>
-                                    {rawHeaders.map((rawHeader) => (
-                                      <option key={rawHeader} value={rawHeader}>
-                                        {rawHeader}
-                                      </option>
-                                    ))}
-                                  </select>
-                                </td>
-                                <td className="px-4 py-3">
-                                  <input
-                                    ref={(node) => {
-                                      if (node)
-                                        targetFieldRefs.current.default[target] = node;
-                                      else
-                                        delete targetFieldRefs.current.default[target];
-                                    }}
-                                    type="text"
-                                    className="w-full min-w-[160px] rounded-xl border border-gray-200 bg-white px-3 py-2.5 text-sm text-gray-800 shadow-sm focus:border-primary-500 focus:outline-none focus:ring-2 focus:ring-primary-500/20"
-                                    placeholder="Giá trị mặc định"
-                                    value={defaults[target] ?? ""}
-                                    onChange={(e) =>
-                                      updateDefault(target, e.target.value)
-                                    }
-                                  />
-                                </td>
-                                <td className="px-4 py-3">
-                                  <input
-                                    ref={(node) => {
-                                      if (node)
-                                        targetFieldRefs.current.formula[target] = node;
-                                      else
-                                        delete targetFieldRefs.current.formula[target];
-                                    }}
-                                    type="text"
-                                    className="w-full min-w-[320px] rounded-xl border border-gray-200 bg-white px-3 py-2.5 text-sm text-gray-800 shadow-sm focus:border-primary-500 focus:outline-none focus:ring-2 focus:ring-primary-500/20"
-                                    placeholder="VD: XK_${Số chứng từ (*)}"
-                                    value={formulas[target] ?? ""}
-                                    onChange={(e) =>
-                                      updateFormula(target, e.target.value)
-                                    }
-                                  />
-                                </td>
-                              </tr>
-                            );
-                          })}
-                        </tbody>
-                      </table>
-                    </div>
-
-                    {convStatus === STATUS.PREVIEW && previewRows.length > 0 && (
-                      <div className="border-t border-gray-100 bg-white px-5 py-4 sm:px-6">
-                        <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-                          <div>
-                            <h3 className="text-lg font-bold text-gray-900">
-                              Xem trước dữ liệu đầu ra
-                            </h3>
-                            <p className="text-sm text-gray-500">
-                              Bạn có thể chỉnh sửa trực tiếp trước khi tải file.
-                            </p>
-                          </div>
-                          <div className="flex flex-col xs:flex-row gap-2">
-                            <button
-                              type="button"
-                              className="btn-secondary justify-center"
-                              onClick={handlePreview}
-                              disabled={convStatus === STATUS.DOWNLOADING}
-                            >
-                              <Wand2 size={16} />
-                              Làm mới xem trước
-                            </button>
-                            <button
-                              type="button"
-                              className="btn-secondary justify-center"
-                              onClick={handleReadinessCheck}
-                              disabled={
-                                convStatus === STATUS.DOWNLOADING || readinessLoading
-                              }
-                            >
-                              {readinessLoading ? (
-                                <Loader2 size={16} className="animate-spin" />
-                              ) : (
-                                <CheckCircle size={16} />
-                              )}
-                              Kiểm tra lỗi
-                            </button>
-                            <button
-                              type="button"
-                              className="inline-flex items-center justify-center gap-2 rounded-xl bg-emerald-600 px-5 py-2.5 text-sm font-semibold text-white shadow-sm transition-all duration-200 hover:bg-emerald-700 hover:shadow-md active:scale-[0.98] disabled:pointer-events-none disabled:opacity-50"
-                              onClick={handleDownload}
-                              disabled={
-                                convStatus === STATUS.DOWNLOADING ||
-                                downloadDisabledByReadiness
-                              }
-                            >
-                              {convStatus === STATUS.DOWNLOADING ? (
-                                <Loader2 size={16} className="animate-spin" />
-                              ) : (
-                                <Download size={16} />
-                              )}
-                              Tải file kết quả
-                            </button>
-                          </div>
-                        </div>
-
-                        <div className="rounded-2xl border border-gray-200 overflow-hidden shadow-sm">
-                          <PreviewTable
-                            headers={previewHeaders}
-                            rows={previewRows}
-                            onCellChange={handlePreviewCellChange}
-                            onDeleteRow={handlePreviewRowDelete}
-                          />
-                        </div>
-                      </div>
-                    )}
-
-                    {convStatus === STATUS.SUCCESS && (
-                      <Alert
-                        variant="success"
-                        title="Đã xuất file kết quả"
-                        className="rounded-none border-0 border-t border-emerald-100"
-                      >
-                        Thiết lập ghép cột đã được lưu. Nếu chưa lưu được file (lỡ bấm
-                        hủy hộp thoại lưu), bạn có thể bấm{" "}
-                        <strong>Tải lại file kết quả</strong> để tải lại mà không tốn
-                        thêm lượt.
-                      </Alert>
                     )}
                   </div>
-                )}
+
+                  <p className="text-center text-xs text-gray-400">
+                    <Link to="/" className="text-primary-600 hover:underline">
+                      ← Về trang chủ
+                    </Link>
+                  </p>
+                </div>
+
+                <div className="space-y-4 min-w-0">
+                  {convStatus === STATUS.ERROR && errorMsg && (
+                    <Alert variant="error" className="text-left">
+                      {errorMsg}
+                    </Alert>
+                  )}
+
+                  {attentionItems.length > 0 && (
+                    <Alert
+                      variant="warning"
+                      title={`Cần kiểm tra · ${attentionItems.length} mục`}
+                      className="text-left"
+                    >
+                      <div className="space-y-3">
+                        {attentionItems.length > 0 && (
+                          <ul className="list-disc pl-4 space-y-2">
+                            {attentionItems.map((item) => (
+                              <li key={item.id}>
+                                <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:gap-3">
+                                  <div>{item.message}</div>
+                                  {item.targets.length > 0 && (
+                                    <div className="flex shrink-0 flex-wrap gap-2">
+                                      {item.targets.map((target) => (
+                                        <button
+                                          key={`${item.id}-${target}`}
+                                          type="button"
+                                          className="inline-flex items-center gap-2 rounded-full border border-amber-300 bg-white px-3.5 py-1.5 text-sm font-bold text-amber-800 shadow-sm hover:bg-amber-50"
+                                          onClick={() =>
+                                            focusTargetRow(target, item.message)
+                                          }
+                                        >
+                                          Đi tới
+                                          <MoveRight size={15} />
+                                        </button>
+                                      ))}
+                                    </div>
+                                  )}
+                                </div>
+                              </li>
+                            ))}
+                          </ul>
+                        )}
+                      </div>
+                    </Alert>
+                  )}
+
+                  {!analyzePayload && convStatus !== STATUS.ANALYZING && (
+                    <div className="rounded-3xl border border-gray-200 bg-white p-8 sm:p-12 shadow-card text-center">
+                      <AlertTriangle size={36} className="mx-auto text-gray-300 mb-3" />
+                      <h2 className="text-base font-semibold text-gray-800">
+                        Chưa có gợi ý ghép cột
+                      </h2>
+                      <p className="text-sm text-gray-500 mt-1">
+                        Tải file lên rồi bấm phân tích để hệ thống đọc cấu trúc cột và
+                        gợi ý ghép cột.
+                      </p>
+                    </div>
+                  )}
+
+                  {convStatus === STATUS.ANALYZING && (
+                    <div className="rounded-3xl border border-primary-100 bg-white p-8 sm:p-12 shadow-card flex flex-col items-center gap-4">
+                      <Loader2 size={40} className="text-primary-500 animate-spin" />
+                      <p className="text-sm font-semibold text-gray-800 text-center">
+                        Đang xử lý…
+                      </p>
+                      <p className="text-xs text-gray-400 text-center">
+                        File lớn có thể mất vài chục giây.
+                      </p>
+                    </div>
+                  )}
+
+                  {analyzePayload && convStatus !== STATUS.ANALYZING && (
+                    <div className="rounded-3xl border border-gray-200 bg-white shadow-card overflow-hidden">
+                      <div className="px-5 sm:px-6 py-5 border-b border-gray-100 flex flex-col lg:flex-row lg:items-start lg:justify-between gap-4">
+                        <div className="min-w-0">
+                          <h2 className="text-2xl font-black text-gray-900">
+                            Ghép cột Excel → Chuẩn định dạng kế toán
+                          </h2>
+                          <p className="mt-1 text-sm leading-relaxed text-gray-600">
+                            Với <strong>mỗi dòng cột theo chuẩn</strong>, bạn chỉ chọn{" "}
+                            <strong>1 trong 3 ô</strong>:{" "}
+                            <strong>Cột từ file Excel</strong>,{" "}
+                            <strong>Giá trị mặc định</strong> hoặc{" "}
+                            <strong>Công thức tự động</strong>. Sau khi đã chọn 1 cách,
+                            bạn có thể <strong>để trống 2 ô còn lại</strong>. Ví dụ: nếu
+                            đã chọn cột từ Excel thì không cần nhập giá trị mặc định hay
+                            công thức cho cùng dòng đó.
+                          </p>
+                        </div>
+                      </div>
+
+                      {keyMappingValues.length > 0 && (
+                        <div className="border-b border-blue-100 bg-blue-50/60 px-5 py-4 sm:px-6">
+                          <div className="mb-3 flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
+                            <div>
+                              <p className="text-lg font-bold text-blue-950">
+                                Tự động ghép cột quan trọng
+                              </p>
+                              <p className="text-sm text-blue-700">
+                                {keyMappingOkCount}/{keyMappingValues.length} trường
+                                quan trọng đã được thiết lập.
+                              </p>
+                            </div>
+                            <span className="inline-flex w-fit rounded-full bg-white px-3.5 py-1.5 text-sm font-semibold text-blue-700 ring-1 ring-blue-100">
+                              {mappingSourceLabel}
+                              {mappingConfidenceLabel}
+                            </span>
+                          </div>
+                          <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-2">
+                            {keyMappingValues.map((item) => (
+                              <div
+                                key={item.header}
+                                className={`rounded-xl border px-3 py-2 ${
+                                  item.ok
+                                    ? "border-emerald-100 bg-white"
+                                    : "border-amber-200 bg-amber-50"
+                                }`}
+                              >
+                                <div className="text-[11px] uppercase tracking-wide text-gray-500">
+                                  {item.header}
+                                </div>
+                                <div
+                                  className={`mt-1 truncate text-sm font-semibold ${
+                                    item.ok ? "text-gray-900" : "text-amber-700"
+                                  }`}
+                                  title={item.value}
+                                >
+                                  {item.value}
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+
+                      {(readinessReport || readinessLoading) && (
+                        <div className="space-y-3 border-b border-gray-100 bg-white px-5 py-4 sm:px-6">
+                          <ValidationReadinessCard
+                            report={readinessReport}
+                            loading={readinessLoading}
+                            acknowledgeWarnings={acknowledgeWarnings}
+                            onAcknowledgeWarningsChange={setAcknowledgeWarnings}
+                          />
+                          <ValidationIssueTable
+                            issues={readinessReport?.issues || []}
+                          />
+                        </div>
+                      )}
+
+                      {masterDataState?.resolutions?.length > 0 && (
+                        <div className="border-b border-gray-100 bg-gray-50/70 px-5 py-4 sm:px-6">
+                          <MasterDataResolutionTable
+                            masterData={masterDataState}
+                            onConfirmAlias={handleConfirmMasterDataAlias}
+                            onSearchCandidates={(type, query) =>
+                              searchCatalog(selectedWorkspaceId, type, query)
+                            }
+                          />
+                        </div>
+                      )}
+
+                      <div
+                        ref={mappingTableRef}
+                        className="overflow-auto max-h-[620px]"
+                      >
+                        <table className="min-w-[1180px] text-sm">
+                          <thead className="sticky top-0 z-10 bg-gray-50 text-xs text-gray-500 uppercase">
+                            <tr>
+                              <th className="px-4 py-3 text-left w-[24%]">
+                                Cột theo định dạng chuẩn
+                              </th>
+                              <th className="px-4 py-3 text-left w-[24%]">
+                                Cột từ file Excel
+                                <ColumnHelp text="Chọn cột dữ liệu tương ứng từ file Excel của bạn." />
+                              </th>
+                              <th className="px-4 py-3 text-left w-[20%]">
+                                Giá trị mặc định
+                                <ColumnHelp text="Dùng khi bạn muốn điền sẵn một giá trị cố định cho mọi dòng của cột này." />
+                              </th>
+                              <th className="px-4 py-3 text-left w-[32%]">
+                                Công thức tự động
+                                <ColumnHelp
+                                  text={
+                                    "Dùng để tự tạo giá trị theo mẫu.\nBạn có thể gõ chữ thường và chèn dữ liệu bằng cú pháp ${Tên cột}.\n\nVí dụ:\n- XK_${Số chứng từ (*)}\n- ${Mã khách hàng}_${Ngày chứng từ (*)}\n\nNếu không cần công thức, bạn có thể để trống ô này."
+                                  }
+                                />
+                              </th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {targetHeaders.map((target) => {
+                              const matchedRaw = targetMapping[target] || "";
+                              const isHighlighted = focusedTarget === target;
+                              return (
+                                <tr
+                                  key={target}
+                                  ref={(node) => {
+                                    if (node) targetRowRefs.current[target] = node;
+                                    else delete targetRowRefs.current[target];
+                                  }}
+                                  className={`border-t border-gray-100 align-top transition-colors ${
+                                    isHighlighted ? "bg-amber-50/80" : "bg-white"
+                                  }`}
+                                >
+                                  <td className="px-4 py-3 font-semibold text-gray-800">
+                                    {target}
+                                  </td>
+                                  <td className="px-4 py-3">
+                                    <select
+                                      ref={(node) => {
+                                        if (node)
+                                          targetFieldRefs.current.raw[target] = node;
+                                        else delete targetFieldRefs.current.raw[target];
+                                      }}
+                                      className="w-full min-w-[190px] rounded-xl border border-gray-200 bg-white px-3 py-2.5 text-sm text-gray-800 shadow-sm focus:border-primary-500 focus:outline-none focus:ring-2 focus:ring-primary-500/20"
+                                      value={matchedRaw}
+                                      onChange={(e) =>
+                                        updateTargetMapping(target, e.target.value)
+                                      }
+                                    >
+                                      <option value="">— Không lấy từ Excel —</option>
+                                      {rawHeaders.map((rawHeader) => (
+                                        <option key={rawHeader} value={rawHeader}>
+                                          {rawHeader}
+                                        </option>
+                                      ))}
+                                    </select>
+                                  </td>
+                                  <td className="px-4 py-3">
+                                    <input
+                                      ref={(node) => {
+                                        if (node)
+                                          targetFieldRefs.current.default[target] =
+                                            node;
+                                        else
+                                          delete targetFieldRefs.current.default[
+                                            target
+                                          ];
+                                      }}
+                                      type="text"
+                                      className="w-full min-w-[160px] rounded-xl border border-gray-200 bg-white px-3 py-2.5 text-sm text-gray-800 shadow-sm focus:border-primary-500 focus:outline-none focus:ring-2 focus:ring-primary-500/20"
+                                      placeholder="Giá trị mặc định"
+                                      value={defaults[target] ?? ""}
+                                      onChange={(e) =>
+                                        updateDefault(target, e.target.value)
+                                      }
+                                    />
+                                  </td>
+                                  <td className="px-4 py-3">
+                                    <input
+                                      ref={(node) => {
+                                        if (node)
+                                          targetFieldRefs.current.formula[target] =
+                                            node;
+                                        else
+                                          delete targetFieldRefs.current.formula[
+                                            target
+                                          ];
+                                      }}
+                                      type="text"
+                                      className="w-full min-w-[320px] rounded-xl border border-gray-200 bg-white px-3 py-2.5 text-sm text-gray-800 shadow-sm focus:border-primary-500 focus:outline-none focus:ring-2 focus:ring-primary-500/20"
+                                      placeholder="VD: XK_${Số chứng từ (*)}"
+                                      value={formulas[target] ?? ""}
+                                      onChange={(e) =>
+                                        updateFormula(target, e.target.value)
+                                      }
+                                    />
+                                  </td>
+                                </tr>
+                              );
+                            })}
+                          </tbody>
+                        </table>
+                      </div>
+
+                      {convStatus === STATUS.PREVIEW && previewRows.length > 0 && (
+                        <div className="border-t border-gray-100 bg-white px-5 py-4 sm:px-6">
+                          <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                            <div>
+                              <h3 className="text-lg font-bold text-gray-900">
+                                Xem trước dữ liệu đầu ra
+                              </h3>
+                              <p className="text-sm text-gray-500">
+                                Bạn có thể chỉnh sửa trực tiếp trước khi tải file.
+                              </p>
+                            </div>
+                            <div className="flex flex-col xs:flex-row gap-2">
+                              <button
+                                type="button"
+                                className="btn-secondary justify-center"
+                                onClick={handlePreview}
+                                disabled={convStatus === STATUS.DOWNLOADING}
+                              >
+                                <Wand2 size={16} />
+                                Làm mới xem trước
+                              </button>
+                              <button
+                                type="button"
+                                className="btn-secondary justify-center"
+                                onClick={handleReadinessCheck}
+                                disabled={
+                                  convStatus === STATUS.DOWNLOADING || readinessLoading
+                                }
+                              >
+                                {readinessLoading ? (
+                                  <Loader2 size={16} className="animate-spin" />
+                                ) : (
+                                  <CheckCircle size={16} />
+                                )}
+                                Kiểm tra lỗi
+                              </button>
+                              <button
+                                type="button"
+                                className="inline-flex items-center justify-center gap-2 rounded-xl bg-emerald-600 px-5 py-2.5 text-sm font-semibold text-white shadow-sm transition-all duration-200 hover:bg-emerald-700 hover:shadow-md active:scale-[0.98] disabled:pointer-events-none disabled:opacity-50"
+                                onClick={handleDownload}
+                                disabled={
+                                  convStatus === STATUS.DOWNLOADING ||
+                                  downloadDisabledByReadiness
+                                }
+                              >
+                                {convStatus === STATUS.DOWNLOADING ? (
+                                  <Loader2 size={16} className="animate-spin" />
+                                ) : (
+                                  <Download size={16} />
+                                )}
+                                Tải file kết quả
+                              </button>
+                            </div>
+                          </div>
+
+                          <div className="rounded-2xl border border-gray-200 overflow-hidden shadow-sm">
+                            <PreviewTable
+                              headers={previewHeaders}
+                              rows={previewRows}
+                              onCellChange={handlePreviewCellChange}
+                              onDeleteRow={handlePreviewRowDelete}
+                            />
+                          </div>
+                        </div>
+                      )}
+
+                      {convStatus === STATUS.SUCCESS && (
+                        <Alert
+                          variant="success"
+                          title="Đã xuất file kết quả"
+                          className="rounded-none border-0 border-t border-emerald-100"
+                        >
+                          Thiết lập ghép cột đã được lưu. Nếu chưa lưu được file (lỡ bấm
+                          hủy hộp thoại lưu), bạn có thể bấm{" "}
+                          <strong>Tải lại file kết quả</strong> để tải lại mà không tốn
+                          thêm lượt.
+                        </Alert>
+                      )}
+                    </div>
+                  )}
+                </div>
               </div>
             </div>
-          </div>
-        </section>
+          </section>
+        )}
       </main>
 
       <Footer />

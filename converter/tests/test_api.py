@@ -100,6 +100,16 @@ def _write_duplicate_warning_workbook(path: Path) -> Path:
     return path
 
 
+def _write_repeated_item_workbook(path: Path) -> Path:
+    workbook = openpyxl.Workbook()
+    sheet = workbook.active
+    sheet.append(["Mã hóa đơn", "Thời gian", "Tên khách hàng", "Mã hàng", "Số lượng", "Đơn giá"])
+    sheet.append(["HD-MULTI-001", "2026-01-02", "Khách A", "SP-001", 1, 100000])
+    sheet.append(["HD-MULTI-001", "2026-01-02", "Khách A", "SP-001", 2, 90000])
+    workbook.save(path)
+    return path
+
+
 def _write_messy_sales_workbook(path: Path) -> Path:
     workbook = openpyxl.Workbook()
     sheet = workbook.active
@@ -278,6 +288,29 @@ def test_validate_endpoint_returns_calculation_warnings(tmp_path):
     assert warning["expected"] == 100
     assert warning["actual"] == 90
     assert warning["tolerance"] == 1
+
+
+def test_validate_endpoint_allows_same_item_on_distinct_invoice_lines(tmp_path):
+    input_path = _write_repeated_item_workbook(tmp_path / "repeated-item.xlsx")
+
+    with input_path.open("rb") as handle:
+        response = client.post(
+            "/api/v1/conversions/validate",
+            data={"conversion_type": "bsn_sales"},
+            files={
+                "file": (
+                    "repeated-item.xlsx",
+                    handle,
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                )
+            },
+        )
+
+    assert response.status_code == 200
+    assert not any(
+        warning["code"] == "duplicate_invoice_item"
+        for warning in response.json()["warnings"]
+    )
 
 
 def test_convert_endpoint_blocks_calculation_warnings_until_override(tmp_path):

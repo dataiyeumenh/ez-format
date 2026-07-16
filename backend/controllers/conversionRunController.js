@@ -1,5 +1,4 @@
 const ConversionRun = require("../models/ConversionRun");
-const User = require("../models/User");
 const mongoose = require("mongoose");
 const AccountingWorkspace = require("../models/AccountingWorkspace");
 const MasterDataSnapshot = require("../models/MasterDataSnapshot");
@@ -14,18 +13,9 @@ const {
   serializeConversionRun,
 } = require("../services/conversionRunService");
 const {
-  normalizeDailyFileCredit,
-  deductConversionCredit,
-} = require("../services/subscriptionService");
-
-// Trừ 1 lượt chuyển đổi của chủ run khi run hoàn tất (download thành công).
-async function deductCreditForCompletedRun(userId) {
-  const user = await User.findById(userId).populate("plan");
-  if (!user) return;
-  normalizeDailyFileCredit(user);
-  deductConversionCredit(user);
-  await user.save();
-}
+  deductCreditForCompletedRun,
+  hasConversionCredit,
+} = require("../services/conversionCreditService");
 
 // Quét các run "processing" quá 5 giờ -> chuyển sang "cancelled"
 // (user upload nhưng không tải xuống nên không bao giờ completed).
@@ -60,6 +50,12 @@ async function createConversionRun(req, res) {
     }
     if (!Number.isFinite(fileSizeBytes) || fileSizeBytes < 0) {
       return res.status(400).json({ success: false, message: "Kích thước file không hợp lệ" });
+    }
+    if (!hasConversionCredit(req.user)) {
+      return res.status(402).json({
+        success: false,
+        message: "Bạn đã hết lượt chuyển đổi. Vui lòng mua thêm lượt hoặc nâng cấp gói.",
+      });
     }
 
     let workspace = null;

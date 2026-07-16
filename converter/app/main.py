@@ -3,8 +3,11 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import threading
+import time
 import uuid
 import hmac
+import hashlib
 from pathlib import Path
 from typing import Annotated
 
@@ -14,7 +17,7 @@ try:
 except ImportError:
     pass  # python-dotenv not installed, rely on system env vars
 
-from fastapi import FastAPI, File, Form, Header, HTTPException, Request, UploadFile
+from fastapi import FastAPI, File, Form, Header, HTTPException, Query, Request, UploadFile
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
@@ -37,10 +40,37 @@ from app.misa_workflow import (
     templates_payload,
 )
 from app.master_data import parse_master_data_file
+from app.master_data_client import ConversionContextError
 from app.models import ExportRowsRequest, PreviewResponse, ValidationReport
+from app.reconstruction_store import ReconstructionStoreError
+from app.reconstruction_workflow import (
+    ReconstructionConflictError,
+    ReconstructionGateError,
+    analyze_reconstruction,
+    approve_reconstruction,
+    export_reconstruction,
+    get_reconstruction,
+    get_reconstruction_draft,
+    merge_reconstruction_drafts,
+    split_reconstruction_draft,
+    update_reconstruction_draft,
+    validate_reconstruction,
+)
 
 
 app = FastAPI(title="EzFormat Converter API")
+_RECONSTRUCTION_RATE_LOCK = threading.Lock()
+_RECONSTRUCTION_RATE_BUCKETS: dict[str, tuple[float, int]] = {}
+
+
+@app.middleware("http")
+async def attach_request_id(request: Request, call_next):
+    supplied = str(request.headers.get("x-request-id") or "").strip()
+    request_id = supplied[:128] if supplied else uuid.uuid4().hex
+    request.state.request_id = request_id
+    response = await call_next(request)
+    response.headers["X-Request-ID"] = request_id
+    return response
 
 
 def _sanitize_validation_payload(value):
@@ -82,6 +112,7 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["Content-Disposition", "X-Request-ID"],
 )
 
 TMP_ROOT = BACKEND_ROOT / ".tmp"
@@ -90,7 +121,7 @@ EXCEL_MEDIA_TYPE = "application/vnd.ms-excel"
 
 
 @app.get("/healthz")
-def healthz() -> dict[str, str]:
+def healthz() -> dict[str, object]:
     import os
     import urllib.request
 
@@ -118,7 +149,16 @@ def healthz() -> dict[str, str]:
         except Exception:
             ai_status = "offline"
 
-    return {"status": "ok", "ai": ai_status}
+    return {
+        "status": "ok",
+        "ai": ai_status,
+        "capabilities": {
+            "voucherReconstruction": os.getenv(
+                "VOUCHER_RECONSTRUCTION_ENABLED", "false"
+            ).lower()
+            == "true"
+        },
+    }
 
 
 @app.get("/api/v1/templates")
@@ -179,6 +219,246 @@ async def analyze_raw_upload(
             conversion_context_token=conversion_context_token,
         )
         return JSONResponse(jsonable_encoder(payload))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/v1/reconstructions/analyze")
+async def analyze_voucher_reconstruction(
+    file: Annotated[UploadFile, File()],
+    context_token: Annotated[str, Form()],
+    mode: Annotated[str, Form()] = "auto",
+    target_template_id: Annotated[str | None, Form()] = None,
+) -> JSONResponse:
+    try:
+        _check_reconstruction_rate_limit(
+            "analyze:" + hashlib.sha256(context_token.encode("utf-8")).hexdigest(),
+            limit=max(
+                1,
+                int(os.getenv("RECONSTRUCTION_ANALYZE_LIMIT_PER_15_MINUTES", "5")),
+            ),
+        )
+        content = await _read_limited_reconstruction_upload(file)
+        payload = await run_in_threadpool(
+            analyze_reconstruction,
+            filename=file.filename or "upload.xlsx",
+            content=content,
+            context_token=context_token,
+            mode=mode,
+            target_template_id=target_template_id,
+        )
+        return JSONResponse(jsonable_encoder(payload))
+    except ConversionContextError as exc:
+        raise HTTPException(status_code=exc.status_code or 401, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/v1/reconstructions/{reconstruction_id}")
+async def get_voucher_reconstruction(
+    reconstruction_id: str,
+    x_reconstruction_context: Annotated[str | None, Header()] = None,
+    page: Annotated[int, Query(ge=1)] = 1,
+    limit: Annotated[int, Query(ge=1, le=500)] = 100,
+) -> JSONResponse:
+    try:
+        payload = await run_in_threadpool(
+            get_reconstruction,
+            reconstruction_id,
+            context_token=x_reconstruction_context or "",
+            page=page,
+            limit=limit,
+        )
+        return JSONResponse(jsonable_encoder(payload))
+    except ConversionContextError as exc:
+        raise HTTPException(status_code=exc.status_code or 401, detail=str(exc)) from exc
+    except ReconstructionConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ReconstructionStoreError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.get("/api/v1/reconstructions/{reconstruction_id}/drafts/{draft_id}")
+async def get_voucher_reconstruction_draft(
+    reconstruction_id: str,
+    draft_id: str,
+    x_reconstruction_context: Annotated[str | None, Header()] = None,
+) -> JSONResponse:
+    try:
+        payload = await run_in_threadpool(
+            get_reconstruction_draft,
+            reconstruction_id,
+            draft_id,
+            context_token=x_reconstruction_context or "",
+        )
+        return JSONResponse(jsonable_encoder(payload))
+    except ConversionContextError as exc:
+        raise HTTPException(status_code=exc.status_code or 401, detail=str(exc)) from exc
+    except ReconstructionConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except (KeyError, ReconstructionStoreError) as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.patch("/api/v1/reconstructions/{reconstruction_id}/drafts/{draft_id}")
+async def patch_voucher_reconstruction_draft(
+    reconstruction_id: str,
+    draft_id: str,
+    body: dict,
+    x_reconstruction_context: Annotated[str | None, Header()] = None,
+) -> JSONResponse:
+    try:
+        payload = await run_in_threadpool(
+            update_reconstruction_draft,
+            reconstruction_id,
+            draft_id,
+            context_token=x_reconstruction_context or "",
+            expected_revision=int(body.get("expected_revision") or 0),
+            operations=body.get("operations") or [],
+        )
+        return JSONResponse(jsonable_encoder(payload))
+    except ConversionContextError as exc:
+        raise HTTPException(status_code=exc.status_code or 401, detail=str(exc)) from exc
+    except ReconstructionConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except (ReconstructionStoreError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/v1/reconstructions/{reconstruction_id}/split")
+async def split_voucher_reconstruction(
+    reconstruction_id: str,
+    body: dict,
+    x_reconstruction_context: Annotated[str | None, Header()] = None,
+) -> JSONResponse:
+    try:
+        payload = await run_in_threadpool(
+            split_reconstruction_draft,
+            reconstruction_id,
+            context_token=x_reconstruction_context or "",
+            draft_id=str(body.get("draft_id") or ""),
+            expected_revision=int(body.get("expected_revision") or 0),
+            source_rows=body.get("source_rows") or [],
+        )
+        return JSONResponse(jsonable_encoder(payload))
+    except ConversionContextError as exc:
+        raise HTTPException(status_code=exc.status_code or 401, detail=str(exc)) from exc
+    except ReconstructionConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except (ReconstructionStoreError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/v1/reconstructions/{reconstruction_id}/merge")
+async def merge_voucher_reconstruction(
+    reconstruction_id: str,
+    body: dict,
+    x_reconstruction_context: Annotated[str | None, Header()] = None,
+) -> JSONResponse:
+    try:
+        payload = await run_in_threadpool(
+            merge_reconstruction_drafts,
+            reconstruction_id,
+            context_token=x_reconstruction_context or "",
+            draft_ids=body.get("draft_ids") or [],
+            expected_revisions=body.get("expected_revisions") or {},
+        )
+        return JSONResponse(jsonable_encoder(payload))
+    except ConversionContextError as exc:
+        raise HTTPException(status_code=exc.status_code or 401, detail=str(exc)) from exc
+    except ReconstructionConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except (ReconstructionStoreError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/v1/reconstructions/{reconstruction_id}/validate")
+async def validate_voucher_reconstruction(
+    reconstruction_id: str,
+    x_reconstruction_context: Annotated[str | None, Header()] = None,
+) -> JSONResponse:
+    try:
+        payload = await run_in_threadpool(
+            validate_reconstruction,
+            reconstruction_id,
+            context_token=x_reconstruction_context or "",
+        )
+        return JSONResponse(jsonable_encoder(payload))
+    except ConversionContextError as exc:
+        raise HTTPException(status_code=exc.status_code or 401, detail=str(exc)) from exc
+    except ReconstructionConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ReconstructionStoreError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/v1/reconstructions/{reconstruction_id}/approve")
+async def approve_voucher_reconstruction(
+    reconstruction_id: str,
+    body: dict,
+    x_reconstruction_context: Annotated[str | None, Header()] = None,
+) -> JSONResponse:
+    try:
+        payload = await run_in_threadpool(
+            approve_reconstruction,
+            reconstruction_id,
+            context_token=x_reconstruction_context or "",
+            acknowledge_warnings=bool(body.get("acknowledge_warnings")),
+        )
+        return JSONResponse(jsonable_encoder(payload))
+    except ConversionContextError as exc:
+        raise HTTPException(status_code=exc.status_code or 401, detail=str(exc)) from exc
+    except ReconstructionConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ReconstructionGateError as exc:
+        return JSONResponse(status_code=422, content=jsonable_encoder(exc.validation))
+    except ReconstructionStoreError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/v1/reconstructions/{reconstruction_id}/export")
+async def export_voucher_reconstruction(
+    reconstruction_id: str,
+    body: dict,
+    x_reconstruction_context: Annotated[str | None, Header()] = None,
+    idempotency_key: Annotated[str | None, Header()] = None,
+) -> Response:
+    try:
+        _check_reconstruction_rate_limit(
+            f"export:{reconstruction_id}",
+            limit=max(
+                1,
+                int(os.getenv("RECONSTRUCTION_EXPORT_LIMIT_PER_15_MINUTES", "20")),
+            ),
+        )
+        content, filename, media_type = await run_in_threadpool(
+            export_reconstruction,
+            reconstruction_id,
+            context_token=x_reconstruction_context or "",
+            acknowledge_warnings=bool(body.get("acknowledge_warnings")),
+            idempotency_key=idempotency_key or "",
+        )
+        return Response(
+            content=content,
+            media_type=media_type,
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+    except ConversionContextError as exc:
+        raise HTTPException(status_code=exc.status_code or 401, detail=str(exc)) from exc
+    except ReconstructionConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ReconstructionGateError as exc:
+        return JSONResponse(status_code=422, content=jsonable_encoder(exc.validation))
+    except ReconstructionStoreError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -473,3 +753,53 @@ async def _save_upload(file: UploadFile, workdir: Path) -> Path:
 def _cleanup_tmp_root() -> None:
     if TMP_ROOT.exists() and not any(TMP_ROOT.iterdir()):
         TMP_ROOT.rmdir()
+
+
+async def _read_limited_reconstruction_upload(file: UploadFile) -> bytes:
+    max_bytes = int(os.getenv("RECONSTRUCTION_MAX_FILE_BYTES", str(30 * 1024 * 1024)))
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        chunk = await file.read(1024 * 1024)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > max_bytes:
+            raise HTTPException(
+                status_code=413,
+                detail=f"File vượt giới hạn {max_bytes} bytes",
+            )
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+def clear_reconstruction_rate_limits() -> None:
+    with _RECONSTRUCTION_RATE_LOCK:
+        _RECONSTRUCTION_RATE_BUCKETS.clear()
+
+
+def _check_reconstruction_rate_limit(
+    key: str,
+    *,
+    limit: int,
+    window_seconds: int = 15 * 60,
+) -> None:
+    now = time.monotonic()
+    with _RECONSTRUCTION_RATE_LOCK:
+        expired = [
+            bucket_key
+            for bucket_key, (expires_at, _) in _RECONSTRUCTION_RATE_BUCKETS.items()
+            if expires_at <= now
+        ]
+        for bucket_key in expired:
+            _RECONSTRUCTION_RATE_BUCKETS.pop(bucket_key, None)
+        expires_at, count = _RECONSTRUCTION_RATE_BUCKETS.get(
+            key,
+            (now + window_seconds, 0),
+        )
+        if count >= limit:
+            raise HTTPException(
+                status_code=429,
+                detail="Bạn đã gửi quá nhiều yêu cầu tái tạo. Vui lòng thử lại sau.",
+            )
+        _RECONSTRUCTION_RATE_BUCKETS[key] = (expires_at, count + 1)

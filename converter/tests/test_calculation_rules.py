@@ -174,6 +174,54 @@ def test_validate_warns_when_payable_does_not_match_invoice_amounts(tmp_path):
     assert warning.delta == -5
 
 
+def test_validate_does_not_calculate_line_amount_from_zero_placeholder_operands(tmp_path):
+    input_path = _write_sales_workbook(
+        tmp_path / "zero_placeholder.xlsx",
+        [
+            _base_row(
+                **{
+                    "Số lượng": 804,
+                    "Đơn giá": 0,
+                    "Thành tiền": 2_905_880,
+                    "Tổng tiền hàng": 2_905_880,
+                    "Tiền thuế": 0,
+                    "Khách cần trả": 2_905_880,
+                }
+            )
+        ],
+    )
+
+    report = validate_file(input_path, "bsn_sales")
+
+    assert not any(
+        warning.code == "calculation_line_amount_mismatch" for warning in report.warnings
+    )
+
+
+def test_validate_accepts_line_amount_explained_by_displayed_unit_price_rounding(tmp_path):
+    input_path = _write_sales_workbook(
+        tmp_path / "rounded_unit_price.xlsx",
+        [
+            _base_row(
+                **{
+                    "Số lượng": 1500,
+                    "Đơn giá": 213.33,
+                    "Thành tiền": 320_000,
+                    "Tổng tiền hàng": 320_000,
+                    "Tiền thuế": 0,
+                    "Khách cần trả": 320_000,
+                }
+            )
+        ],
+    )
+
+    report = validate_file(input_path, "bsn_sales")
+
+    assert not any(
+        warning.code == "calculation_line_amount_mismatch" for warning in report.warnings
+    )
+
+
 def test_convert_blocks_calculation_warnings_until_override_is_set(tmp_path):
     input_path = _write_sales_workbook(
         tmp_path / "bad_convert.xlsx",

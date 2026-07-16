@@ -21,6 +21,32 @@ _CONTEXT_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
 
 
 def verify_conversion_context_token(token: str) -> dict[str, Any]:
+    payload = _verify_signed_context_token(token)
+    if payload.get("purpose") not in {"misa_conversion", "misa_reconstruction"}:
+        raise ConversionContextError("Conversion context token sai mục đích")
+    if not payload.get("workspace_id") or not payload.get("snapshot_set_hash"):
+        raise ConversionContextError("Conversion context token thiếu phạm vi dữ liệu")
+    return payload
+
+
+def verify_reconstruction_context_token(
+    token: str,
+    *,
+    required_scope: str | None = None,
+) -> dict[str, Any]:
+    payload = _verify_signed_context_token(token)
+    if payload.get("purpose") != "misa_reconstruction":
+        raise ConversionContextError("Reconstruction context token sai mục đích")
+    if not payload.get("run_id") or not payload.get("user_id"):
+        raise ConversionContextError("Reconstruction context token thiếu run hoặc user")
+    if required_scope and required_scope not in (payload.get("scopes") or []):
+        raise ConversionContextError(
+            f"Reconstruction context thiếu quyền {required_scope}"
+        )
+    return payload
+
+
+def _verify_signed_context_token(token: str) -> dict[str, Any]:
     secret = os.getenv("CONVERSION_CONTEXT_SECRET") or os.getenv("JWT_SECRET")
     if not secret:
         raise ConversionContextError("CONVERSION_CONTEXT_SECRET chưa được cấu hình")
@@ -40,12 +66,8 @@ def verify_conversion_context_token(token: str) -> dict[str, Any]:
         raise ConversionContextError("Chữ ký conversion context không hợp lệ") from exc
     if not hmac.compare_digest(expected, actual):
         raise ConversionContextError("Chữ ký conversion context không hợp lệ")
-    if payload.get("purpose") != "misa_conversion":
-        raise ConversionContextError("Conversion context token sai mục đích")
     if int(payload.get("exp") or 0) <= int(time.time()):
         raise ConversionContextError("Conversion context token đã hết hạn")
-    if not payload.get("workspace_id") or not payload.get("snapshot_set_hash"):
-        raise ConversionContextError("Conversion context token thiếu phạm vi dữ liệu")
     return payload
 
 

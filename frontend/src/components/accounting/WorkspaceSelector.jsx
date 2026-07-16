@@ -25,6 +25,7 @@ export default function WorkspaceSelector({
         </button>
       </div>
       <select
+        aria-label="Chọn doanh nghiệp đang xử lý"
         value={selectedWorkspaceId}
         disabled={loading}
         onChange={(event) => onSelect(event.target.value)}

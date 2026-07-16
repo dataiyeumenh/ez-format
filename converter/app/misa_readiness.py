@@ -57,9 +57,20 @@ DOCUMENT_FINGERPRINT_HEADERS = (
     "ten_khach_hang",
     "ma_nha_cung_cap",
     "ten_nha_cung_cap",
-    "thanh_tien",
-    "tien_thue_gtgt",
+    "loai_tien",
+    "ty_gia",
+    "tong_tien_hang",
+    "tong_tien_thanh_toan",
 )
+VAT_RATE_HEADER_HINTS = ("percent_thue_gtgt", "thue_suat")
+ZERO_VAT_MARKERS = {
+    "kct",
+    "kkknt",
+    "khong chiu thue",
+    "không chịu thuế",
+    "khong ke khai nop thue",
+    "không kê khai nộp thuế",
+}
 
 
 def build_readiness_report(
@@ -211,7 +222,11 @@ def _check_parseable_values(
                         source_url=MISA_IMPORT_ERROR_SOURCE_URL,
                     )
                 )
-            if _is_number_header(normalized) and parse_number(value) is None:
+            if (
+                _is_number_header(normalized)
+                and parse_number(value) is None
+                and not _valid_vat_marker(normalized, value)
+            ):
                 issues.append(
                     _issue(
                         severity="blocker",
@@ -259,7 +274,11 @@ def _check_source_parseable_values(
                             source_url=MISA_IMPORT_ERROR_SOURCE_URL,
                         )
                     )
-                if _is_number_header(normalized) and parse_number(value) is None:
+                if (
+                    _is_number_header(normalized)
+                    and parse_number(value) is None
+                    and not _valid_vat_marker(normalized, value)
+                ):
                     issues.append(
                         _issue(
                             severity="blocker",
@@ -287,12 +306,13 @@ def _check_amount_math(issues: list[MisaReadinessIssue], rows: list[dict[str, An
             continue
 
         gross = _money(quantity * unit_price)
+        tolerance = _line_amount_tolerance(quantity, _field(row, "don_gia"))
         accepted = {gross}
         discount = _decimal(_field(row, "tien_chiet_khau"))
         if discount is not None:
             accepted.add(_money(gross - discount))
         actual = _money(amount)
-        if all(abs(actual - expected) > MONEY_TOLERANCE for expected in accepted):
+        if all(abs(actual - expected) > tolerance for expected in accepted):
             closest = min(accepted, key=lambda expected: abs(actual - expected))
             issues.append(
                 _issue(
@@ -350,7 +370,7 @@ def _check_duplicate_documents(
     issues: list[MisaReadinessIssue],
     rows: list[dict[str, Any]],
 ) -> None:
-    seen: dict[str, tuple[int, tuple[Any, ...]]] = {}
+    seen: dict[str, tuple[int, dict[str, Any]]] = {}
     for row_number, row in enumerate(rows, start=1):
         key = _document_key(row)
         if not key:
@@ -361,7 +381,12 @@ def _check_duplicate_documents(
             seen[key] = (row_number, fingerprint)
             continue
         previous_row, previous_fingerprint = previous
-        if fingerprint != previous_fingerprint:
+        conflicting_fields = [
+            header
+            for header, value in fingerprint.items()
+            if header in previous_fingerprint and previous_fingerprint[header] != value
+        ]
+        if conflicting_fields:
             issues.append(
                 _issue(
                     severity="blocker",
@@ -377,6 +402,8 @@ def _check_duplicate_documents(
                     source_url=MISA_IMPORT_ERROR_SOURCE_URL,
                 )
             )
+            continue
+        seen[key] = (previous_row, {**previous_fingerprint, **fingerprint})
 
 
 def _add_review_warnings(
@@ -473,6 +500,12 @@ def _is_number_header(normalized_header: str) -> bool:
     return any(hint in normalized_header for hint in NUMBER_HEADER_HINTS)
 
 
+def _valid_vat_marker(normalized_header: str, value: Any) -> bool:
+    return any(hint in normalized_header for hint in VAT_RATE_HEADER_HINTS) and (
+        str(value).strip().lower() in ZERO_VAT_MARKERS
+    )
+
+
 def _field(row: dict[str, Any], normalized_name: str) -> Any:
     for header, value in row.items():
         if normalize_header(header) == normalized_name:
@@ -501,11 +534,20 @@ def _money(value: Decimal) -> Decimal:
     return value.quantize(Decimal("1"), rounding=ROUND_HALF_UP)
 
 
+def _line_amount_tolerance(quantity: Decimal, raw_unit_price: Any) -> Decimal:
+    parsed_unit_price = parse_number(raw_unit_price)
+    if parsed_unit_price is None:
+        return MONEY_TOLERANCE
+    decimal_price = Decimal(str(parsed_unit_price))
+    quantum = Decimal("1").scaleb(decimal_price.as_tuple().exponent)
+    return max(MONEY_TOLERANCE, abs(quantity) * quantum / 2)
+
+
 def _vat_rate(value: Any) -> Decimal | None:
     if is_blank(value):
         return None
     text = str(value).strip().lower()
-    if text in {"kct", "không chịu thuế", "khong chiu thue"}:
+    if text in ZERO_VAT_MARKERS:
         return Decimal("0")
     parsed = _decimal(value)
     if parsed is None:
@@ -542,8 +584,12 @@ def _document_key(row: dict[str, Any]) -> str | None:
     return "|".join([*qualifiers, invoice_number])
 
 
-def _document_fingerprint(row: dict[str, Any]) -> tuple[Any, ...]:
-    return tuple(_normalize_fingerprint_value(_field(row, header)) for header in DOCUMENT_FINGERPRINT_HEADERS)
+def _document_fingerprint(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        header: _normalize_fingerprint_value(value)
+        for header in DOCUMENT_FINGERPRINT_HEADERS
+        if not is_blank(value := _field(row, header))
+    }
 
 
 def _normalize_fingerprint_value(value: Any) -> Any:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from decimal import Decimal
 from typing import Any
 
 from app.cell_ref import column_index as header_column_index
@@ -42,16 +43,22 @@ def check_calculation_rules(
     for row_number, row in enumerate(rows, start=first_data_row):
         invoice = _text(semantic_value(row, detected_columns, "invoice")) or None
         quantity = _number(row, detected_columns, "quantity")
+        raw_unit_price = semantic_value(row, detected_columns, "unit_price")
         unit_price = _number(row, detected_columns, "unit_price")
         line_amount = _number(row, detected_columns, "line_amount")
         discount_total = line_discount_total(row, detected_columns, tolerance)
 
         expected_line_amount: float | None = None
-        if quantity is not None and unit_price is not None:
+        if quantity not in (None, 0) and unit_price not in (None, 0):
             gross_amount = quantity * unit_price
             expected_line_amount = gross_amount - (discount_total or 0)
+            line_tolerance = _line_amount_tolerance(
+                quantity,
+                raw_unit_price,
+                tolerance,
+            )
             if line_amount is not None and _outside_tolerance(
-                expected_line_amount, line_amount, tolerance
+                expected_line_amount, line_amount, line_tolerance
             ):
                 warnings.append(
                     _issue(
@@ -61,7 +68,7 @@ def check_calculation_rules(
                         code="calculation_line_amount_mismatch",
                         expected=expected_line_amount,
                         actual=line_amount,
-                        tolerance=tolerance,
+                        tolerance=line_tolerance,
                         message="Line amount must equal quantity × unit price − line discount.",
                         detected_columns=detected_columns,
                         headers=headers,
@@ -304,6 +311,20 @@ def _outside_tolerance(expected: float, actual: float, tolerance: float | int) -
 
 def _percentage_amount_tolerance(base_amount: float, tolerance: float | int) -> float:
     return max(float(tolerance), abs(base_amount) * 0.001)
+
+
+def _line_amount_tolerance(
+    quantity: float,
+    raw_unit_price: Any,
+    tolerance: float | int,
+) -> float:
+    parsed_unit_price = parse_number(raw_unit_price)
+    if parsed_unit_price is None:
+        return float(tolerance)
+    decimal_price = Decimal(str(parsed_unit_price))
+    quantum = Decimal("1").scaleb(decimal_price.as_tuple().exponent)
+    rounding_tolerance = Decimal(str(abs(quantity))) * quantum / 2
+    return max(float(tolerance), float(rounding_tolerance))
 
 
 def _clean_number(value: float | int) -> float | int:

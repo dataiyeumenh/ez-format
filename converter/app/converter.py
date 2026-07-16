@@ -80,14 +80,14 @@ def validate_file(
         )
 
     first_data_row = table.header_row_index + 2
-    seen_invoice_item: set[tuple[str, str]] = set()
+    seen_invoice_lines: set[tuple[str, ...]] = set()
     for index, row in enumerate(table.rows, start=first_data_row):
         invoice = semantic_value(row, detected_columns, "invoice")
         item_code = semantic_value(row, detected_columns, "item_code")
 
         if not is_blank(invoice) and not is_blank(item_code):
-            key = (str(invoice).strip(), str(item_code).strip())
-            if key in seen_invoice_item:
+            key = _invoice_line_fingerprint(row, detected_columns)
+            if key in seen_invoice_lines:
                 warnings.append(
                     ReportIssue(
                         row=index,
@@ -96,7 +96,7 @@ def validate_file(
                         message=f"Duplicate invoice/item pair {key[0]} / {key[1]}.",
                     )
                 )
-            seen_invoice_item.add(key)
+            seen_invoice_lines.add(key)
 
         for field in definition.required_source_fields:
             value = semantic_value(row, detected_columns, field)
@@ -395,6 +395,25 @@ def _trusted_purchase_line_amount(
     if normalize_header(source_header) != "ttvnd":
         return None
     return parse_number(semantic_value(row, detected_columns, "line_amount"))
+
+
+def _invoice_line_fingerprint(
+    row: dict[str, Any],
+    detected_columns: dict[str, str],
+) -> tuple[str, ...]:
+    fields = (
+        "invoice",
+        "item_code",
+        "quantity",
+        "unit_price",
+        "line_amount",
+        "discount_amount",
+        "vat_rate",
+        "vat_amount",
+        "lot",
+        "expiry_date",
+    )
+    return tuple(_text(semantic_value(row, detected_columns, field)) for field in fields)
 
 
 def _number_or_text(value: Any) -> Any:
