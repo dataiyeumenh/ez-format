@@ -19,10 +19,12 @@ const {
 const {
   createConversionContextToken,
   verifyConversionContextToken,
+  verifyStudentContextToken,
 } = require("../services/conversionContextService");
 const { parseMasterDataFile } = require("../services/converterClient");
 const {
   cleanMappingProfilePayload,
+  mappingProfileOwnerFromClaims,
   serializeMappingProfile,
 } = require("../services/mappingProfileService");
 
@@ -41,7 +43,7 @@ function secureTokenEquals(actual, expected) {
   );
 }
 
-function authenticateInternalContext(req) {
+function authenticateInternalContext(req, requiredStudentScope = "analyze") {
   const expectedServiceToken = String(
     process.env.CONVERTER_SERVICE_TOKEN || "",
   ).trim();
@@ -60,8 +62,12 @@ function authenticateInternalContext(req) {
   if (!contextToken) throw httpError(401, "Thiếu conversion context");
   try {
     return verifyConversionContextToken(contextToken);
-  } catch (error) {
-    throw httpError(401, error.message);
+  } catch (conversionError) {
+    try {
+      return verifyStudentContextToken(contextToken, requiredStudentScope);
+    } catch (studentError) {
+      throw httpError(401, studentError.message || conversionError.message);
+    }
   }
 }
 
@@ -72,6 +78,17 @@ async function internalWorkspaceFromClaims(claims) {
   });
   if (!workspace) throw httpError(404, "Không tìm thấy doanh nghiệp");
   return workspace;
+}
+
+async function mappingProfileAccessFromClaims(claims, { requireEdit = false } = {}) {
+  const owner = mappingProfileOwnerFromClaims(claims);
+  if (!owner.workspaceId) return { ...owner, workspace: null };
+
+  const workspace = await internalWorkspaceFromClaims(claims);
+  if (requireEdit && !userCanEditWorkspace(workspace, owner.userId)) {
+    throw httpError(403, "Bạn không có quyền lưu mapping profile");
+  }
+  return { ...owner, workspace };
 }
 
 async function assertCurrentMasterDataContext(claims, requestedHash) {
@@ -649,7 +666,7 @@ async function createConversionContext(req, res) {
 
 async function getInternalMasterDataContext(req, res) {
   try {
-    const claims = authenticateInternalContext(req);
+    const claims = authenticateInternalContext(req, "analyze");
     const { workspace, snapshots } = await assertCurrentMasterDataContext(
       claims,
       req.params.snapshotSetHash,
@@ -673,7 +690,7 @@ async function getInternalMasterDataContext(req, res) {
 
 async function validateInternalMasterDataContext(req, res) {
   try {
-    const claims = authenticateInternalContext(req);
+    const claims = authenticateInternalContext(req, "analyze");
     const { workspace } = await assertCurrentMasterDataContext(
       claims,
       req.params.snapshotSetHash,
@@ -691,8 +708,8 @@ async function validateInternalMasterDataContext(req, res) {
 
 async function findInternalMappingProfile(req, res) {
   try {
-    const claims = authenticateInternalContext(req);
-    const workspace = await internalWorkspaceFromClaims(claims);
+    const claims = authenticateInternalContext(req, "analyze");
+    const owner = await mappingProfileAccessFromClaims(claims);
     const targetTemplateId = String(req.query.targetTemplateId || "").trim();
     const sourceSignatureHash = String(
       req.query.sourceSignatureHash || "",
@@ -701,7 +718,7 @@ async function findInternalMappingProfile(req, res) {
       throw httpError(400, "Thiếu targetTemplateId hoặc sourceSignatureHash");
     }
     const profile = await MappingProfile.findOne({
-      workspace: workspace._id,
+      ownerScope: owner.ownerScope,
       targetTemplateId,
       sourceSignatureHash,
     });
@@ -716,12 +733,12 @@ async function findInternalMappingProfile(req, res) {
 
 async function getInternalMappingProfile(req, res) {
   try {
-    const claims = authenticateInternalContext(req);
-    const workspace = await internalWorkspaceFromClaims(claims);
+    const claims = authenticateInternalContext(req, "export");
+    const owner = await mappingProfileAccessFromClaims(claims);
     const profile = mongoose.isValidObjectId(req.params.profileId)
       ? await MappingProfile.findOne({
           _id: req.params.profileId,
-          workspace: workspace._id,
+          ownerScope: owner.ownerScope,
         })
       : null;
     if (!profile) throw httpError(404, "Không tìm thấy mapping profile");
@@ -736,11 +753,10 @@ async function getInternalMappingProfile(req, res) {
 
 async function saveInternalMappingProfile(req, res) {
   try {
-    const claims = authenticateInternalContext(req);
-    const workspace = await internalWorkspaceFromClaims(claims);
-    if (!userCanEditWorkspace(workspace, claims.user_id)) {
-      throw httpError(403, "Bạn không có quyền lưu mapping profile");
-    }
+    const claims = authenticateInternalContext(req, "attempt");
+    const owner = await mappingProfileAccessFromClaims(claims, {
+      requireEdit: true,
+    });
     const payload = cleanMappingProfilePayload(req.body);
     if (!payload.targetTemplateId || !payload.sourceSignatureHash) {
       throw httpError(
@@ -750,15 +766,17 @@ async function saveInternalMappingProfile(req, res) {
     }
     const profile = await MappingProfile.findOneAndUpdate(
       {
-        workspace: workspace._id,
+        ownerScope: owner.ownerScope,
         targetTemplateId: payload.targetTemplateId,
         sourceSignatureHash: payload.sourceSignatureHash,
       },
       {
         $set: {
           ...payload,
-          workspace: workspace._id,
-          updatedBy: claims.user_id,
+          ownerScope: owner.ownerScope,
+          workspace: owner.workspace?._id || null,
+          user: owner.userId,
+          updatedBy: owner.userId,
         },
         $setOnInsert: { usageCount: 0 },
       },
@@ -780,11 +798,11 @@ async function saveInternalMappingProfile(req, res) {
 
 async function markInternalMappingProfileUsed(req, res) {
   try {
-    const claims = authenticateInternalContext(req);
-    const workspace = await internalWorkspaceFromClaims(claims);
+    const claims = authenticateInternalContext(req, "analyze");
+    const owner = await mappingProfileAccessFromClaims(claims);
     const profile = mongoose.isValidObjectId(req.params.profileId)
       ? await MappingProfile.findOneAndUpdate(
-          { _id: req.params.profileId, workspace: workspace._id },
+          { _id: req.params.profileId, ownerScope: owner.ownerScope },
           { $inc: { usageCount: 1 }, $set: { lastUsedAt: new Date() } },
           { new: true },
         )

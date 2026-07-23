@@ -64,6 +64,10 @@ $steps = @()
         "backend\middleware\auth.js",
         "backend\controllers\authController.js",
         "backend\controllers\convertController.js",
+        "backend\controllers\studentSessionController.js",
+        "backend\models\StudentActivity.js",
+        "backend\routes\student.js",
+        "backend\routes\internal.js",
         "backend\seed.js"
     )
     foreach ($rel in $files) {
@@ -72,6 +76,18 @@ $steps = @()
         node --check $path 2>&1 | Out-Null
         if ($LASTEXITCODE -ne 0) { throw "Syntax error in $rel" }
     }
+})
+
+[void]($steps += Step "Backend student tests" {
+    node --test backend/tests/studentSessions.test.js backend/tests/studentQuestions.test.js backend/tests/studentAttempts.test.js backend/tests/studentActivities.test.js
+    if ($LASTEXITCODE -ne 0) { throw "Backend student tests failed" }
+})
+
+[void]($steps += Step "Frontend tests" {
+    Push-Location (Join-Path $RepoRoot "frontend")
+    npm test --silent 2>&1 | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "Frontend tests failed" }
+    Pop-Location
 })
 
 [void]($steps += Step "Frontend build" {
@@ -85,6 +101,13 @@ $steps = @()
     Push-Location (Join-Path $RepoRoot "converter")
     python -m pytest tests/test_api.py::test_healthz tests/test_api.py::test_conversion_types_endpoint tests/test_api.py::test_preview_endpoint_returns_json_rows tests/test_api.py::test_export_rows_endpoint_returns_xls -q --tb=line
     if ($LASTEXITCODE -ne 0) { throw "API smoke tests failed" }
+    Pop-Location
+})
+
+[void]($steps += Step "Converter student integration" {
+    Push-Location (Join-Path $RepoRoot "converter")
+    python -m pytest tests/test_student_accounting_map.py tests/test_student_reconciliation.py tests/test_student_anonymization.py tests/test_student_reports.py tests/test_student_api.py -q --tb=line
+    if ($LASTEXITCODE -ne 0) { throw "Student integration tests failed" }
     Pop-Location
 })
 

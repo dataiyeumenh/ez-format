@@ -1,3 +1,5 @@
+from datetime import datetime
+
 import xlrd
 
 from app.excel_io import write_xls_from_template
@@ -101,6 +103,32 @@ def test_bsn_sales_export_copies_real_59_column_template_formatting(tmp_path):
     ) == _style_signatures(
         source_book, source_sheet, template.workbook.header_row_index, 12
     )
+
+
+def test_export_writes_iso_date_strings_as_excel_date_cells(tmp_path):
+    template = next(item for item in list_misa_templates() if item.id == "bsn_sales")
+    output_path = tmp_path / "bsn_sales_dates.xls"
+    row = {header: "" for header in template.headers}
+    row["Số chứng từ (*)"] = "HD-DATE-001"
+    row["Ngày hạch toán (*)"] = "2025-12-25T17:23:44.267000"
+    row["Ngày chứng từ (*)"] = "2025-12-25T17:23:44.267000"
+    row["Hạn sử dụng"] = "2029-07-01T00:00:00"
+
+    write_xls_from_template(template.workbook, [row], output_path)
+
+    book = xlrd.open_workbook(str(output_path), formatting_info=True)
+    sheet = book.sheet_by_index(0)
+    headers = sheet.row_values(template.workbook.header_row_index)
+    data_row = template.workbook.header_row_index + 1
+
+    for header, expected in (
+        ("Ngày hạch toán (*)", datetime(2025, 12, 25, 17, 23, 44, 267000)),
+        ("Ngày chứng từ (*)", datetime(2025, 12, 25, 17, 23, 44, 267000)),
+        ("Hạn sử dụng", datetime(2029, 7, 1)),
+    ):
+        cell = sheet.cell(data_row, headers.index(header))
+        assert cell.ctype == xlrd.XL_CELL_DATE
+        assert xlrd.xldate_as_datetime(cell.value, book.datemode) == expected
 
 
 def test_export_clears_stale_template_data_rows(tmp_path):

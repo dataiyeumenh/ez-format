@@ -28,6 +28,7 @@ from app.ai_assistant import explain_validation_report, suggest_mapping_for_file
 from app.calculation_rules import allow_calculation_warnings, has_calculation_warnings
 from app.conversion_types import BACKEND_ROOT, CONVERSION_TYPES
 from app.converter import convert_file, export_rows, preview_file, validate_file
+from app.document_structure import validate_excel_magic
 from app.error_check import check_file_for_errors
 from app.misa_workflow import (
     EXPORT_MEDIA_TYPE,
@@ -56,15 +57,67 @@ from app.reconstruction_workflow import (
     update_reconstruction_draft,
     validate_reconstruction,
 )
+from app.student_store import cleanup_expired_student_uploads
+from app.student_context import StudentContextClaims, verify_student_context
+from app.student_models import (
+    StudentAnonymizationRequest,
+    StudentAttemptRequest,
+    StudentHintRequest,
+    StudentInternshipReportRequest,
+    StudentQuestionRequest,
+)
+from app.student_workflow import (
+    StudentWorkflowError,
+    analyze_student_file,
+    ask_student_question,
+    build_student_internship_report,
+    export_student_anonymized_workbook,
+    get_student_accounting_map,
+    get_student_overview,
+    get_student_reconciliation,
+    get_student_source_row,
+    preview_student_anonymization,
+    reveal_student_hint,
+    submit_student_attempt,
+)
 
 
 app = FastAPI(title="EzFormat Converter API")
 _RECONSTRUCTION_RATE_LOCK = threading.Lock()
 _RECONSTRUCTION_RATE_BUCKETS: dict[str, tuple[float, int]] = {}
+_STUDENT_RATE_LOCK = threading.Lock()
+_STUDENT_RATE_BUCKETS: dict[str, tuple[float, int]] = {}
+_STUDENT_CLEANUP_LOCK = threading.Lock()
+_LAST_STUDENT_CLEANUP = 0.0
+
+
+def _opportunistic_student_cleanup(*, force: bool = False) -> None:
+    global _LAST_STUDENT_CLEANUP
+    try:
+        interval_seconds = max(
+            1,
+            int(os.getenv("STUDENT_UPLOAD_CLEANUP_INTERVAL_SECONDS", "300")),
+        )
+    except ValueError:
+        interval_seconds = 300
+    now = time.monotonic()
+    with _STUDENT_CLEANUP_LOCK:
+        if not force and now - _LAST_STUDENT_CLEANUP < interval_seconds:
+            return
+        _LAST_STUDENT_CLEANUP = now
+    cleanup_expired_student_uploads()
+
+
+async def _cleanup_student_uploads_at_startup() -> None:
+    await run_in_threadpool(_opportunistic_student_cleanup, force=True)
+
+
+app.router.add_event_handler("startup", _cleanup_student_uploads_at_startup)
 
 
 @app.middleware("http")
 async def attach_request_id(request: Request, call_next):
+    await run_in_threadpool(_opportunistic_student_cleanup)
     supplied = str(request.headers.get("x-request-id") or "").strip()
     request_id = supplied[:128] if supplied else uuid.uuid4().hex
     request.state.request_id = request_id
@@ -156,7 +209,31 @@ def healthz() -> dict[str, object]:
             "voucherReconstruction": os.getenv(
                 "VOUCHER_RECONSTRUCTION_ENABLED", "false"
             ).lower()
-            == "true"
+            == "true",
+            "studentAssistant": os.getenv(
+                "STUDENT_ASSISTANT_ENABLED", "false"
+            ).lower()
+            == "true",
+            "studentFileExplain": os.getenv(
+                "STUDENT_FILE_EXPLAIN_ENABLED", "false"
+            ).lower()
+            == "true",
+            "studentFileQa": os.getenv("STUDENT_FILE_QA_ENABLED", "false").lower()
+            == "true",
+            "studentCheckWork": os.getenv("STUDENT_CHECK_WORK_ENABLED", "false").lower()
+            == "true",
+            "studentAccountingMap": os.getenv(
+                "STUDENT_ACCOUNTING_MAP_ENABLED", "false"
+            ).lower()
+            == "true",
+            "studentReconciliation": os.getenv(
+                "STUDENT_RECONCILIATION_ENABLED", "false"
+            ).lower()
+            == "true",
+            "studentInternship": os.getenv(
+                "STUDENT_INTERNSHIP_ENABLED", "false"
+            ).lower()
+            == "true",
         },
     }
 
@@ -208,6 +285,7 @@ async def analyze_raw_upload(
     file: Annotated[UploadFile, File()],
     target_template_id: Annotated[str | None, Form()] = None,
     conversion_context_token: Annotated[str | None, Form()] = None,
+    student_context_token: Annotated[str | None, Form()] = None,
 ) -> JSONResponse:
     try:
         content = await file.read()
@@ -217,10 +295,269 @@ async def analyze_raw_upload(
             content=content,
             requested_target_template_id=target_template_id,
             conversion_context_token=conversion_context_token,
+            student_context_token=student_context_token,
         )
         return JSONResponse(jsonable_encoder(payload))
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/v1/student/sessions/analyze")
+async def analyze_student_session(
+    file: Annotated[UploadFile, File()],
+    context_token: Annotated[str, Form()],
+    target_template_id: Annotated[str | None, Form()] = None,
+) -> JSONResponse:
+    try:
+        rate_claims = _verified_student_rate_claims(context_token, "analyze")
+        _check_student_rate_limit(
+            _student_rate_key("analyze", rate_claims),
+            limit=_positive_env_int("STUDENT_ANALYZE_LIMIT_PER_15_MINUTES", 5),
+        )
+        content = await _read_limited_student_upload(file)
+        payload = await run_in_threadpool(
+            analyze_student_file,
+            filename=file.filename or "upload.xlsx",
+            content=content,
+            context_token=context_token,
+            target_template_id=target_template_id,
+        )
+        return JSONResponse(jsonable_encoder(payload))
+    except StudentWorkflowError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+@app.get("/api/v1/student/sessions/{session_id}/overview")
+async def student_session_overview(
+    session_id: str,
+    x_student_context: Annotated[str | None, Header()] = None,
+) -> JSONResponse:
+    try:
+        payload = await run_in_threadpool(
+            get_student_overview,
+            session_id=session_id,
+            context_token=x_student_context or "",
+        )
+        return JSONResponse(jsonable_encoder(payload))
+    except StudentWorkflowError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+@app.get("/api/v1/student/sessions/{session_id}/accounting-map")
+async def student_session_accounting_map(
+    session_id: str,
+    x_student_context: Annotated[str | None, Header()] = None,
+) -> JSONResponse:
+    try:
+        payload = await run_in_threadpool(
+            get_student_accounting_map,
+            session_id=session_id,
+            context_token=x_student_context or "",
+        )
+        return JSONResponse(jsonable_encoder(payload))
+    except StudentWorkflowError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+@app.get("/api/v1/student/sessions/{session_id}/reconciliation")
+async def student_session_reconciliation(
+    session_id: str,
+    x_student_context: Annotated[str | None, Header()] = None,
+) -> JSONResponse:
+    try:
+        payload = await run_in_threadpool(
+            get_student_reconciliation,
+            session_id=session_id,
+            context_token=x_student_context or "",
+        )
+        return JSONResponse(jsonable_encoder(payload))
+    except StudentWorkflowError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+@app.post("/api/v1/student/sessions/{session_id}/anonymization/preview")
+async def student_session_anonymization_preview(
+    session_id: str,
+    request: StudentAnonymizationRequest,
+    x_student_context: Annotated[str | None, Header()] = None,
+) -> JSONResponse:
+    try:
+        rate_claims = _verified_student_rate_claims(
+            x_student_context or "", "export", session_id
+        )
+        _check_student_rate_limit(
+            _student_rate_key("anonymization", rate_claims),
+            limit=_positive_env_int(
+                "STUDENT_ANONYMIZATION_LIMIT_PER_15_MINUTES",
+                20,
+            ),
+        )
+        payload = await run_in_threadpool(
+            preview_student_anonymization,
+            session_id=session_id,
+            context_token=x_student_context or "",
+            full_document_numbers=request.full_document_numbers,
+        )
+        return JSONResponse(jsonable_encoder(payload))
+    except StudentWorkflowError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+@app.post("/api/v1/student/sessions/{session_id}/anonymization/export")
+async def student_session_anonymization_export(
+    session_id: str,
+    request: StudentAnonymizationRequest,
+    x_student_context: Annotated[str | None, Header()] = None,
+) -> Response:
+    try:
+        rate_claims = _verified_student_rate_claims(
+            x_student_context or "", "export", session_id
+        )
+        _check_student_rate_limit(
+            _student_rate_key("export", rate_claims),
+            limit=_positive_env_int("STUDENT_EXPORT_LIMIT_PER_15_MINUTES", 10),
+        )
+        exported = await run_in_threadpool(
+            export_student_anonymized_workbook,
+            session_id=session_id,
+            context_token=x_student_context or "",
+            full_document_numbers=request.full_document_numbers,
+        )
+        media_type = (
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            if exported.filename.lower().endswith(".xlsx")
+            else EXPORT_MEDIA_TYPE
+        )
+        return Response(
+            content=exported.content,
+            media_type=media_type,
+            headers={
+                "Content-Disposition": f'attachment; filename="{exported.filename}"',
+                "X-Anonymization-Scanner": "passed",
+            },
+        )
+    except StudentWorkflowError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+@app.post("/api/v1/student/sessions/{session_id}/internship-report")
+async def student_session_internship_report(
+    session_id: str,
+    request: StudentInternshipReportRequest,
+    x_student_context: Annotated[str | None, Header()] = None,
+) -> Response:
+    try:
+        rate_claims = _verified_student_rate_claims(
+            x_student_context or "", "export", session_id
+        )
+        _check_student_rate_limit(
+            _student_rate_key("report", rate_claims),
+            limit=_positive_env_int("STUDENT_REPORT_LIMIT_PER_15_MINUTES", 10),
+        )
+        report = await run_in_threadpool(
+            build_student_internship_report,
+            session_id=session_id,
+            context_token=x_student_context or "",
+            activity_ids=request.activity_ids,
+            approved_notes=request.approved_notes,
+        )
+        return Response(
+            content=report.encode("utf-8"),
+            media_type="text/markdown",
+            headers={
+                "Content-Disposition": 'attachment; filename="internship-handoff.md"',
+            },
+        )
+    except StudentWorkflowError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+@app.post("/api/v1/student/sessions/{session_id}/questions")
+async def student_session_question(
+    session_id: str,
+    request: StudentQuestionRequest,
+    x_student_context: Annotated[str | None, Header()] = None,
+) -> JSONResponse:
+    try:
+        rate_claims = _verified_student_rate_claims(
+            x_student_context or "", "ask", session_id
+        )
+        _check_student_rate_limit(
+            _student_rate_key("question", rate_claims),
+            limit=_positive_env_int("STUDENT_QUESTION_LIMIT_PER_15_MINUTES", 60),
+        )
+        payload = await run_in_threadpool(
+            ask_student_question,
+            session_id=session_id,
+            context_token=x_student_context or "",
+            question=request.question,
+        )
+        return JSONResponse(jsonable_encoder(payload))
+    except StudentWorkflowError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+@app.get("/api/v1/student/sessions/{session_id}/source-rows/{worksheet_row}")
+async def student_session_source_row(
+    session_id: str,
+    worksheet_row: int,
+    x_student_context: Annotated[str | None, Header()] = None,
+) -> JSONResponse:
+    try:
+        payload = await run_in_threadpool(
+            get_student_source_row,
+            session_id=session_id,
+            worksheet_row=worksheet_row,
+            context_token=x_student_context or "",
+        )
+        return JSONResponse(jsonable_encoder(payload))
+    except StudentWorkflowError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+@app.post("/api/v1/student/sessions/{session_id}/attempts")
+async def student_session_attempt(
+    session_id: str,
+    request: StudentAttemptRequest,
+    x_student_context: Annotated[str | None, Header()] = None,
+) -> JSONResponse:
+    try:
+        payload = await run_in_threadpool(
+            submit_student_attempt,
+            session_id=session_id,
+            context_token=x_student_context or "",
+            kind=request.kind,
+            state_hash=request.state_hash,
+            submitted=request.submitted,
+            rubric_version=request.rubric_version,
+        )
+        return JSONResponse(jsonable_encoder(payload))
+    except StudentWorkflowError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+@app.post(
+    "/api/v1/student/sessions/{session_id}/attempts/{attempt_id}/hints/{level}"
+)
+async def student_session_hint(
+    session_id: str,
+    attempt_id: str,
+    level: int,
+    request: StudentHintRequest,
+    x_student_context: Annotated[str | None, Header()] = None,
+) -> JSONResponse:
+    try:
+        payload = await run_in_threadpool(
+            reveal_student_hint,
+            session_id=session_id,
+            attempt_id=attempt_id,
+            issue_id=request.issue_id,
+            level=level,
+            context_token=x_student_context or "",
+        )
+        return JSONResponse(jsonable_encoder(payload))
+    except StudentWorkflowError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
 
 
 @app.post("/api/v1/reconstructions/analyze")
@@ -474,6 +811,7 @@ async def preview_misa_mapping(body: dict) -> JSONResponse:
             defaults=body.get("defaults") or {},
             formulas=body.get("formulas") or {},
             conversion_context_token=body.get("conversion_context_token"),
+            student_context_token=body.get("student_context_token"),
         )
         return JSONResponse(jsonable_encoder(payload))
     except KeyError as exc:
@@ -495,6 +833,7 @@ async def readiness_misa_mapping(body: dict) -> JSONResponse:
             formulas=body.get("formulas") or {},
             edited_rows=edited_rows if isinstance(edited_rows, list) else None,
             conversion_context_token=body.get("conversion_context_token"),
+            student_context_token=body.get("student_context_token"),
         )
         return JSONResponse(jsonable_encoder(payload))
     except KeyError as exc:
@@ -515,6 +854,7 @@ async def confirm_misa_mapping(body: dict) -> JSONResponse:
             formulas=body.get("formulas") or {},
             profile_name=body.get("profile_name"),
             conversion_context_token=body.get("conversion_context_token"),
+            student_context_token=body.get("student_context_token"),
         )
         return JSONResponse(jsonable_encoder(payload))
     except KeyError as exc:
@@ -579,6 +919,7 @@ async def export_conversion_rows(body: dict) -> Response:
                 edited_rows=edited_rows if isinstance(edited_rows, list) and edited_rows else None,
                 acknowledge_warnings=bool(body.get("acknowledge_warnings")),
                 conversion_context_token=body.get("conversion_context_token"),
+                student_context_token=body.get("student_context_token"),
             )
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -771,6 +1112,97 @@ async def _read_limited_reconstruction_upload(file: UploadFile) -> bytes:
             )
         chunks.append(chunk)
     return b"".join(chunks)
+
+
+async def _read_limited_student_upload(file: UploadFile) -> bytes:
+    filename = file.filename or ""
+    suffix = Path(filename).suffix.lower()
+    if suffix not in SUPPORTED_SUFFIXES:
+        raise HTTPException(
+            status_code=415,
+            detail="Chỉ hỗ trợ file Excel .xls và .xlsx",
+        )
+
+    max_bytes = _positive_env_int("STUDENT_MAX_FILE_BYTES", 20 * 1024 * 1024)
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        chunk = await file.read(1024 * 1024)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > max_bytes:
+            raise HTTPException(
+                status_code=413,
+                detail=f"File vượt giới hạn {max_bytes} bytes",
+            )
+        chunks.append(chunk)
+
+    content = b"".join(chunks)
+    try:
+        validate_excel_magic(filename, content)
+    except ValueError as exc:
+        raise HTTPException(status_code=415, detail=str(exc)) from exc
+    return content
+
+
+def _positive_env_int(name: str, default: int) -> int:
+    try:
+        return max(1, int(os.getenv(name, str(default))))
+    except ValueError:
+        return default
+
+
+def _verified_student_rate_claims(
+    context_token: str,
+    required_scope: str,
+    session_id: str = "",
+) -> StudentContextClaims:
+    if not str(context_token or "").strip():
+        raise StudentWorkflowError(401, "Thiếu student context")
+    try:
+        claims = verify_student_context(context_token, required_scope)
+    except ValueError as exc:
+        raise StudentWorkflowError(401, str(exc)) from exc
+    if session_id and claims.session_id != str(session_id).strip():
+        raise StudentWorkflowError(403, "Student context không thuộc phiên này")
+    return claims
+
+
+def _student_rate_key(action: str, claims: StudentContextClaims) -> str:
+    return f"{action}:{claims.owner_scope}:{claims.session_id}:{claims.user_id}"
+
+
+def clear_student_rate_limits() -> None:
+    with _STUDENT_RATE_LOCK:
+        _STUDENT_RATE_BUCKETS.clear()
+
+
+def _check_student_rate_limit(
+    key: str,
+    *,
+    limit: int,
+    window_seconds: int = 15 * 60,
+) -> None:
+    now = time.monotonic()
+    with _STUDENT_RATE_LOCK:
+        expired = [
+            bucket_key
+            for bucket_key, (expires_at, _) in _STUDENT_RATE_BUCKETS.items()
+            if expires_at <= now
+        ]
+        for bucket_key in expired:
+            _STUDENT_RATE_BUCKETS.pop(bucket_key, None)
+        expires_at, count = _STUDENT_RATE_BUCKETS.get(
+            key,
+            (now + window_seconds, 0),
+        )
+        if count >= limit:
+            raise HTTPException(
+                status_code=429,
+                detail="Bạn đã gửi quá nhiều yêu cầu student. Vui lòng thử lại sau.",
+            )
+        _STUDENT_RATE_BUCKETS[key] = (expires_at, count + 1)
 
 
 def clear_reconstruction_rate_limits() -> None:

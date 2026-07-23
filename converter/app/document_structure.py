@@ -6,6 +6,7 @@ from typing import Any
 
 import openpyxl
 import xlrd
+from openpyxl.utils.cell import get_column_letter
 
 
 def inspect_workbook_structure(path: Path) -> dict[str, Any]:
@@ -35,7 +36,7 @@ def enforce_workbook_limits(
 
 def validate_excel_magic(filename: str, content: bytes) -> None:
     suffix = Path(filename or "").suffix.lower()
-    if suffix == ".xlsx" and not content.startswith(b"PK"):
+    if suffix == ".xlsx" and not content.startswith(b"PK\x03\x04"):
         raise ValueError("Nội dung file .xlsx không đúng định dạng ZIP/OpenXML")
     if suffix == ".xls" and not content.startswith(bytes.fromhex("D0CF11E0A1B11AE1")):
         raise ValueError("Nội dung file .xls không đúng định dạng OLE2")
@@ -85,6 +86,7 @@ def _inspect_xlsx(path: Path) -> dict[str, Any]:
             )
         return {
             "format": "xlsx",
+            "formula_detection": "available",
             "sheet_count": len(sheets),
             "sheets": sheets,
             "formula_cell_count": total_formulas,
@@ -111,12 +113,12 @@ def _inspect_xls(path: Path) -> dict[str, Any]:
     merged_ranges = 0
     for sheet in workbook.sheets():
         sheet_hidden_rows = [
-            index
+            index + 1
             for index, info in sheet.rowinfo_map.items()
             if getattr(info, "hidden", 0)
         ]
         sheet_hidden_columns = [
-            index
+            get_column_letter(index + 1)
             for index, info in sheet.colinfo_map.items()
             if getattr(info, "hidden", 0)
         ]
@@ -136,6 +138,8 @@ def _inspect_xls(path: Path) -> dict[str, Any]:
         )
     return {
         "format": "xls",
+        # xlrd exposes formula results but not reliable formula cell metadata for XLS.
+        "formula_detection": "unavailable",
         "sheet_count": len(sheets),
         "sheets": sheets,
         "formula_cell_count": 0,
@@ -143,7 +147,13 @@ def _inspect_xls(path: Path) -> dict[str, Any]:
         "hidden_column_count": hidden_columns,
         "merged_range_count": merged_ranges,
         "has_external_links": False,
-        "warnings": _warnings(0, hidden_rows, hidden_columns, merged_ranges),
+        "warnings": _warnings(
+            0,
+            hidden_rows,
+            hidden_columns,
+            merged_ranges,
+            formula_detection_unavailable=True,
+        ),
     }
 
 
@@ -152,8 +162,17 @@ def _warnings(
     hidden_rows: int,
     hidden_columns: int,
     merged_ranges: int,
+    *,
+    formula_detection_unavailable: bool = False,
 ) -> list[dict[str, str]]:
     warnings: list[dict[str, str]] = []
+    if formula_detection_unavailable:
+        warnings.append(
+            {
+                "code": "formula_detection_unavailable",
+                "message": "Không thể xác định tin cậy ô công thức trong workbook .xls.",
+            }
+        )
     if formula_count:
         warnings.append(
             {

@@ -1,0 +1,404 @@
+[
+  {
+    "state": "sales",
+    "question": "Tóm tắt file này giúp tôi",
+    "expected_intent": "file_summary",
+    "expected_outcome": "supported"
+  },
+  {
+    "state": "sales",
+    "question": "File bán hàng này có gì?",
+    "expected_intent": "file_summary",
+    "expected_outcome": "supported"
+  },
+  {
+    "state": "sales",
+    "question": "Cho tôi tổng quan file",
+    "expected_intent": "file_summary",
+    "expected_outcome": "supported"
+  },
+  {
+    "state": "sales",
+    "question": "File này có bao nhiêu dòng?",
+    "expected_intent": "file_summary",
+    "expected_outcome": "supported"
+  },
+  {
+    "state": "sales",
+    "question": "Tình trạng file hiện tại thế nào?",
+    "expected_intent": "file_summary",
+    "expected_outcome": "supported"
+  },
+  {
+    "state": "purchase",
+    "question": "Tóm tắt dữ liệu mua hàng",
+    "expected_intent": "file_summary",
+    "expected_outcome": "supported"
+  },
+  {
+    "state": "purchase",
+    "question": "Cho biết tổng quan file mua vào",
+    "expected_intent": "file_summary",
+    "expected_outcome": "supported"
+  },
+  {
+    "state": "sales",
+    "question": "Cột mã hóa đơn nằm ở đâu?",
+    "expected_intent": "locate_column",
+    "expected_outcome": "supported"
+  },
+  {
+    "state": "sales",
+    "question": "File có cột tên khách hàng không?",
+    "expected_intent": "locate_column",
+    "expected_outcome": "supported"
+  },
+  {
+    "state": "sales",
+    "question": "Tìm cột tiền thuế GTGT",
+    "expected_intent": "locate_column",
+    "expected_outcome": "supported"
+  },
+  {
+    "state": "sales",
+    "question": "Cột tổng thanh toán là cột nào?",
+    "expected_intent": "locate_column",
+    "expected_outcome": "supported"
+  },
+  {
+    "state": "purchase",
+    "question": "Cột tên nhà cung cấp nằm ở đâu?",
+    "expected_intent": "locate_column",
+    "expected_outcome": "supported"
+  },
+  {
+    "state": "purchase",
+    "question": "Tìm cột mã hàng",
+    "expected_intent": "locate_column",
+    "expected_outcome": "supported"
+  },
+  {
+    "state": "purchase",
+    "question": "File mua hàng có cột thuế suất GTGT không?",
+    "expected_intent": "locate_column",
+    "expected_outcome": "supported"
+  },
+  {
+    "state": "purchase",
+    "question": "Cột số hóa đơn là cột nào?",
+    "expected_intent": "locate_column",
+    "expected_outcome": "supported"
+  },
+  {
+    "state": "sales",
+    "question": "Những dòng nào có hóa đơn HD001?",
+    "expected_intent": "locate_rows",
+    "expected_outcome": "supported"
+  },
+  {
+    "state": "sales",
+    "question": "Tìm các dòng của HD002",
+    "expected_intent": "locate_rows",
+    "expected_outcome": "supported"
+  },
+  {
+    "state": "sales",
+    "question": "Khách B xuất hiện ở dòng nào?",
+    "expected_intent": "locate_rows",
+    "expected_outcome": "supported"
+  },
+  {
+    "state": "sales",
+    "question": "Dòng nào có tổng thanh toán 330000?",
+    "expected_intent": "locate_rows",
+    "expected_outcome": "supported"
+  },
+  {
+    "state": "purchase",
+    "question": "Hóa đơn MH003 nằm ở những dòng nào?",
+    "expected_intent": "locate_rows",
+    "expected_outcome": "supported"
+  },
+  {
+    "state": "purchase",
+    "question": "Tìm dòng có nhà cung cấp NCC B",
+    "expected_intent": "locate_rows",
+    "expected_outcome": "supported"
+  },
+  {
+    "state": "purchase",
+    "question": "Mã hàng VT001 ở dòng nào?",
+    "expected_intent": "locate_rows",
+    "expected_outcome": "supported"
+  },
+  {
+    "state": "purchase",
+    "question": "Dòng nào có thành tiền 150000?",
+    "expected_intent": "locate_rows",
+    "expected_outcome": "supported"
+  },
+  {
+    "state": "sales",
+    "question": "Cột Mã hóa đơn map vào trường nào?",
+    "expected_intent": "explain_mapping",
+    "expected_outcome": "supported"
+  },
+  {
+    "state": "sales",
+    "question": "Giải thích mapping của Ngày hóa đơn",
+    "expected_intent": "explain_mapping",
+    "expected_outcome": "supported"
+  },
+  {
+    "state": "sales",
+    "question": "Tên khách hàng được ghép sang đâu?",
+    "expected_intent": "explain_mapping",
+    "expected_outcome": "supported"
+  },
+  {
+    "state": "purchase",
+    "question": "Mã hàng map vào trường MISA nào?",
+    "expected_intent": "explain_mapping",
+    "expected_outcome": "supported"
+  },
+  {
+    "state": "purchase",
+    "question": "Giải thích mapping cột Số hóa đơn",
+    "expected_intent": "explain_mapping",
+    "expected_outcome": "supported"
+  },
+  {
+    "state": "purchase",
+    "question": "Cột Thuế suất GTGT được đưa vào đâu?",
+    "expected_intent": "explain_mapping",
+    "expected_outcome": "supported"
+  },
+  {
+    "state": "sales",
+    "question": "Giải thích lỗi tiền thuế ở dòng 4",
+    "expected_intent": "explain_issue",
+    "expected_outcome": "supported"
+  },
+  {
+    "state": "sales",
+    "question": "Vì sao file đang có blocker?",
+    "expected_intent": "explain_issue",
+    "expected_outcome": "supported"
+  },
+  {
+    "state": "purchase",
+    "question": "Giải thích lỗi ở file mua hàng",
+    "expected_intent": "explain_issue",
+    "expected_outcome": "supported"
+  },
+  {
+    "state": "purchase",
+    "question": "Vì sao dòng 4 bị lỗi thuế?",
+    "expected_intent": "explain_issue",
+    "expected_outcome": "supported"
+  },
+  {
+    "state": "sales",
+    "question": "Tổng thành tiền là bao nhiêu?",
+    "expected_intent": "aggregate_amount",
+    "expected_outcome": "supported"
+  },
+  {
+    "state": "sales",
+    "question": "Cộng cột tiền thuế GTGT",
+    "expected_intent": "aggregate_amount",
+    "expected_outcome": "supported"
+  },
+  {
+    "state": "sales",
+    "question": "Tổng thanh toán của file là bao nhiêu?",
+    "expected_intent": "aggregate_amount",
+    "expected_outcome": "supported"
+  },
+  {
+    "state": "sales",
+    "question": "Tính tổng đơn giá",
+    "expected_intent": "aggregate_amount",
+    "expected_outcome": "supported"
+  },
+  {
+    "state": "purchase",
+    "question": "Tổng thành tiền mua hàng là bao nhiêu?",
+    "expected_intent": "aggregate_amount",
+    "expected_outcome": "supported"
+  },
+  {
+    "state": "purchase",
+    "question": "Cộng tiền thuế GTGT đầu vào",
+    "expected_intent": "aggregate_amount",
+    "expected_outcome": "supported"
+  },
+  {
+    "state": "purchase",
+    "question": "Tổng số lượng mua là bao nhiêu?",
+    "expected_intent": "aggregate_amount",
+    "expected_outcome": "supported"
+  },
+  {
+    "state": "purchase",
+    "question": "Tính tổng đơn giá trong file mua",
+    "expected_intent": "aggregate_amount",
+    "expected_outcome": "supported"
+  },
+  {
+    "state": "sales",
+    "question": "Có bao nhiêu hóa đơn?",
+    "expected_intent": "count_documents",
+    "expected_outcome": "supported"
+  },
+  {
+    "state": "sales",
+    "question": "Đếm số chứng từ bán hàng",
+    "expected_intent": "count_documents",
+    "expected_outcome": "supported"
+  },
+  {
+    "state": "purchase",
+    "question": "File mua có bao nhiêu hóa đơn?",
+    "expected_intent": "count_documents",
+    "expected_outcome": "supported"
+  },
+  {
+    "state": "purchase",
+    "question": "Đếm số chứng từ mua hàng",
+    "expected_intent": "count_documents",
+    "expected_outcome": "supported"
+  },
+  {
+    "state": "sales",
+    "question": "Có hóa đơn trùng không?",
+    "expected_intent": "find_duplicates",
+    "expected_outcome": "supported"
+  },
+  {
+    "state": "sales",
+    "question": "Tìm chứng từ bị trùng thông tin",
+    "expected_intent": "find_duplicates",
+    "expected_outcome": "supported"
+  },
+  {
+    "state": "purchase",
+    "question": "Hóa đơn mua nào bị trùng?",
+    "expected_intent": "find_duplicates",
+    "expected_outcome": "supported"
+  },
+  {
+    "state": "purchase",
+    "question": "Kiểm tra trùng số hóa đơn mua hàng",
+    "expected_intent": "find_duplicates",
+    "expected_outcome": "supported"
+  },
+  {
+    "state": "sales",
+    "question": "Dòng nào lệch tiền thuế GTGT?",
+    "expected_intent": "find_vat_mismatches",
+    "expected_outcome": "supported"
+  },
+  {
+    "state": "sales",
+    "question": "Có bao nhiêu lỗi VAT?",
+    "expected_intent": "find_vat_mismatches",
+    "expected_outcome": "supported"
+  },
+  {
+    "state": "purchase",
+    "question": "Tìm chênh lệch thuế GTGT đầu vào",
+    "expected_intent": "find_vat_mismatches",
+    "expected_outcome": "supported"
+  },
+  {
+    "state": "purchase",
+    "question": "Tiền thuế mua hàng có dòng nào không khớp?",
+    "expected_intent": "find_vat_mismatches",
+    "expected_outcome": "supported"
+  },
+  {
+    "state": "sales",
+    "question": "Cần sửa gì trước khi export?",
+    "expected_intent": "required_actions_before_export",
+    "expected_outcome": "supported"
+  },
+  {
+    "state": "sales",
+    "question": "Việc nào bắt buộc làm trước khi import MISA?",
+    "expected_intent": "required_actions_before_export",
+    "expected_outcome": "supported"
+  },
+  {
+    "state": "purchase",
+    "question": "File mua hàng cần xử lý gì trước khi xuất?",
+    "expected_intent": "required_actions_before_export",
+    "expected_outcome": "supported"
+  },
+  {
+    "state": "purchase",
+    "question": "Các bước cần làm trước import là gì?",
+    "expected_intent": "required_actions_before_export",
+    "expected_outcome": "supported"
+  },
+  {
+    "state": "sales",
+    "question": "Thành tiền có ý nghĩa gì?",
+    "expected_intent": "concept_explanation",
+    "expected_outcome": "supported"
+  },
+  {
+    "state": "sales",
+    "question": "Giải thích khái niệm tiền thuế GTGT",
+    "expected_intent": "concept_explanation",
+    "expected_outcome": "supported"
+  },
+  {
+    "state": "purchase",
+    "question": "Mã hàng dùng để làm gì?",
+    "expected_intent": "concept_explanation",
+    "expected_outcome": "supported"
+  },
+  {
+    "state": "purchase",
+    "question": "Tên nhà cung cấp có ý nghĩa gì?",
+    "expected_intent": "concept_explanation",
+    "expected_outcome": "supported"
+  },
+  {
+    "state": "sales",
+    "question": "Hóa đơn này có chắc chắn hợp lệ không?",
+    "expected_intent": "unsupported_legal_or_business_judgment",
+    "expected_outcome": "unsupported"
+  },
+  {
+    "state": "sales",
+    "question": "Thuế GTGT này có được khấu trừ không?",
+    "expected_intent": "unsupported_legal_or_business_judgment",
+    "expected_outcome": "unsupported"
+  },
+  {
+    "state": "sales",
+    "question": "Nên hạch toán tài khoản nào?",
+    "expected_intent": "unsupported_legal_or_business_judgment",
+    "expected_outcome": "unsupported"
+  },
+  {
+    "state": "sales",
+    "question": "Thuế suất 10% có đúng luật không?",
+    "expected_intent": "unsupported_legal_or_business_judgment",
+    "expected_outcome": "unsupported"
+  },
+  {
+    "state": "purchase",
+    "question": "Chi phí này có được trừ khi tính thuế không?",
+    "expected_intent": "unsupported_legal_or_business_judgment",
+    "expected_outcome": "unsupported"
+  },
+  {
+    "state": "purchase",
+    "question": "Tôi chắc chắn dùng tài khoản 156 được chứ?",
+    "expected_intent": "unsupported_legal_or_business_judgment",
+    "expected_outcome": "unsupported"
+  }
+]

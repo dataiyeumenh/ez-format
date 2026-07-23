@@ -19,6 +19,7 @@ import ChatSupport from "../components/ChatSupport";
 import Alert from "../components/ui/Alert";
 import StepProgress from "../components/ui/StepProgress";
 import PreviewTable from "../components/PreviewTable";
+import MappingCoverageSummary from "../components/MappingCoverageSummary";
 import ValidationIssueTable from "../components/ValidationIssueTable";
 import ValidationReadinessCard from "../components/ValidationReadinessCard";
 import WorkspaceSelector from "../components/accounting/WorkspaceSelector";
@@ -30,6 +31,12 @@ import { useConverterApi } from "../hooks/useConverterApi";
 import { useAccountingWorkspaces } from "../hooks/useAccountingWorkspaces";
 import { useAuth } from "../context/AuthContext";
 import api from "../services/api";
+import {
+  classifyMappingField,
+  filterMappingItems,
+  getDownloadCtaState,
+  summarizeMappingFields,
+} from "../utils/converterUx";
 
 const STATUS = {
   IDLE: "idle",
@@ -243,9 +250,11 @@ const ConvertPage = () => {
   const [conversionContext, setConversionContext] = useState(null);
   const [masterDataState, setMasterDataState] = useState(null);
   const [conversionMode, setConversionMode] = useState("mapping");
+  const [mappingFilter, setMappingFilter] = useState("all");
 
   const inputRef = useRef(null);
   const mappingTableRef = useRef(null);
+  const readinessSectionRef = useRef(null);
   const targetRowRefs = useRef({});
   const targetFieldRefs = useRef({
     raw: {},
@@ -263,6 +272,21 @@ const ConvertPage = () => {
     if (analyzePayload?.target_headers?.length) return analyzePayload.target_headers;
     return previewHeaders || [];
   }, [analyzePayload?.target_headers, previewHeaders, selectedTemplate?.headers]);
+  const mappingSummary = useMemo(
+    () =>
+      summarizeMappingFields(
+        targetHeaders,
+        targetMapping,
+        defaults,
+        formulas,
+        readinessReport?.issues || [],
+      ),
+    [defaults, formulas, readinessReport?.issues, targetHeaders, targetMapping],
+  );
+  const visibleMappingItems = useMemo(
+    () => filterMappingItems(mappingSummary.items, mappingFilter),
+    [mappingFilter, mappingSummary.items],
+  );
   const mappingSource = analyzePayload?.mapping_suggestion?.source;
   const confidence = analyzePayload?.mapping_suggestion?.confidence;
   const extractTargetsFromText = (text) => {
@@ -297,20 +321,26 @@ const ConvertPage = () => {
           const rawHeader = targetMapping[header];
           const formula = formulas[header];
           const defaultValue = defaults[header];
+          const fieldState = classifyMappingField(
+            header,
+            targetMapping,
+            defaults,
+            formulas,
+          );
           return {
             header,
-            value: rawHeader
-              ? rawHeader
-              : formula
-                ? `Công thức tự động: ${formula}`
-                : defaultValue !== undefined && defaultValue !== ""
-                  ? `Giá trị mặc định: ${defaultValue}`
-                  : "Chưa thiết lập",
-            ok: Boolean(
-              rawHeader ||
-              formula ||
-              (defaultValue !== undefined && defaultValue !== ""),
-            ),
+            value:
+              fieldState.mode === "mixed"
+                ? "Nhiều cách điền · Cần rà soát"
+                : rawHeader
+                  ? rawHeader
+                  : formula
+                    ? `Công thức tự động: ${formula}`
+                    : defaultValue !== undefined && defaultValue !== ""
+                      ? `Giá trị mặc định: ${defaultValue}`
+                      : "Chưa thiết lập",
+            ok: fieldState.mode !== "unmapped",
+            review: fieldState.mode === "mixed",
           };
         },
       ),
@@ -380,7 +410,7 @@ const ConvertPage = () => {
               ? "Gợi ý theo mẫu"
               : "Gợi ý hệ thống";
   const mappingConfidenceLabel =
-    confidence !== undefined ? ` · Khớp ${Math.round(confidence * 100)}%` : "";
+    confidence !== undefined ? ` · Tin cậy ${Math.round(confidence * 100)}%` : "";
 
   const stepIndex =
     convStatus === STATUS.SUCCESS || convStatus === STATUS.DOWNLOADING
@@ -391,11 +421,14 @@ const ConvertPage = () => {
           ? 1
           : 0;
 
-  const hasReadinessBlockers = (readinessReport?.summary?.blocker || 0) > 0;
-  const hasUnacknowledgedWarnings =
-    (readinessReport?.summary?.warning || 0) > 0 && !acknowledgeWarnings;
-  const downloadDisabledByReadiness =
-    readinessLoading || hasReadinessBlockers || hasUnacknowledgedWarnings;
+  const downloadCta = getDownloadCtaState({
+    hasAnalyzePayload: Boolean(analyzePayload?.upload_id),
+    readinessReport,
+    readinessLoading,
+    acknowledgeWarnings,
+    isDownloading: convStatus === STATUS.DOWNLOADING,
+    isSuccess: convStatus === STATUS.SUCCESS,
+  });
 
   useEffect(() => {
     if (!templates.length) return;
@@ -420,6 +453,7 @@ const ConvertPage = () => {
     setConversionRunId(null);
     setConversionContext(null);
     setMasterDataState(null);
+    setMappingFilter("all");
   };
 
   const createConversionRunLog = async (file, templateId, context = null) => {
@@ -469,21 +503,30 @@ const ConvertPage = () => {
   };
 
   const focusTargetRow = (target, sourceText = "") => {
-    const row = targetRowRefs.current[target];
-    const container = mappingTableRef.current;
-    if (!row || !container) return;
-    container.scrollTo({
-      top: Math.max(row.offsetTop - 120, 0),
-      behavior: "smooth",
-    });
-    setFocusedTarget(target);
-    const field = inferFieldFromText(sourceText, target);
-    const fieldElement = targetFieldRefs.current[field]?.[target];
-    window.setTimeout(() => {
-      fieldElement?.focus?.();
-      fieldElement?.select?.();
-    }, 260);
-    window.setTimeout(() => setFocusedTarget(""), 1800);
+    const focusVisibleRow = () => {
+      const row = targetRowRefs.current[target];
+      const container = mappingTableRef.current;
+      if (!row || !container) return;
+      container.scrollTo({
+        top: Math.max(row.offsetTop - 120, 0),
+        behavior: "smooth",
+      });
+      setFocusedTarget(target);
+      const field = inferFieldFromText(sourceText, target);
+      const fieldElement = targetFieldRefs.current[field]?.[target];
+      window.setTimeout(() => {
+        fieldElement?.focus?.();
+        fieldElement?.select?.();
+      }, 260);
+      window.setTimeout(() => setFocusedTarget(""), 1800);
+    };
+
+    if (mappingFilter !== "all") {
+      setMappingFilter("all");
+      requestAnimationFrame(() => requestAnimationFrame(focusVisibleRow));
+      return;
+    }
+    focusVisibleRow();
   };
 
   const acceptFile = (file) => {
@@ -504,11 +547,7 @@ const ConvertPage = () => {
     }
     setSelectedFile(file);
     setErrorMsg("");
-    if (serviceOnline === false) {
-      setConvStatus(STATUS.IDLE);
-      return;
-    }
-    runAnalyze(file, targetTemplateId);
+    setConvStatus(STATUS.IDLE);
   };
 
   const handleDrag = (e) => {
@@ -600,14 +639,13 @@ const ConvertPage = () => {
 
   const runReadinessCheck = async (rows = null) => {
     if (!analyzePayload?.upload_id) return null;
+    setAcknowledgeWarnings(false);
+    setReadinessReport(null);
     setReadinessLoading(true);
     try {
       const report = await checkReadiness(buildReadinessPayload(rows));
       setReadinessReport(report);
       setMasterDataState(report.master_data || null);
-      if ((report?.summary?.warning || 0) === 0) {
-        setAcknowledgeWarnings(false);
-      }
       return report;
     } finally {
       setReadinessLoading(false);
@@ -615,6 +653,8 @@ const ConvertPage = () => {
   };
 
   const createPreview = async () => {
+    setReadinessReport(null);
+    setAcknowledgeWarnings(false);
     const result = await previewMapping(buildMappingPayload());
     setPreviewHeaders(result.headers || []);
     setPreviewRows(result.rows || []);
@@ -675,19 +715,14 @@ const ConvertPage = () => {
     setErrorMsg("");
     let exportStarted = false;
     try {
-      let rowsToExport = previewRows;
-      if (!rowsToExport.length) {
-        const preview = await createPreview();
-        rowsToExport = preview.rows || [];
-        if (!rowsToExport.length) {
-          throw new Error("Không có dòng dữ liệu để tải.");
-        }
+      const rowsToExport = previewRows;
+      if (!rowsToExport.length || !readinessReport) {
+        throw new Error("Vui lòng kiểm tra dữ liệu trước khi tải file MISA.");
       }
-      const readiness = await runReadinessCheck(rowsToExport);
-      if ((readiness?.summary?.blocker || 0) > 0) {
+      if ((readinessReport?.summary?.blocker || 0) > 0) {
         throw new Error("Còn lỗi cần sửa trước khi tải file MISA.");
       }
-      if ((readiness?.summary?.warning || 0) > 0 && !acknowledgeWarnings) {
+      if ((readinessReport?.summary?.warning || 0) > 0 && !acknowledgeWarnings) {
         throw new Error(
           "Vui lòng rà soát và xác nhận các cảnh báo trước khi tải file MISA.",
         );
@@ -720,6 +755,7 @@ const ConvertPage = () => {
       console.error("[ConvertPage] Download failed:", err);
       if (err.payload?.issues) {
         setReadinessReport(err.payload);
+        setAcknowledgeWarnings(false);
       }
       if (exportStarted) {
         await updateConversionRunLog("failed", {
@@ -730,6 +766,22 @@ const ConvertPage = () => {
       }
       setErrorMsg(err.message || "Không thể tải file.");
       setConvStatus(previewRows.length ? STATUS.PREVIEW : STATUS.MAPPING);
+    }
+  };
+
+  const handlePrimaryDownloadCta = async () => {
+    if (downloadCta.action === "validate") {
+      await handleReadinessCheck();
+      requestAnimationFrame(() => {
+        readinessSectionRef.current?.scrollIntoView({
+          behavior: "smooth",
+          block: "start",
+        });
+      });
+      return;
+    }
+    if (downloadCta.action === "download") {
+      await handleDownload();
     }
   };
 
@@ -748,8 +800,29 @@ const ConvertPage = () => {
     setErrorMsg("");
   };
 
+  const handleCreateWorkspace = async (payload) => {
+    const workspace = await createWorkspace(payload);
+    resetAnalysis();
+    setConvStatus(STATUS.IDLE);
+    setErrorMsg("");
+    return workspace;
+  };
+
+  const handleActivateMasterData = async (snapshotId) => {
+    await activateSnapshot(selectedWorkspaceId, snapshotId);
+    resetAnalysis();
+    setErrorMsg("");
+    if (selectedFile) {
+      await runAnalyze(selectedFile, targetTemplateId);
+    } else {
+      setConvStatus(STATUS.IDLE);
+    }
+  };
+
   const handleConfirmMasterDataAlias = async (resolution, targetCode) => {
     if (!selectedWorkspaceId) return;
+    setReadinessReport(null);
+    setAcknowledgeWarnings(false);
     await saveAlias(selectedWorkspaceId, {
       type: resolution.catalog_type,
       rawValue: resolution.raw_value,
@@ -1048,6 +1121,10 @@ const ConvertPage = () => {
                             {mappingConfidenceLabel}
                           </span>
                         </p>
+                        <p className="pt-1 text-[11px] text-gray-500">
+                          Độ tin cậy chỉ phản ánh gợi ý ghép cột, không xác nhận dữ liệu
+                          đúng nghiệp vụ.
+                        </p>
                       </div>
                     )}
 
@@ -1062,43 +1139,39 @@ const ConvertPage = () => {
                           <Wand2 size={16} />
                           Xem trước
                         </button>
-                        <button
-                          type="button"
-                          className="btn-secondary w-full justify-center py-3"
-                          onClick={handleReadinessCheck}
-                          disabled={
-                            convStatus === STATUS.DOWNLOADING ||
-                            convStatus === STATUS.ANALYZING ||
-                            readinessLoading
-                          }
-                        >
-                          {readinessLoading ? (
-                            <Loader2 size={16} className="animate-spin" />
-                          ) : (
-                            <CheckCircle size={16} />
-                          )}
-                          Kiểm tra lỗi
-                        </button>
-                        <button
-                          type="button"
-                          className="inline-flex w-full items-center justify-center gap-2 rounded-xl bg-emerald-600 px-5 py-3 text-sm font-semibold text-white shadow-sm transition-all duration-200 hover:bg-emerald-700 hover:shadow-md active:scale-[0.98] disabled:pointer-events-none disabled:opacity-50"
-                          onClick={handleDownload}
-                          disabled={
-                            convStatus === STATUS.DOWNLOADING ||
-                            convStatus === STATUS.ANALYZING ||
-                            downloadDisabledByReadiness ||
-                            (!canConvert && convStatus !== STATUS.SUCCESS)
-                          }
-                        >
-                          {convStatus === STATUS.DOWNLOADING ? (
-                            <Loader2 size={16} className="animate-spin" />
-                          ) : (
-                            <Download size={16} />
-                          )}
-                          {convStatus === STATUS.SUCCESS
-                            ? "Tải lại file kết quả"
-                            : "Tải file kết quả"}
-                        </button>
+                        <div className="space-y-1.5">
+                          <button
+                            type="button"
+                            className={`inline-flex w-full items-center justify-center gap-2 rounded-xl px-5 py-3 text-sm font-semibold text-white shadow-sm transition-all duration-200 active:scale-[0.98] disabled:pointer-events-none disabled:opacity-50 ${
+                              downloadCta.action === "download"
+                                ? "bg-emerald-600 hover:bg-emerald-700"
+                                : downloadCta.action === "validate"
+                                  ? "bg-primary-600 hover:bg-primary-700"
+                                  : "bg-slate-600"
+                            }`}
+                            onClick={handlePrimaryDownloadCta}
+                            disabled={
+                              downloadCta.disabled ||
+                              convStatus === STATUS.ANALYZING ||
+                              (!canConvert && convStatus !== STATUS.SUCCESS)
+                            }
+                          >
+                            {downloadCta.loading ? (
+                              <Loader2 size={16} className="animate-spin" />
+                            ) : downloadCta.action === "validate" ? (
+                              <CheckCircle size={16} />
+                            ) : (
+                              <Download size={16} />
+                            )}
+                            {downloadCta.label}
+                          </button>
+                          <p
+                            className="text-center text-[11px] leading-relaxed text-gray-500"
+                            aria-live="polite"
+                          >
+                            {downloadCta.helper}
+                          </p>
+                        </div>
                       </div>
                     )}
                   </div>
@@ -1111,7 +1184,7 @@ const ConvertPage = () => {
                 </div>
 
                 <div className="space-y-4 min-w-0">
-                  {convStatus === STATUS.ERROR && errorMsg && (
+                  {errorMsg && convStatus !== STATUS.ANALYZING && (
                     <Alert variant="error" className="text-left">
                       {errorMsg}
                     </Alert>
@@ -1215,7 +1288,6 @@ const ConvertPage = () => {
                             </div>
                             <span className="inline-flex w-fit rounded-full bg-white px-3.5 py-1.5 text-sm font-semibold text-blue-700 ring-1 ring-blue-100">
                               {mappingSourceLabel}
-                              {mappingConfidenceLabel}
                             </span>
                           </div>
                           <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-2">
@@ -1223,8 +1295,10 @@ const ConvertPage = () => {
                               <div
                                 key={item.header}
                                 className={`rounded-xl border px-3 py-2 ${
-                                  item.ok
-                                    ? "border-emerald-100 bg-white"
+                                  item.review
+                                    ? "border-rose-200 bg-rose-50"
+                                    : item.ok
+                                      ? "border-emerald-100 bg-white"
                                     : "border-amber-200 bg-amber-50"
                                 }`}
                               >
@@ -1233,7 +1307,11 @@ const ConvertPage = () => {
                                 </div>
                                 <div
                                   className={`mt-1 truncate text-sm font-semibold ${
-                                    item.ok ? "text-gray-900" : "text-amber-700"
+                                    item.review
+                                      ? "text-rose-700"
+                                      : item.ok
+                                        ? "text-gray-900"
+                                        : "text-amber-700"
                                   }`}
                                   title={item.value}
                                 >
@@ -1245,8 +1323,19 @@ const ConvertPage = () => {
                         </div>
                       )}
 
+                      <MappingCoverageSummary
+                        summary={mappingSummary}
+                        activeFilter={mappingFilter}
+                        onFilterChange={setMappingFilter}
+                        confidence={confidence}
+                        sourceLabel={mappingSourceLabel}
+                      />
+
                       {(readinessReport || readinessLoading) && (
-                        <div className="space-y-3 border-b border-gray-100 bg-white px-5 py-4 sm:px-6">
+                        <div
+                          ref={readinessSectionRef}
+                          className="scroll-mt-24 space-y-3 border-b border-gray-100 bg-white px-5 py-4 sm:px-6"
+                        >
                           <ValidationReadinessCard
                             report={readinessReport}
                             loading={readinessLoading}
@@ -1264,6 +1353,9 @@ const ConvertPage = () => {
                           <MasterDataResolutionTable
                             masterData={masterDataState}
                             onConfirmAlias={handleConfirmMasterDataAlias}
+                            onSetupWorkspace={() => setWorkspaceSetupOpen(true)}
+                            onManageMasterData={() => setMasterDataManagerOpen(true)}
+                            hasWorkspace={Boolean(selectedWorkspaceId)}
                             onSearchCandidates={(type, query) =>
                               searchCatalog(selectedWorkspaceId, type, query)
                             }
@@ -1300,7 +1392,8 @@ const ConvertPage = () => {
                             </tr>
                           </thead>
                           <tbody>
-                            {targetHeaders.map((target) => {
+                            {visibleMappingItems.map((mappingItem) => {
+                              const target = mappingItem.target;
                               const matchedRaw = targetMapping[target] || "";
                               const isHighlighted = focusedTarget === target;
                               return (
@@ -1311,11 +1404,20 @@ const ConvertPage = () => {
                                     else delete targetRowRefs.current[target];
                                   }}
                                   className={`border-t border-gray-100 align-top transition-colors ${
-                                    isHighlighted ? "bg-amber-50/80" : "bg-white"
+                                    isHighlighted
+                                      ? "bg-amber-50/80"
+                                      : mappingItem.mode === "mixed"
+                                        ? "bg-rose-50/60"
+                                        : "bg-white"
                                   }`}
                                 >
                                   <td className="px-4 py-3 font-semibold text-gray-800">
-                                    {target}
+                                    <div>{target}</div>
+                                    {mappingItem.mode === "mixed" && (
+                                      <span className="mt-1 inline-flex rounded-full bg-rose-100 px-2 py-0.5 text-[10px] font-bold text-rose-700">
+                                        Nhiều cách điền · Cần rà soát
+                                      </span>
+                                    )}
                                   </td>
                                   <td className="px-4 py-3">
                                     <select
@@ -1381,6 +1483,16 @@ const ConvertPage = () => {
                                 </tr>
                               );
                             })}
+                            {visibleMappingItems.length === 0 && (
+                              <tr>
+                                <td
+                                  colSpan={4}
+                                  className="border-t border-gray-100 px-4 py-10 text-center text-sm text-gray-500"
+                                >
+                                  Không có cột phù hợp với bộ lọc hiện tại.
+                                </td>
+                              </tr>
+                            )}
                           </tbody>
                         </table>
                       </div>
@@ -1421,22 +1533,35 @@ const ConvertPage = () => {
                                 )}
                                 Kiểm tra lỗi
                               </button>
-                              <button
-                                type="button"
-                                className="inline-flex items-center justify-center gap-2 rounded-xl bg-emerald-600 px-5 py-2.5 text-sm font-semibold text-white shadow-sm transition-all duration-200 hover:bg-emerald-700 hover:shadow-md active:scale-[0.98] disabled:pointer-events-none disabled:opacity-50"
-                                onClick={handleDownload}
-                                disabled={
-                                  convStatus === STATUS.DOWNLOADING ||
-                                  downloadDisabledByReadiness
-                                }
-                              >
-                                {convStatus === STATUS.DOWNLOADING ? (
-                                  <Loader2 size={16} className="animate-spin" />
-                                ) : (
-                                  <Download size={16} />
-                                )}
-                                Tải file kết quả
-                              </button>
+                              <div className="space-y-1">
+                                <button
+                                  type="button"
+                                  className={`inline-flex w-full items-center justify-center gap-2 rounded-xl px-5 py-2.5 text-sm font-semibold text-white shadow-sm transition-all duration-200 active:scale-[0.98] disabled:pointer-events-none disabled:opacity-50 ${
+                                    downloadCta.action === "download"
+                                      ? "bg-emerald-600 hover:bg-emerald-700"
+                                      : downloadCta.action === "validate"
+                                        ? "bg-primary-600 hover:bg-primary-700"
+                                        : "bg-slate-600"
+                                  }`}
+                                  onClick={handlePrimaryDownloadCta}
+                                  disabled={downloadCta.disabled}
+                                >
+                                  {downloadCta.loading ? (
+                                    <Loader2 size={16} className="animate-spin" />
+                                  ) : downloadCta.action === "validate" ? (
+                                    <CheckCircle size={16} />
+                                  ) : (
+                                    <Download size={16} />
+                                  )}
+                                  {downloadCta.label}
+                                </button>
+                                <p
+                                  className="max-w-[240px] text-center text-[11px] leading-relaxed text-gray-500"
+                                  aria-live="polite"
+                                >
+                                  {downloadCta.helper}
+                                </p>
+                              </div>
                             </div>
                           </div>
 
@@ -1479,7 +1604,7 @@ const ConvertPage = () => {
           <WorkspaceSetupModal
             open={workspaceSetupOpen}
             onClose={() => setWorkspaceSetupOpen(false)}
-            onCreate={createWorkspace}
+            onCreate={handleCreateWorkspace}
           />
           <MasterDataManager
             open={masterDataManagerOpen}
@@ -1487,9 +1612,7 @@ const ConvertPage = () => {
             snapshots={snapshots}
             onClose={() => setMasterDataManagerOpen(false)}
             onImport={(type, file) => importCatalog(selectedWorkspaceId, type, file)}
-            onActivate={(snapshotId) =>
-              activateSnapshot(selectedWorkspaceId, snapshotId)
-            }
+            onActivate={handleActivateMasterData}
           />
         </>
       )}
