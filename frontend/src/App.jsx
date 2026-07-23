@@ -23,7 +23,6 @@ const PlansPage = lazy(() => import("./pages/admin/PlansPage"));
 const CouponsPage = lazy(() => import("./pages/admin/CouponsPage"));
 const RevenuePage = lazy(() => import("./pages/admin/RevenuePage"));
 const LogsPage = lazy(() => import("./pages/admin/LogsPage"));
-const StudentAssistantPage = lazy(() => import("./pages/StudentAssistantPage"));
 
 function PageLoader() {
   return (
