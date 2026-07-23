@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "test": "node --test src/utils/converterUx.test.mjs src/utils/masterData.test.mjs src/utils/reconstruction.test.mjs src/utils/studentAssistant.test.mjs src/utils/validationUi.test.mjs src/hooks/useConverterApi.status.test.mjs",
     "build": "vite build",
     "preview": "vite preview",
     "lint": "eslint .",

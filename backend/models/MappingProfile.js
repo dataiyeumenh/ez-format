@@ -2,10 +2,26 @@ const mongoose = require("mongoose");
 
 const mappingProfileSchema = new mongoose.Schema(
   {
+    ownerScope: {
+      type: String,
+      required: [true, "Mapping profile owner scope là bắt buộc"],
+      trim: true,
+      validate: {
+        validator: (value) => Boolean(String(value || "").trim()),
+        message: "Mapping profile owner scope là bắt buộc",
+      },
+      index: true,
+    },
     workspace: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "AccountingWorkspace",
-      required: true,
+      default: null,
+      index: true,
+    },
+    user: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      default: null,
       index: true,
     },
     name: {
@@ -74,11 +90,11 @@ const mappingProfileSchema = new mongoose.Schema(
       required: true,
     },
   },
-  { timestamps: true },
+  { timestamps: true, autoIndex: false },
 );
 
 mappingProfileSchema.index(
-  { workspace: 1, targetTemplateId: 1, sourceSignatureHash: 1 },
+  { ownerScope: 1, targetTemplateId: 1, sourceSignatureHash: 1 },
   { unique: true },
 );
 

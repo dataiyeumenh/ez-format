@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import uuid
 from pathlib import Path
@@ -43,10 +44,17 @@ from app.mapping_profile_client import (
     save_mapping_profile,
 )
 from app.misa_readiness import add_master_data_resolutions, build_readiness_report
-from app.misa_profiles import ProfileStore
+from app.misa_profiles import ProfileStore, local_mapping_owner_scope
 from app.misa_templates import get_misa_template, list_misa_templates
 from app.models import MisaReadinessReport
 from app.normalization import normalize_header
+from app.student_context import StudentContextClaims, verify_student_context
+from app.student_store import (
+    assert_upload_owner,
+    bind_upload_to_student,
+    student_upload_is_bound,
+    student_upload_retention_seconds,
+)
 
 
 UPLOAD_ROOT = BACKEND_ROOT / ".artifacts" / "uploads"
@@ -84,13 +92,23 @@ def templates_payload() -> dict[str, Any]:
     }
 
 
-def save_upload(filename: str, content: bytes) -> tuple[str, Path]:
+def save_upload(
+    filename: str,
+    content: bytes,
+    *,
+    student_claims: StudentContextClaims | None = None,
+    student_ttl_seconds: int | None = None,
+) -> tuple[str, Path]:
     suffix = Path(filename or "").suffix.lower()
     if suffix not in {".xls", ".xlsx"}:
         raise ValueError("Only .xls and .xlsx files are supported.")
     upload_id = str(uuid.uuid4())
     directory = _upload_dir(upload_id)
     directory.mkdir(parents=True, exist_ok=True)
+    if student_claims is not None:
+        if student_ttl_seconds is None:
+            raise ValueError("Student upload TTL là bắt buộc")
+        bind_upload_to_student(upload_id, student_claims, student_ttl_seconds)
     input_path = directory / f"input{suffix}"
     input_path.write_bytes(content)
     metadata = {"upload_id": upload_id, "filename": filename, "input_path": str(input_path)}
@@ -104,8 +122,18 @@ def analyze_upload(
     content: bytes,
     requested_target_template_id: str | None = None,
     conversion_context_token: str | None = None,
+    student_context_token: str | None = None,
 ) -> dict[str, Any]:
-    upload_id, input_path = save_upload(filename, content)
+    if student_context_token and conversion_context_token:
+        raise ValueError("Không thể dùng student context và conversion context đồng thời")
+    student_claims = _verify_student_token(student_context_token, "analyze")
+    student_ttl = student_upload_retention_seconds() if student_claims else None
+    upload_id, input_path = save_upload(
+        filename,
+        content,
+        student_claims=student_claims,
+        student_ttl_seconds=student_ttl,
+    )
     table = read_input_table(input_path)
     target_template_id = detect_target_template_id(table, requested_target_template_id)
     template = get_misa_template(target_template_id)
@@ -114,18 +142,26 @@ def analyze_upload(
         conversion_context_token
     )
     workspace_id = str((context_claims or {}).get("workspace_id") or "")
+    owner_scope = student_claims.owner_scope if student_claims else (
+        f"workspace:{workspace_id}" if workspace_id else local_mapping_owner_scope()
+    )
+    profile_token = student_context_token or conversion_context_token
     store = ProfileStore()
     profile_warning: str | None = None
-    if workspace_id and conversion_context_token:
+    if profile_token:
         try:
             profile = find_mapping_profile(
-                conversion_context_token,
+                profile_token,
                 target_template_id=target_template_id,
                 source_signature_hash=signature.hash,
             )
+            if profile and profile.owner_scope != owner_scope:
+                raise MappingProfileClientError(
+                    "Backend trả về mapping profile sai owner scope"
+                )
             if profile:
                 try:
-                    mark_mapping_profile_used(conversion_context_token, profile.id)
+                    mark_mapping_profile_used(profile_token, profile.id)
                 except MappingProfileClientError as exc:
                     profile_warning = f"Không cập nhật được lượt dùng mapping profile: {exc}"
         except MappingProfileClientError as exc:
@@ -135,11 +171,11 @@ def analyze_upload(
         profile = store.find_by_signature(
             target_template_id=target_template_id,
             source_signature_hash=signature.hash,
-            workspace_id="",
+            owner_scope=owner_scope,
         )
     if profile:
-        if not workspace_id:
-            store.mark_used(profile.id)
+        if not profile_token:
+            store.mark_used(profile.id, owner_scope=owner_scope)
         suggestion = profile_suggestion(profile)
         profile_issues = validate_mapping(target_template_id, suggestion.mapping, template.headers)
         if _has_missing_required_mapping(profile_issues):
@@ -191,6 +227,7 @@ def analyze_upload(
                 if context_claims
                 else None
             ),
+            "owner_scope": owner_scope,
         }
     )
     _write_metadata(upload_id, metadata)
@@ -233,7 +270,9 @@ def preview_mapping(
     defaults: dict[str, Any] | None = None,
     formulas: dict[str, str] | None = None,
     conversion_context_token: str | None = None,
+    student_context_token: str | None = None,
 ) -> dict[str, Any]:
+    _assert_student_upload_context(upload_id, student_context_token, "explain")
     table = _read_upload_table(upload_id)
     template = get_misa_template(target_template_id)
     issues = validate_mapping(target_template_id, mapping, template.headers)
@@ -278,7 +317,9 @@ def readiness_mapping(
     formulas: dict[str, str] | None = None,
     edited_rows: list[dict[str, Any]] | None = None,
     conversion_context_token: str | None = None,
+    student_context_token: str | None = None,
 ) -> dict[str, Any]:
+    _assert_student_upload_context(upload_id, student_context_token, "explain")
     table = _read_upload_table(upload_id)
     template = get_misa_template(target_template_id)
     rows = edited_rows or apply_mapping(
@@ -322,7 +363,9 @@ def confirm_mapping(
     formulas: dict[str, str] | None = None,
     profile_name: str | None = None,
     conversion_context_token: str | None = None,
+    student_context_token: str | None = None,
 ) -> dict[str, Any]:
+    _assert_student_upload_context(upload_id, student_context_token, "attempt")
     metadata = _read_metadata(upload_id)
     _context_for_upload(upload_id, conversion_context_token)
     signature_payload = metadata.get("signature")
@@ -343,15 +386,12 @@ def confirm_mapping(
         defaults,
         template.headers,
     )
-    workspace_id = str(
-        ((metadata.get("conversion_context") or {}).get("workspace_id") or "")
-    )
-    if workspace_id:
-        if not conversion_context_token:
-            raise ValueError("Thiếu conversion context của hồ sơ doanh nghiệp")
+    owner_scope = _owner_scope_from_upload_metadata(metadata)
+    profile_token = student_context_token or conversion_context_token
+    if profile_token:
         try:
             profile = save_mapping_profile(
-                conversion_context_token,
+                profile_token,
                 name=profile_name or f"{target_template_id} profile",
                 target_template_id=target_template_id,
                 source_signature_hash=signature.hash,
@@ -378,7 +418,7 @@ def confirm_mapping(
             formulas=formulas or {},
             confidence=1.0,
             previous=previous,
-            workspace_id="",
+            owner_scope=owner_scope,
         )
     metadata["profile_id"] = profile.id
     metadata["confirmed"] = {
@@ -405,26 +445,25 @@ def export_confirmed_profile(
     edited_rows: list[dict[str, Any]] | None = None,
     acknowledge_warnings: bool = False,
     conversion_context_token: str | None = None,
+    student_context_token: str | None = None,
 ) -> tuple[bytes, str]:
+    _assert_student_upload_context(upload_id, student_context_token, "export")
     table = _read_upload_table(upload_id)
     metadata = _read_metadata(upload_id)
     context, context_status, context_message = _context_for_upload(
         upload_id, conversion_context_token
     )
-    workspace_id = str(
-        ((metadata.get("conversion_context") or {}).get("workspace_id") or "")
-    )
-    if workspace_id:
-        if not conversion_context_token:
-            raise ValueError("Thiếu conversion context của hồ sơ doanh nghiệp")
+    owner_scope = _owner_scope_from_upload_metadata(metadata)
+    profile_token = student_context_token or conversion_context_token
+    if profile_token:
         try:
-            profile = get_mapping_profile(conversion_context_token, profile_id)
+            profile = get_mapping_profile(profile_token, profile_id)
         except MappingProfileClientError as exc:
             raise ValueError(str(exc)) from exc
-        if profile.workspace_id != workspace_id:
+        if profile.owner_scope != owner_scope:
             raise ValueError("Mapping profile không thuộc hồ sơ doanh nghiệp đang xử lý")
     else:
-        profile = ProfileStore().get_profile(profile_id)
+        profile = ProfileStore().get_profile(profile_id, owner_scope=owner_scope)
     template = get_misa_template(profile.target_template_id)
     clean_mapping = sanitize_mapping_for_template(profile.target_template_id, profile.mapping)
     clean_defaults = sanitize_defaults_for_template(
@@ -483,6 +522,55 @@ def _context_for_analyze(
         if exc.status_code == 409:
             raise ValueError(str(exc)) from exc
         return None, "unavailable", str(exc), claims
+
+
+def _owner_scope_from_upload_metadata(metadata: dict[str, Any]) -> str:
+    owner_scope = str(metadata.get("owner_scope") or "").strip()
+    if owner_scope:
+        return owner_scope
+    workspace_id = str(
+        ((metadata.get("conversion_context") or {}).get("workspace_id") or "")
+    ).strip()
+    if workspace_id:
+        return f"workspace:{workspace_id}"
+    return local_mapping_owner_scope()
+
+
+def _student_assistant_enabled() -> bool:
+    return os.getenv("STUDENT_ASSISTANT_ENABLED", "false").lower() in {
+        "1",
+        "true",
+        "yes",
+    }
+
+
+def _verify_student_token(
+    token: str | None,
+    required_scope: str,
+) -> StudentContextClaims | None:
+    if not token:
+        return None
+    if not _student_assistant_enabled():
+        raise ValueError("Student assistant đang tắt")
+    return verify_student_context(token, required_scope)
+
+
+def _assert_student_upload_context(
+    upload_id: str,
+    token: str | None,
+    required_scope: str,
+) -> StudentContextClaims | None:
+    is_bound = student_upload_is_bound(upload_id)
+    if not is_bound:
+        if token:
+            _verify_student_token(token, required_scope)
+            raise ValueError("Upload chưa được bind với student context")
+        return None
+    claims = _verify_student_token(token, required_scope)
+    if claims is None:
+        raise ValueError("Thiếu student context của upload")
+    assert_upload_owner(upload_id, claims)
+    return claims
 
 
 def _context_for_upload(

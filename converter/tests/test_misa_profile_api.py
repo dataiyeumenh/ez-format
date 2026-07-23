@@ -8,6 +8,7 @@ import xlrd
 from fastapi.testclient import TestClient
 
 from app.main import app
+from app.misa_profiles import ProfileStore
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -15,6 +16,149 @@ SAMPLES = ROOT / "fixtures" / "samples"
 
 
 client = TestClient(app)
+
+
+def _profile_values(**overrides):
+    values = {
+        "name": "Owner-scoped mapping",
+        "target_template_id": "bsn_purchase",
+        "source_signature_hash": "signature-1",
+        "source_headers": ["Mã NCC"],
+        "sheet_name": "Sheet1",
+        "header_row": 1,
+        "mapping": {"Mã NCC": "Mã nhà cung cấp"},
+        "defaults": {},
+        "formulas": {},
+        "confidence": 1.0,
+    }
+    values.update(overrides)
+    return values
+
+
+def test_sqlite_profiles_are_isolated_by_non_empty_owner_scope(tmp_path):
+    store = ProfileStore(tmp_path / "profiles.sqlite")
+    owner_a = store.save_profile(**_profile_values(), owner_scope="user:user-a")
+    owner_b = store.save_profile(**_profile_values(), owner_scope="user:user-b")
+
+    assert owner_a.id != owner_b.id
+    assert owner_a.owner_scope == "user:user-a"
+    assert owner_b.owner_scope == "user:user-b"
+    assert (
+        store.find_by_signature(
+            target_template_id="bsn_purchase",
+            source_signature_hash="signature-1",
+            owner_scope="user:user-a",
+        ).id
+        == owner_a.id
+    )
+
+    try:
+        store.get_profile(owner_a.id, owner_scope="user:user-b")
+    except KeyError:
+        pass
+    else:
+        raise AssertionError("cross-owner profile get must fail")
+
+    try:
+        store.mark_used(owner_a.id, owner_scope="user:user-b")
+    except KeyError:
+        pass
+    else:
+        raise AssertionError("cross-owner profile use must fail")
+
+
+def test_sqlite_profile_migration_backfills_owner_scope_and_rejects_empty(tmp_path):
+    path = tmp_path / "legacy.sqlite"
+    with sqlite3.connect(path) as connection:
+        connection.executescript(
+            """
+            CREATE TABLE mapping_profiles (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                target_template_id TEXT NOT NULL,
+                source_signature_hash TEXT NOT NULL,
+                source_headers_json TEXT NOT NULL,
+                sheet_name TEXT NOT NULL,
+                header_row INTEGER NOT NULL,
+                mapping_json TEXT NOT NULL,
+                defaults_json TEXT NOT NULL,
+                formulas_json TEXT NOT NULL,
+                confidence REAL NOT NULL,
+                usage_count INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                workspace_id TEXT NOT NULL DEFAULT ''
+            );
+            """
+        )
+        rows = [
+            ("workspace-profile", "workspace-123"),
+            ("local-profile", ""),
+            ("local-get-profile", ""),
+        ]
+        for profile_id, workspace_id in rows:
+            connection.execute(
+                """
+                INSERT INTO mapping_profiles (
+                    id, name, target_template_id, source_signature_hash,
+                    source_headers_json, sheet_name, header_row, mapping_json,
+                    defaults_json, formulas_json, confidence, usage_count,
+                    created_at, updated_at, workspace_id
+                ) VALUES (?, 'Legacy', 'bsn_purchase', ?, '[]', 'Sheet1', 1,
+                          '{}', '{}', '{}', 1, 0, 'now', 'now', ?)
+                """,
+                (profile_id, f"signature-{profile_id}", workspace_id),
+            )
+
+    ProfileStore(path)
+
+    with sqlite3.connect(path) as connection:
+        migrated = dict(
+            connection.execute(
+                "SELECT id, owner_scope FROM mapping_profiles ORDER BY id"
+            ).fetchall()
+        )
+        assert migrated == {
+            "local-get-profile": "local:legacy",
+            "local-profile": "local:legacy",
+            "workspace-profile": "workspace:workspace-123",
+        }
+        try:
+            connection.execute(
+                "UPDATE mapping_profiles SET owner_scope = '' WHERE id = 'local-profile'"
+            )
+        except sqlite3.IntegrityError:
+            pass
+        else:
+            raise AssertionError("empty owner_scope update must fail")
+
+    store = ProfileStore(path)
+    found = store.find_by_signature(
+        target_template_id="bsn_purchase",
+        source_signature_hash="signature-local-profile",
+    )
+    loaded = store.get_profile("local-get-profile")
+
+    assert found is not None
+    assert found.owner_scope == "local:default"
+    assert loaded.owner_scope == "local:default"
+    with sqlite3.connect(path) as connection:
+        claimed = dict(
+            connection.execute(
+                "SELECT id, owner_scope FROM mapping_profiles WHERE id LIKE 'local-%'"
+            ).fetchall()
+        )
+    assert claimed == {
+        "local-get-profile": "local:default",
+        "local-profile": "local:default",
+    }
+
+
+def test_sqlite_new_local_profiles_default_to_local_owner_scope(tmp_path, monkeypatch):
+    monkeypatch.delenv("LOCAL_MAPPING_OWNER_SCOPE", raising=False)
+    profile = ProfileStore(tmp_path / "profiles.sqlite").save_profile(**_profile_values())
+
+    assert profile.owner_scope == "local:default"
 
 
 def test_templates_endpoint_reads_real_misa_headers():

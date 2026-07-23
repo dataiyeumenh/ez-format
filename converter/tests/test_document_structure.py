@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import openpyxl
+import xlwt
 
 from app.document_structure import (
     enforce_workbook_limits,
@@ -32,6 +33,41 @@ def test_xlsx_structure_reports_hidden_formula_and_merged_cells(tmp_path):
         "formula_cells_detected",
         "hidden_rows_or_columns_detected",
         "merged_cells_detected",
+    }
+
+
+def test_xls_structure_warns_when_formula_detection_is_unavailable_and_normalizes_hidden_cells(
+    tmp_path,
+):
+    path = tmp_path / "structure.xls"
+    workbook = xlwt.Workbook()
+    sheet = workbook.add_sheet("Data")
+    sheet.write(0, 0, "Mã hóa đơn")
+    sheet.write(1, 0, "HD01")
+    sheet.write(1, 1, xlwt.Formula("1+1"))
+    sheet.row(1).hidden = True
+    sheet.col(0).hidden = True
+    workbook.save(str(path))
+
+    result = inspect_workbook_structure(path)
+
+    assert result["format"] == "xls"
+    assert result["formula_cell_count"] == 0
+    assert result["formula_detection"] == "unavailable"
+    assert result["sheets"] == [
+        {
+            "name": "Data",
+            "max_row": 2,
+            "max_column": 2,
+            "hidden_rows": [2],
+            "hidden_columns": ["A"],
+            "formula_cells": [],
+            "merged_ranges": [],
+        }
+    ]
+    assert {item["code"] for item in result["warnings"]} == {
+        "formula_detection_unavailable",
+        "hidden_rows_or_columns_detected",
     }
 
 

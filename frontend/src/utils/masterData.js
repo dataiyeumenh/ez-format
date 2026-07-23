@@ -18,6 +18,20 @@ export const PRIMARY_CATALOG_TYPES = [
   "unit",
 ];
 
+export const MASTER_DATA_PAGE_SIZE = 20;
+
+const ACTION_REQUIRED_STATUSES = new Set(["suggested", "missing", "conflict"]);
+
+function normalizeSearchText(value) {
+  return String(value ?? "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/đ/g, "d")
+    .replace(/Đ/g, "D")
+    .toLowerCase()
+    .trim();
+}
+
 export function summarizeMasterData(resolutions = []) {
   return resolutions.reduce(
     (summary, item) => {
@@ -45,6 +59,87 @@ export function groupMasterDataResolutions(resolutions = []) {
     });
   }
   return [...grouped.values()];
+}
+
+export function summarizeResolutionGroups(resolutions = []) {
+  const grouped = groupMasterDataResolutions(resolutions);
+  return grouped.reduce(
+    (summary, item) => {
+      if (ACTION_REQUIRED_STATUSES.has(item.status)) summary.actionRequired += 1;
+      if (item.status === "not_checked") summary.notChecked += 1;
+      if (item.status === "verified") summary.verified += 1;
+      if (item.required && ["missing", "conflict"].includes(item.status)) {
+        summary.requiredCritical += 1;
+      }
+      return summary;
+    },
+    {
+      actionRequired: 0,
+      notChecked: 0,
+      verified: 0,
+      requiredCritical: 0,
+      total: grouped.length,
+    },
+  );
+}
+
+export function filterMasterDataResolutions(
+  resolutions = [],
+  { statusFilter = "all", query = "" } = {},
+) {
+  const normalizedQuery = normalizeSearchText(query);
+  return resolutions.filter((item) => {
+    if (
+      statusFilter === "action_required" &&
+      !ACTION_REQUIRED_STATUSES.has(item.status)
+    ) {
+      return false;
+    }
+    if (statusFilter !== "all" && statusFilter !== "action_required") {
+      if (item.status !== statusFilter) return false;
+    }
+    if (!normalizedQuery) return true;
+
+    const candidates = (item.candidates || []).flatMap((candidate) => [
+      candidate.code,
+      candidate.name,
+      candidate.tax_code,
+    ]);
+    const searchable = [
+      CATALOG_LABELS[item.catalog_type],
+      item.catalog_type,
+      item.field,
+      item.raw_value,
+      item.target_code,
+      ...candidates,
+    ];
+    return searchable.some((value) =>
+      normalizeSearchText(value).includes(normalizedQuery),
+    );
+  });
+}
+
+export function paginateMasterDataResolutions(
+  resolutions = [],
+  requestedPage = 0,
+  pageSize = MASTER_DATA_PAGE_SIZE,
+) {
+  const safePageSize = Math.max(1, Number(pageSize) || MASTER_DATA_PAGE_SIZE);
+  const totalPages = Math.max(1, Math.ceil(resolutions.length / safePageSize));
+  const page = Math.min(
+    totalPages - 1,
+    Math.max(0, Math.trunc(Number(requestedPage) || 0)),
+  );
+  const offset = page * safePageSize;
+  const items = resolutions.slice(offset, offset + safePageSize);
+  return {
+    items,
+    page,
+    totalPages,
+    total: resolutions.length,
+    start: resolutions.length ? offset + 1 : 0,
+    end: offset + items.length,
+  };
 }
 
 export function indexMasterDataSnapshots(snapshots = []) {

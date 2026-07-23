@@ -9,12 +9,9 @@ const baseURL = configuredBaseURL
   ? `${String(configuredBaseURL).replace(/\/+$/, "")}/api`
   : "/api";
 
-const api = axios.create({
-  baseURL,
-  headers: {
-    "Content-Type": "application/json",
-  },
-});
+// Let Axios select the content type from each payload. A global JSON header
+// serializes FormData uploads as JSON and strips the attached Excel file.
+const api = axios.create({ baseURL });
 
 // Attach token to every request
 api.interceptors.request.use((config) => {

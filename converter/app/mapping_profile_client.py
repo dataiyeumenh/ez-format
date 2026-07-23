@@ -128,6 +128,10 @@ def _request(
 
 
 def _profile_from_payload(payload: dict[str, Any]) -> MappingProfile:
+    workspace_id = str(payload.get("workspaceId") or "")
+    owner_scope = str(payload.get("ownerScope") or "").strip()
+    if not owner_scope and workspace_id:
+        owner_scope = f"workspace:{workspace_id}"
     return MappingProfile(
         id=str(payload.get("id") or ""),
         name=str(payload.get("name") or ""),
@@ -141,5 +145,6 @@ def _profile_from_payload(payload: dict[str, Any]) -> MappingProfile:
         formulas=dict(payload.get("formulas") or {}),
         confidence=float(payload.get("confidence") or 0),
         usage_count=int(payload.get("usageCount") or 0),
-        workspace_id=str(payload.get("workspaceId") or ""),
+        owner_scope=owner_scope,
+        workspace_id=workspace_id,
     )

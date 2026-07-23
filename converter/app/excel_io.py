@@ -9,9 +9,11 @@ from typing import Any
 import openpyxl
 import xlrd
 import xlwt
+from openpyxl.styles.numbers import is_date_format
 from xlutils.filter import XLWTWriter
 
 from app.normalization import is_blank, normalize_header
+from app.parsing import parse_date
 
 
 SMART_PURCHASE_HEADERS = frozenset(
@@ -365,7 +367,12 @@ def write_xls_from_template(
             if not header:
                 continue
             value = record.get(header, "")
-            sheet.write(record_idx, col_idx, _xls_cell_value(value), data_styles[col_idx])
+            sheet.write(
+                record_idx,
+                col_idx,
+                _xls_cell_value(value, data_styles[col_idx]),
+                data_styles[col_idx],
+            )
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     workbook.save(str(output_path))
@@ -470,11 +477,15 @@ def _style_for_cell(
     return styles[xf_index]
 
 
-def _xls_cell_value(value: Any) -> Any:
+def _xls_cell_value(value: Any, style: xlwt.Style.XFStyle) -> Any:
     if isinstance(value, (datetime, date)):
         return _excel_serial(value)
     if value is None:
         return ""
+    if isinstance(value, str) and is_date_format(style.num_format_str):
+        parsed = parse_date(value)
+        if isinstance(parsed, (datetime, date)):
+            return _excel_serial(parsed)
     return value
 
 

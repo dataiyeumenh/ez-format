@@ -1,39 +1,59 @@
-{
-  "passed": [
-    "Prerequisites",
-    "Fixtures templates",
-    "Backend syntax",
-    "Frontend build",
-    "Converter API smoke"
-  ],
-  "ok": true,
-  "steps": [
-    {
-      "seconds": 0.0065475,
-      "status": "ok",
-      "name": "Prerequisites"
-    },
-    {
-      "seconds": 0.0053177,
-      "status": "ok",
-      "name": "Fixtures templates"
-    },
-    {
-      "seconds": 0.2517922,
-      "status": "ok",
-      "name": "Backend syntax"
-    },
-    {
-      "seconds": 3.5077568,
-      "status": "ok",
-      "name": "Frontend build"
-    },
-    {
-      "seconds": 1.5551609,
-      "status": "ok",
-      "name": "Converter API smoke"
-    }
-  ],
-  "timestamp": "2026-07-16 11:23:05",
-  "failed": []
+﻿{
+    "ok":  true,
+    "timestamp":  "2026-07-17 21:03:22",
+    "steps":  [
+                  {
+                      "status":  "ok",
+                      "seconds":  0.0072914999999999994,
+                      "name":  "Prerequisites"
+                  },
+                  {
+                      "status":  "ok",
+                      "seconds":  0.0068515999999999994,
+                      "name":  "Fixtures templates"
+                  },
+                  {
+                      "status":  "ok",
+                      "seconds":  0.80313689999999993,
+                      "name":  "Backend syntax"
+                  },
+                  {
+                      "status":  "ok",
+                      "seconds":  5.6738189,
+                      "name":  "Backend student tests"
+                  },
+                  {
+                      "status":  "ok",
+                      "seconds":  0.5517926,
+                      "name":  "Frontend tests"
+                  },
+                  {
+                      "status":  "ok",
+                      "seconds":  15.410507099999998,
+                      "name":  "Frontend build"
+                  },
+                  {
+                      "status":  "ok",
+                      "seconds":  2.211594,
+                      "name":  "Converter API smoke"
+                  },
+                  {
+                      "status":  "ok",
+                      "seconds":  4.0703223,
+                      "name":  "Converter student integration"
+                  }
+              ],
+    "failed":  [
+
+               ],
+    "passed":  [
+                   "Prerequisites",
+                   "Fixtures templates",
+                   "Backend syntax",
+                   "Backend student tests",
+                   "Frontend tests",
+                   "Frontend build",
+                   "Converter API smoke",
+                   "Converter student integration"
+               ]
 }
