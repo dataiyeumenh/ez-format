@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Loader2, Plus, Star, X } from "lucide-react";
+import { Loader2, Plus, Star, Trash2, X } from "lucide-react";
 import AdminLayout from "../../components/admin/AdminLayout";
 import api from "../../services/api";
 
@@ -43,9 +43,11 @@ const PlansPage = () => {
   const [plans, setPlans] = useState([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [deleting, setDeleting] = useState(false);
   const [error, setError] = useState("");
   const [modalMode, setModalMode] = useState(null);
   const [editingPlan, setEditingPlan] = useState(null);
+  const [deletingPlan, setDeletingPlan] = useState(null);
   const [form, setForm] = useState(emptyForm);
 
   const isEditing = modalMode === "edit";
@@ -116,6 +118,33 @@ const PlansPage = () => {
       setError(err.response?.data?.message || "Không thể lưu gói dịch vụ.");
     } finally {
       setSaving(false);
+    }
+  };
+
+
+  const openDeleteModal = (plan) => {
+    setError("");
+    setDeletingPlan(plan);
+  };
+
+  const closeDeleteModal = () => {
+    if (deleting) return;
+    setDeletingPlan(null);
+  };
+
+  const handleDeletePlan = async () => {
+    if (!deletingPlan) return;
+    setDeleting(true);
+    setError("");
+    try {
+      await api.delete(`/admin/plans/${deletingPlan.id}`);
+      setDeletingPlan(null);
+      await fetchPlans();
+    } catch (err) {
+      setError(err.response?.data?.message || "Không thể xoá gói dịch vụ.");
+      setDeletingPlan(null);
+    } finally {
+      setDeleting(false);
     }
   };
 
@@ -198,13 +227,28 @@ const PlansPage = () => {
                     <Star size={12} /> Đang nổi bật ở Pricing
                   </p>
                 )}
-                <button
-                  type="button"
-                  onClick={() => openEditModal(plan)}
-                  className="mt-2 w-full rounded-lg border border-gray-200 py-2 text-sm font-medium text-gray-600 transition-colors hover:bg-gray-50"
-                >
-                  Chỉnh sửa
-                </button>
+                <div className="mt-2 flex gap-2">
+                  <button
+                    type="button"
+                    onClick={() => openEditModal(plan)}
+                    className="flex-1 rounded-lg border border-gray-200 py-2 text-sm font-medium text-gray-600 transition-colors hover:bg-gray-50"
+                  >
+                    Chỉnh sửa
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => openDeleteModal(plan)}
+                    disabled={String(plan.code || "").toLowerCase() === "free"}
+                    title={
+                      String(plan.code || "").toLowerCase() === "free"
+                        ? "Không thể xoá gói miễn phí mặc định"
+                        : "Xoá gói dịch vụ"
+                    }
+                    className="inline-flex items-center justify-center rounded-lg border border-red-200 px-3 py-2 text-sm font-medium text-red-600 transition-colors hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-40"
+                  >
+                    <Trash2 size={15} />
+                  </button>
+                </div>
               </div>
             ))}
           </div>
@@ -407,6 +451,53 @@ const PlansPage = () => {
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {deletingPlan && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4"
+          onClick={closeDeleteModal}
+        >
+          <div
+            className="w-full max-w-md rounded-2xl bg-white p-6 shadow-xl"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="mb-4 flex h-12 w-12 items-center justify-center rounded-full bg-red-50 text-red-600">
+              <Trash2 size={22} />
+            </div>
+            <h2 className="text-lg font-bold text-gray-900">Xoá gói dịch vụ?</h2>
+            <p className="mt-2 text-sm text-gray-600">
+              Bạn sắp xoá gói <span className="font-semibold text-gray-900">{deletingPlan.name}</span>
+              {" "}
+              (<span className="font-mono text-xs">{deletingPlan.code}</span>). Hành động này không thể hoàn tác.
+            </p>
+            {Number(deletingPlan.activeUsers || 0) > 0 && (
+              <p className="mt-3 rounded-lg border border-amber-100 bg-amber-50 px-3 py-2 text-sm text-amber-800">
+                Gói này đang có {Number(deletingPlan.activeUsers).toLocaleString("vi-VN")} người dùng.
+                Hệ thống sẽ từ chối xoá nếu vẫn còn user gắn gói.
+              </p>
+            )}
+            <div className="mt-5 flex gap-3">
+              <button
+                type="button"
+                onClick={closeDeleteModal}
+                disabled={deleting}
+                className="flex-1 rounded-lg border border-gray-200 py-2.5 text-sm font-medium text-gray-600 hover:bg-gray-50 disabled:opacity-50"
+              >
+                Huỷ
+              </button>
+              <button
+                type="button"
+                onClick={handleDeletePlan}
+                disabled={deleting}
+                className="flex flex-1 items-center justify-center gap-2 rounded-lg bg-red-600 py-2.5 text-sm font-semibold text-white hover:bg-red-700 disabled:bg-red-400"
+              >
+                {deleting && <Loader2 size={14} className="animate-spin" />}
+                {deleting ? "Đang xoá..." : "Xoá gói"}
+              </button>
+            </div>
           </div>
         </div>
       )}

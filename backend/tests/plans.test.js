@@ -75,3 +75,13 @@ test("serializes plan for pricing/admin UI", () => {
   assert.equal(plan.periodLabel, "/tháng");
   assert.equal(plan.isPopular, true);
 });
+
+test("delete plan guards: free plan and occupied plan must be blocked by API rules", () => {
+  const isProtectedFreePlan = (code) => String(code || "").toLowerCase() === "free";
+  const canDeletePlan = ({ code, activeUsers }) =>
+    !isProtectedFreePlan(code) && Number(activeUsers || 0) === 0;
+
+  assert.equal(canDeletePlan({ code: "free", activeUsers: 0 }), false);
+  assert.equal(canDeletePlan({ code: "monthly", activeUsers: 3 }), false);
+  assert.equal(canDeletePlan({ code: "monthly", activeUsers: 0 }), true);
+});

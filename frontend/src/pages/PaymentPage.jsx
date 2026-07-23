@@ -1,43 +1,10 @@
 import { useMemo, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
-import { FileText, Loader2 } from "lucide-react";
+import { FileText, Loader2, Tag } from "lucide-react";
 import Navbar from "../components/Navbar";
 import Footer from "../components/Footer";
 import api from "../services/api";
 import { useAuth } from "../context/AuthContext";
-
-const AppleLogo = () => (
-  <svg viewBox="0 0 814 1000" className="w-5 h-5" fill="currentColor">
-    <path d="M788.1 340.9c-5.8 4.5-108.2 62.2-108.2 190.5 0 148.4 130.3 200.9 134.2 202.2-.6 3.2-20.7 71.9-68.7 141.9-42.8 61.6-87.5 123.1-155.5 123.1s-85.5-39.5-164-39.5c-76 0-103.7 40.8-165.9 40.8s-105.3-57.9-155.5-127.4C46 790.7 0 663 0 541.8c0-207.5 135.4-317.3 269-317.3 71 0 130.5 46.4 174.9 46.4 42.7 0 109.2-49 192.5-49 30.4.1 107.9 4 167.1 56zM527.2 23.6C544.3-5 558.9-49.8 558.9-80c0-3.2-.6-6.4-1.2-9.7-40.8 3.2-89.5 27.8-118.8 56.2-23.1 22.5-42 64.5-42 99.5 0 3.8.6 7.7 1.3 11.5 2.6.6 6.4 1.3 10.3 1.3 36.8-.1 82.1-24.6 119.7-55.2z" />
-  </svg>
-);
-
-const GoogleLogo = () => (
-  <svg viewBox="0 0 488 512" className="w-5 h-5">
-    <path
-      fill="#4285F4"
-      d="M488 261.8C488 403.3 391.1 504 248 504 110.8 504 0 393.2 0 256S110.8 8 248 8c66.8 0 123 24.5 166.3 64.9l-67.5 64.9C315.2 97.9 283.8 86 248 86c-86.3 0-156.2 72.5-156.2 170s69.9 170 156.2 170c100.5 0 138.4-72.1 143.1-109.1H248v-85.3h236.1c2.3 12.7 3.9 24.9 3.9 41.4z"
-    />
-  </svg>
-);
-
-const paymentMethods = [
-  { id: "apple", label: "Pay", icon: <AppleLogo /> },
-  { id: "google", label: "Pay", icon: <GoogleLogo /> },
-  {
-    id: "card",
-    label: "Thanh toán qua thẻ ngân hàng",
-    desc: "Để thanh toán, vui lòng nhập thông tin thẻ VISA, MasterCard hoặc Maestro của bạn.",
-    icon: "💳",
-  },
-  {
-    id: "banking",
-    label: "Thanh toán qua Internet Banking",
-    desc: "Bạn muốn thanh toán ngay qua ngân hàng trực tuyến? Chỉ cần chọn ngân hàng và tiến hành giao dịch.",
-    icon: "🏦",
-    highlight: true,
-  },
-];
 
 function formatVnd(amount) {
   return new Intl.NumberFormat("vi-VN", {
@@ -51,19 +18,26 @@ const PaymentPage = () => {
   const location = useLocation();
   const navigate = useNavigate();
   const { user } = useAuth();
-  const [selected, setSelected] = useState("banking");
   const [loading, setLoading] = useState(false);
+  const [applyingCoupon, setApplyingCoupon] = useState(false);
   const [errorMsg, setErrorMsg] = useState("");
+  const [couponInput, setCouponInput] = useState("");
+  const [couponError, setCouponError] = useState("");
+  const [appliedCoupon, setAppliedCoupon] = useState(null);
 
   const selectedPlan = location.state?.plan;
   const planId = location.state?.planId || selectedPlan?.id;
   const planCode = location.state?.planCode || selectedPlan?.code;
+  const originalAmount = Number(
+    selectedPlan?.price ?? location.state?.planPriceAmount ?? 0,
+  );
+
   const plan = useMemo(
     () => ({
       name: selectedPlan?.name || location.state?.planName || "Gói EzFormat",
-      price: selectedPlan?.price
+      priceLabel: selectedPlan?.price
         ? formatVnd(selectedPlan.price)
-        : location.state?.planPrice || "",
+        : location.state?.planPrice || formatVnd(originalAmount),
       description:
         selectedPlan?.code === "perfile"
           ? `Cộng ${selectedPlan.fileCredits || 1} lượt chuyển đổi`
@@ -71,8 +45,63 @@ const PaymentPage = () => {
             ? `Gia hạn ${selectedPlan.durationDays} ngày`
             : "Thanh toán EzFormat",
     }),
-    [location.state?.planName, location.state?.planPrice, selectedPlan],
+    [location.state?.planName, location.state?.planPrice, originalAmount, selectedPlan],
   );
+
+  const discountAmount = Number(appliedCoupon?.discountAmount || 0);
+  const finalAmount = appliedCoupon
+    ? Number(appliedCoupon.finalAmount || 0)
+    : originalAmount;
+
+  const handleApplyCoupon = async () => {
+    if (!user) {
+      navigate("/login");
+      return;
+    }
+    if (!planId && !planCode) {
+      setCouponError("Vui lòng chọn lại gói thanh toán.");
+      return;
+    }
+    const code = couponInput.trim().toUpperCase();
+    if (!code) {
+      setCouponError("Vui lòng nhập mã giảm giá.");
+      return;
+    }
+
+    setApplyingCoupon(true);
+    setCouponError("");
+    setErrorMsg("");
+    try {
+      const { data } = await api.post("/payments/preview-coupon", {
+        planId,
+        planCode,
+        couponCode: code,
+      });
+      setAppliedCoupon({
+        code: data.coupon?.code || code,
+        description: data.coupon?.description || "",
+        discountPercent: data.coupon?.discountPercent,
+        discountAmount: data.discountAmount,
+        finalAmount: data.finalAmount,
+        originalAmount: data.originalAmount,
+      });
+      setCouponInput(data.coupon?.code || code);
+    } catch (error) {
+      setAppliedCoupon(null);
+      setCouponError(
+        error.response?.data?.message ||
+          error.message ||
+          "Không thể áp dụng mã giảm giá.",
+      );
+    } finally {
+      setApplyingCoupon(false);
+    }
+  };
+
+  const handleRemoveCoupon = () => {
+    setAppliedCoupon(null);
+    setCouponError("");
+  };
 
   const handleCreatePayment = async () => {
     if (!user) {
@@ -87,7 +116,11 @@ const PaymentPage = () => {
     setLoading(true);
     setErrorMsg("");
     try {
-      const response = await api.post("/payments/create", { planId, planCode });
+      const response = await api.post("/payments/create", {
+        planId,
+        planCode,
+        couponCode: appliedCoupon?.code || undefined,
+      });
       const checkoutUrl = response.data?.checkoutUrl;
       if (!checkoutUrl) throw new Error("Backend không trả checkoutUrl.");
       window.location.href = checkoutUrl;
@@ -112,70 +145,32 @@ const PaymentPage = () => {
 
         <div className="max-w-3xl mx-auto bg-white rounded-2xl shadow-sm border border-gray-100 overflow-hidden">
           <div className="grid grid-cols-1 md:grid-cols-2">
-            {/* Left – payment methods */}
             <div className="p-6 border-r border-gray-100">
               <h2 className="text-sm font-semibold text-gray-700 mb-4">
-                Chọn 1 phương thức thanh toán
+                Phương thức thanh toán
               </h2>
               {errorMsg && (
                 <div className="mb-4 rounded-xl border border-red-100 bg-red-50 px-4 py-3 text-sm text-red-700">
                   {errorMsg}
                 </div>
               )}
-              <div className="space-y-3">
-                {paymentMethods.map((m) => (
-                  <button
-                    key={m.id}
-                    onClick={() => setSelected(m.id)}
-                    className={`w-full text-left rounded-xl border transition-all ${
-                      selected === m.id
-                        ? m.highlight
-                          ? "border-blue-500 bg-blue-600 text-white"
-                          : "border-blue-500 bg-blue-50"
-                        : "border-gray-200 hover:border-gray-300 bg-white"
-                    }`}
-                  >
-                    {m.desc ? (
-                      <div className="p-4">
-                        <div className="flex items-center gap-2 mb-1">
-                          {m.id === "card" && (
-                            <div className="flex gap-1">
-                              <span className="text-xs font-bold text-blue-700 bg-blue-100 px-1.5 py-0.5 rounded">
-                                VISA
-                              </span>
-                              <span className="text-xs font-bold text-red-600 bg-red-50 px-1.5 py-0.5 rounded">
-                                MC
-                              </span>
-                            </div>
-                          )}
-                          {m.id === "banking" && <span className="text-lg">🏦</span>}
-                          <span
-                            className={`text-sm font-semibold ${selected === m.id && m.highlight ? "text-white" : "text-gray-800"}`}
-                          >
-                            {m.label}
-                          </span>
-                        </div>
-                        <p
-                          className={`text-xs leading-relaxed ${selected === m.id && m.highlight ? "text-blue-100" : "text-gray-500"}`}
-                        >
-                          {m.desc}
-                        </p>
-                      </div>
-                    ) : (
-                      <div className="flex items-center justify-center gap-2 py-3.5 px-4">
-                        <span className="flex-shrink-0 text-gray-800">{m.icon}</span>
-                        <span className="text-sm font-semibold text-gray-700">
-                          {m.label}
-                        </span>
-                      </div>
-                    )}
-                  </button>
-                ))}
+              <div className="rounded-xl border border-blue-500 bg-blue-600 p-4 text-white">
+                <div className="mb-1 flex items-center gap-2">
+                  <span className="text-lg">🏦</span>
+                  <span className="text-sm font-semibold">
+                    Thanh toán qua Internet Banking
+                  </span>
+                </div>
+                <p className="text-xs leading-relaxed text-blue-100">
+                  Bạn muốn thanh toán ngay qua ngân hàng trực tuyến? Chỉ cần chọn
+                  ngân hàng và tiến hành giao dịch.
+                </p>
               </div>
 
               <button
+                type="button"
                 onClick={handleCreatePayment}
-                disabled={loading || selected !== "banking"}
+                disabled={loading}
                 className="w-full mt-6 bg-orange-500 hover:bg-orange-600 disabled:bg-orange-300 disabled:cursor-not-allowed text-white font-semibold py-3 rounded-xl transition-colors text-sm flex items-center justify-center gap-2"
               >
                 {loading && <Loader2 size={16} className="animate-spin" />}
@@ -183,7 +178,6 @@ const PaymentPage = () => {
               </button>
             </div>
 
-            {/* Right – order summary */}
             <div className="p-6 bg-gray-50/50 flex flex-col">
               <h2 className="text-sm font-semibold text-gray-700 mb-4">
                 Đơn hàng của bạn
@@ -191,32 +185,95 @@ const PaymentPage = () => {
 
               <div className="bg-white rounded-xl border border-gray-100 p-4 flex-1">
                 <div className="space-y-3">
-                  {[
-                    { label: plan.name, value: plan.price },
-                    { label: "Số lượng", value: "1" },
-                    { label: "Quyền lợi", value: plan.description },
-                    {
-                      label: "Áp dụng ưu đãi",
-                      value: "-0 VND",
-                      valueColor: "text-green-600",
-                    },
-                    { label: "Thuế", value: "0 VND" },
-                  ].map((row) => (
-                    <div key={row.label} className="flex justify-between text-sm">
-                      <span className="text-gray-500">{row.label}</span>
-                      <span
-                        className={`font-medium ${row.valueColor || "text-gray-700"}`}
+                  <div className="flex justify-between text-sm">
+                    <span className="text-gray-500">{plan.name}</span>
+                    <span className="font-medium text-gray-700">{plan.priceLabel}</span>
+                  </div>
+                  <div className="flex justify-between text-sm">
+                    <span className="text-gray-500">Số lượng</span>
+                    <span className="font-medium text-gray-700">1</span>
+                  </div>
+                  <div className="flex justify-between text-sm">
+                    <span className="text-gray-500">Quyền lợi</span>
+                    <span className="font-medium text-gray-700 text-right max-w-[55%]">
+                      {plan.description}
+                    </span>
+                  </div>
+                  <div className="flex justify-between text-sm">
+                    <span className="text-gray-500">Áp dụng ưu đãi</span>
+                    <span className="font-medium text-green-600">
+                      -{formatVnd(discountAmount)}
+                    </span>
+                  </div>
+                  <div className="flex justify-between text-sm">
+                    <span className="text-gray-500">Thuế</span>
+                    <span className="font-medium text-gray-700">0 VND</span>
+                  </div>
+                </div>
+
+                <div className="mt-4 rounded-xl border border-dashed border-gray-200 p-3">
+                  <label className="mb-1.5 flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-gray-500">
+                    <Tag size={12} />
+                    Mã giảm giá
+                  </label>
+                  <div className="flex gap-2">
+                    <input
+                      type="text"
+                      value={couponInput}
+                      onChange={(event) => {
+                        setCouponInput(event.target.value.toUpperCase());
+                        setCouponError("");
+                      }}
+                      placeholder="Nhập mã coupon"
+                      className="min-w-0 flex-1 rounded-lg border border-gray-200 px-3 py-2 font-mono text-sm uppercase focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500/20"
+                    />
+                    {appliedCoupon ? (
+                      <button
+                        type="button"
+                        onClick={handleRemoveCoupon}
+                        className="rounded-lg border border-gray-200 px-3 py-2 text-sm font-semibold text-gray-600 hover:bg-gray-50"
                       >
-                        {row.value}
-                      </span>
-                    </div>
-                  ))}
+                        Gỡ
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={handleApplyCoupon}
+                        disabled={applyingCoupon}
+                        className="inline-flex items-center gap-1.5 rounded-lg bg-blue-600 px-3 py-2 text-sm font-semibold text-white hover:bg-blue-700 disabled:bg-blue-300"
+                      >
+                        {applyingCoupon && (
+                          <Loader2 size={14} className="animate-spin" />
+                        )}
+                        Áp dụng
+                      </button>
+                    )}
+                  </div>
+                  {couponError && (
+                    <p className="mt-2 text-xs text-red-600">{couponError}</p>
+                  )}
+                  {appliedCoupon && !couponError && (
+                    <p className="mt-2 text-xs text-emerald-700">
+                      Đã áp dụng{" "}
+                      <span className="font-mono font-semibold">{appliedCoupon.code}</span>
+                      {appliedCoupon.discountPercent
+                        ? ` (−${appliedCoupon.discountPercent}%)`
+                        : ""}
+                    </p>
+                  )}
                 </div>
 
                 <div className="border-t border-dashed border-gray-200 mt-4 pt-4 flex items-center justify-between">
                   <div>
                     <p className="text-xs text-gray-400 mb-0.5">Tổng giá tiền</p>
-                    <p className="text-xl font-black text-gray-900">{plan.price}</p>
+                    <p className="text-xl font-black text-gray-900">
+                      {formatVnd(finalAmount)}
+                    </p>
+                    {discountAmount > 0 && (
+                      <p className="text-xs text-gray-400 line-through">
+                        {formatVnd(originalAmount)}
+                      </p>
+                    )}
                   </div>
                   <div className="w-12 h-12 bg-blue-50 rounded-xl flex items-center justify-center">
                     <FileText size={22} className="text-blue-600" />

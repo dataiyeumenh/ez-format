@@ -8,6 +8,11 @@ const {
   normalizePayOSStatus,
   syncPaymentStatusFromPayOS,
 } = require("../services/paymentStatusSync");
+const {
+  validateCouponForCheckout,
+  recordCouponUsage,
+  normalizeCouponCode,
+} = require("../services/couponService");
 
 function getReturnUrl() {
   return (
@@ -43,12 +48,54 @@ function serializePayment(payment) {
     planCode: payment.planCode,
     planName: payment.planName,
     amount: payment.amount,
+    originalAmount: payment.originalAmount ?? payment.amount,
+    discountAmount: payment.discountAmount || 0,
+    couponCode: payment.couponCode || "",
+    couponApplied: Boolean(payment.couponApplied),
     status: payment.status,
     checkoutUrl: payment.checkoutUrl,
     paymentLinkId: payment.paymentLinkId,
     paidAt: payment.paidAt,
     createdAt: payment.createdAt,
   };
+}
+
+async function previewCoupon(req, res) {
+  try {
+    const planIdentifier = req.body?.planId || req.body?.planCode || req.body?.planType;
+    const plan = await findActivePlanByCodeOrId(planIdentifier);
+    if (!plan || plan.price <= 0 || plan.code === "free") {
+      return res.status(400).json({
+        success: false,
+        message: "Gói thanh toán không hợp lệ",
+      });
+    }
+
+    const { coupon, pricing, serialized } = await validateCouponForCheckout({
+      couponCode: req.body?.couponCode,
+      plan,
+      userId: req.user._id,
+    });
+
+    return res.json({
+      success: true,
+      coupon: {
+        code: serialized.code,
+        description: serialized.description,
+        discountPercent: serialized.discountPercent,
+        maxDiscountAmount: serialized.maxDiscountAmount,
+      },
+      originalAmount: pricing.originalAmount,
+      discountAmount: pricing.discountAmount,
+      finalAmount: pricing.finalAmount,
+      couponId: String(coupon._id),
+    });
+  } catch (error) {
+    return res.status(400).json({
+      success: false,
+      message: error.message || "Không thể áp dụng mã giảm giá",
+    });
+  }
 }
 
 async function createPayment(req, res) {
@@ -63,6 +110,35 @@ async function createPayment(req, res) {
   }
 
   try {
+    let originalAmount = plan.price;
+    let discountAmount = 0;
+    let finalAmount = plan.price;
+    let couponDoc = null;
+    let couponCode = "";
+
+    const rawCouponCode = String(req.body?.couponCode || "").trim();
+    if (rawCouponCode) {
+      const validated = await validateCouponForCheckout({
+        couponCode: rawCouponCode,
+        plan,
+        userId: req.user._id,
+      });
+      couponDoc = validated.coupon;
+      couponCode = normalizeCouponCode(rawCouponCode);
+      originalAmount = validated.pricing.originalAmount;
+      discountAmount = validated.pricing.discountAmount;
+      finalAmount = validated.pricing.finalAmount;
+    }
+
+    // payOS thường yêu cầu số tiền tối thiểu 1000 VND
+    if (finalAmount > 0 && finalAmount < 1000) {
+      return res.status(400).json({
+        success: false,
+        message:
+          "Số tiền sau giảm giá thấp hơn mức tối thiểu 1.000 VND. Vui lòng chọn mã khác.",
+      });
+    }
+
     const orderCode = await generateOrderCode();
     const payment = await Payment.create({
       user: req.user._id,
@@ -70,20 +146,59 @@ async function createPayment(req, res) {
       orderCode,
       planCode: plan.code,
       planName: plan.name,
-      amount: plan.price,
+      amount: finalAmount,
+      originalAmount,
+      discountAmount,
+      coupon: couponDoc ? couponDoc._id : null,
+      couponCode,
+      couponApplied: Boolean(couponDoc),
       status: "pending",
     });
+
+    // Giảm 100% => kích hoạt gói ngay, không qua payOS
+    if (finalAmount === 0) {
+      const user = await User.findById(req.user._id);
+      if (!user) {
+        payment.status = "failed";
+        await payment.save();
+        return res.status(400).json({
+          success: false,
+          message: "Không tìm thấy tài khoản người dùng",
+        });
+      }
+      const paidAt = new Date();
+      applyPaidPlanToUser(user, plan, paidAt);
+      await user.save();
+      payment.status = "paid";
+      payment.paidAt = paidAt;
+      await payment.save();
+      if (couponDoc) {
+        await recordCouponUsage({
+          couponId: couponDoc._id,
+          userId: user._id,
+          paymentId: payment._id,
+          discountAmount,
+        });
+      }
+      return res.status(201).json({
+        success: true,
+        payment: serializePayment(payment),
+        checkoutUrl: getReturnUrl(),
+        orderCode,
+        freeCheckout: true,
+      });
+    }
 
     const payOS = getPayOSClient();
     const paymentLink = await payOS.paymentRequests.create({
       orderCode,
-      amount: plan.price,
+      amount: finalAmount,
       description: buildPaymentDescription(plan.code),
       items: [
         {
           name: plan.name,
           quantity: 1,
-          price: plan.price,
+          price: finalAmount,
         },
       ],
       buyerName: req.user.name,
@@ -104,9 +219,14 @@ async function createPayment(req, res) {
       orderCode,
     });
   } catch (error) {
-    return res.status(500).json({
+    const isCouponError =
+      /mã giảm giá|coupon|áp dụng/i.test(String(error.message || "")) ||
+      error.message?.includes("Mã");
+    return res.status(isCouponError ? 400 : 500).json({
       success: false,
-      message: "Không thể tạo link thanh toán",
+      message: isCouponError
+        ? error.message
+        : "Không thể tạo link thanh toán",
       error: error.message,
     });
   }
@@ -234,6 +354,23 @@ async function handlePayOSWebhook(req, res) {
     payment.paidAt = paidAt;
     await payment.save();
 
+    if (payment.coupon && !payment.couponApplied) {
+      // legacy safety
+    }
+    if (payment.coupon) {
+      const already = await require("../models/CouponUsage").exists({
+        payment: payment._id,
+      });
+      if (!already) {
+        await recordCouponUsage({
+          couponId: payment.coupon,
+          userId: user._id,
+          paymentId: payment._id,
+          discountAmount: payment.discountAmount || 0,
+        });
+      }
+    }
+
     return res.status(200).json({ success: true });
   } catch (error) {
     return res.status(400).json({
@@ -246,6 +383,7 @@ async function handlePayOSWebhook(req, res) {
 
 module.exports = {
   createPayment,
+  previewCoupon,
   getPayment,
   handlePayOSWebhook,
   syncPayment,

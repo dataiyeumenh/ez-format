@@ -18,14 +18,26 @@ const {
   getAdminPlans,
   createPlan,
   updatePlan,
+  deletePlan,
 } = require("../controllers/planController");
+const {
+  listCoupons,
+  getCoupon,
+  createCoupon,
+  updateCoupon,
+  deleteCoupon,
+  listCouponPlanOptions,
+} = require("../controllers/couponController");
 
 router.use(protect, adminOnly);
 
 router.route("/users").get(getUsers).post(createUser);
 router.route("/users/:id").put(updateUser).delete(deleteUser);
 router.route("/plans").get(getAdminPlans).post(createPlan);
-router.route("/plans/:id").put(updatePlan);
+router.route("/plans/:id").put(updatePlan).delete(deletePlan);
+router.get("/coupon-plan-options", listCouponPlanOptions);
+router.route("/coupons").get(listCoupons).post(createCoupon);
+router.route("/coupons/:id").get(getCoupon).put(updateCoupon).delete(deleteCoupon);
 router.get("/revenue", getRevenue);
 router.get("/conversion-runs", getAdminConversionRuns);
 router.get("/feedback", getAdminFeedback);

@@ -72,9 +72,43 @@ async function updatePlan(req, res) {
   }
 }
 
+
+async function deletePlan(req, res) {
+  try {
+    const plan = await Plan.findById(req.params.id);
+    if (!plan) {
+      return res.status(404).json({ success: false, message: "Không tìm thấy gói" });
+    }
+
+    if (String(plan.code || "").toLowerCase() === "free") {
+      return res.status(400).json({
+        success: false,
+        message: "Không thể xoá gói miễn phí mặc định của hệ thống.",
+      });
+    }
+
+    const activeUsers = await User.countDocuments({ plan: plan._id });
+    if (activeUsers > 0) {
+      return res.status(400).json({
+        success: false,
+        message: `Không thể xoá gói đang có ${activeUsers} người dùng. Hãy chuyển họ sang gói khác hoặc đặt gói về Inactive.`,
+      });
+    }
+
+    await plan.deleteOne();
+    return res.json({ success: true, message: "Đã xoá gói dịch vụ." });
+  } catch (error) {
+    return res.status(400).json({
+      success: false,
+      message: error.message || "Không thể xoá gói",
+    });
+  }
+}
+
 module.exports = {
   getPublicPlans,
   getAdminPlans,
   createPlan,
   updatePlan,
+  deletePlan,
 };
