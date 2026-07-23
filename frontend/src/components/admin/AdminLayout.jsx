@@ -7,6 +7,7 @@ import {
   Package,
   BarChart2,
   MessageSquare,
+  TicketPercent,
   LogOut,
   ChevronDown,
 } from "lucide-react";
@@ -18,6 +19,7 @@ const navItems = [
   { icon: Users, label: "Người dùng", path: "/admin/users" },
   { icon: FileText, label: "Chuyển đổi file", path: "/admin/files" },
   { icon: Package, label: "Gói dịch vụ", path: "/admin/plans" },
+  { icon: TicketPercent, label: "Chương trình đặc biệt", path: "/admin/coupons" },
   { icon: BarChart2, label: "Phân tích doanh thu", path: "/admin/revenue" },
   { icon: MessageSquare, label: "Góp ý", path: "/admin/logs" },
 ];
