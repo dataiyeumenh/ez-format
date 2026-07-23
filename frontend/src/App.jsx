@@ -15,6 +15,8 @@ import PricingPage from "./pages/PricingPage";
 import ContactPage from "./pages/ContactPage";
 import PaymentPage from "./pages/PaymentPage";
 import PaymentResultPage from "./pages/PaymentResultPage";
+import AccountingWorkspacePage from "./pages/AccountingWorkspacePage";
+import { studentAssistantEnabled } from "./hooks/useStudentAssistantApi";
 
 const AdminDashboard = lazy(() => import("./pages/admin/DashboardPage"));
 const UsersPage = lazy(() => import("./pages/admin/UsersPage"));
@@ -23,6 +25,7 @@ const PlansPage = lazy(() => import("./pages/admin/PlansPage"));
 const CouponsPage = lazy(() => import("./pages/admin/CouponsPage"));
 const RevenuePage = lazy(() => import("./pages/admin/RevenuePage"));
 const LogsPage = lazy(() => import("./pages/admin/LogsPage"));
+const StudentAssistantPage = lazy(() => import("./pages/StudentAssistantPage"));
 
 function PageLoader() {
   return (
