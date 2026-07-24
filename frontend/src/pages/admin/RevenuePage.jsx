@@ -63,6 +63,17 @@ function formatDateTime(dateValue) {
   }).format(date);
 }
 
+function formatDate(dateValue) {
+  if (!dateValue) return "—";
+  const date = new Date(dateValue);
+  if (Number.isNaN(date.getTime())) return "—";
+  return new Intl.DateTimeFormat("vi-VN", {
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric",
+  }).format(date);
+}
+
 function initials(name = "?") {
   return name
     .split(" ")
@@ -296,13 +307,15 @@ const RevenuePage = () => {
                   <thead>
                     <tr className="border-b border-gray-50">
                       {[
-                        "DATE",
+                        "NGÀY",
                         "USER",
-                        "PLAN",
-                        "ORDER",
-                        "AMOUNT",
-                        "STATUS",
-                        "ACTION",
+                        "GÓI",
+                        "ĐƠN HÀNG",
+                        "MÃ GIẢM",
+                        "GIÁ GỐC",
+                        "GIÁ SAU GIẢM",
+                        "TRẠNG THÁI",
+                        "HÀNH ĐỘNG",
                       ].map((h) => (
                         <th
                           key={h}
@@ -317,7 +330,7 @@ const RevenuePage = () => {
                     {transactions.length === 0 ? (
                       <tr>
                         <td
-                          colSpan={7}
+                          colSpan={9}
                           className="px-5 py-10 text-center text-sm text-gray-500"
                         >
                           Chưa có giao dịch thanh toán nào.
@@ -329,27 +342,27 @@ const RevenuePage = () => {
                           key={t.id}
                           className="border-b border-gray-50 last:border-0 hover:bg-gray-50/50 transition-colors"
                         >
-                          <td className="px-5 py-4 text-sm text-gray-500 whitespace-nowrap">
-                            {formatDateTime(t.createdAt)}
+                          <td className="w-24 px-3 py-4 text-sm text-gray-500 whitespace-nowrap">
+                            {formatDate(t.createdAt)}
                           </td>
-                          <td className="px-5 py-4">
-                            <div className="flex items-center gap-3">
-                              <div className="w-8 h-8 rounded-full bg-blue-500 flex items-center justify-center text-white text-xs font-bold">
+                          <td className="max-w-[140px] px-3 py-4">
+                            <div className="flex items-center gap-2">
+                              <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-blue-500 text-[10px] font-bold text-white">
                                 {initials(t.user?.name)}
                               </div>
-                              <div>
-                                <span className="block text-sm font-medium text-gray-900">
+                              <div className="min-w-0">
+                                <span className="block truncate text-sm font-medium text-gray-900">
                                   {t.user?.name || "Không rõ"}
                                 </span>
-                                <span className="block text-xs text-gray-400">
+                                <span className="block truncate text-xs text-gray-400">
                                   {t.user?.email || "—"}
                                 </span>
                               </div>
                             </div>
                           </td>
-                          <td className="px-5 py-4">
+                          <td className="min-w-[140px] px-5 py-4">
                             <span
-                              className={`text-xs font-semibold px-2.5 py-1 rounded-full ${planColors[t.planType] || "bg-gray-100 text-gray-700"}`}
+                              className={`inline-block text-xs font-semibold px-2.5 py-1 rounded-full ${planColors[t.planType] || planColors[t.planCode] || "bg-gray-100 text-gray-700"}`}
                             >
                               {t.planName}
                             </span>
@@ -362,7 +375,19 @@ const RevenuePage = () => {
                               {t.paymentLinkId || "—"}
                             </div>
                           </td>
-                          <td className="px-5 py-4 text-sm font-semibold text-gray-900">
+                          <td className="px-5 py-4 text-sm">
+                            {t.couponCode ? (
+                              <span className="inline-flex rounded-full bg-amber-50 px-2.5 py-1 font-mono text-xs font-semibold text-amber-700">
+                                {t.couponCode}
+                              </span>
+                            ) : (
+                              <span className="text-xs text-gray-400">Không dùng</span>
+                            )}
+                          </td>
+                          <td className="px-5 py-4 text-sm text-gray-600 whitespace-nowrap">
+                            {formatVnd(t.originalAmount ?? t.amount)}
+                          </td>
+                          <td className="px-5 py-4 text-sm font-semibold text-gray-900 whitespace-nowrap">
                             {formatVnd(t.amount)}
                           </td>
                           <td className="px-5 py-4">
