@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Download, Loader2, MoreVertical, RefreshCw } from "lucide-react";
+import { Download, Loader2, RefreshCw } from "lucide-react";
 import {
   BarChart,
   Bar,
@@ -86,6 +86,7 @@ function initials(name = "?") {
 
 const RevenuePage = () => {
   const [range, setRange] = useState("30d");
+  const [filterStatus, setFilterStatus] = useState("");
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [errorMsg, setErrorMsg] = useState("");
@@ -115,6 +116,11 @@ const RevenuePage = () => {
   const chart = data?.chart || [];
   const planRevenue = useMemo(() => data?.planRevenue || [], [data]);
   const transactions = data?.transactions || [];
+
+  const filteredTransactions = useMemo(() => {
+    if (!filterStatus) return transactions;
+    return transactions.filter((item) => item.status === filterStatus);
+  }, [transactions, filterStatus]);
 
   const bestPlan = useMemo(
     () => [...planRevenue].sort((a, b) => b.amount - a.amount)[0],
@@ -294,13 +300,42 @@ const RevenuePage = () => {
             </div>
 
             <div className="bg-white rounded-xl border border-gray-100">
-              <div className="flex items-center justify-between px-5 py-4 border-b border-gray-100">
-                <h3 className="text-sm font-semibold text-gray-900">
-                  Giao dịch gần đây
-                </h3>
-                <span className="text-sm text-gray-500">
-                  {transactions.length} giao dịch mới nhất
-                </span>
+              <div className="flex flex-col gap-3 px-5 py-4 border-b border-gray-100 sm:flex-row sm:items-center sm:justify-between">
+                <div>
+                  <h3 className="text-sm font-semibold text-gray-900">
+                    Giao dịch gần đây
+                  </h3>
+                  <p className="mt-0.5 text-sm text-gray-500">
+                    {filteredTransactions.length}
+                    {filterStatus ? ` / ${transactions.length}` : ""} giao dịch
+                    {filterStatus ? ` · ${statusLabels[filterStatus] || filterStatus}` : " mới nhất"}
+                  </p>
+                </div>
+                <div className="flex items-center gap-2">
+                  <span className="text-sm font-medium text-gray-500">Bộ lọc:</span>
+                  <select
+                    aria-label="Lọc giao dịch theo trạng thái"
+                    value={filterStatus}
+                    onChange={(event) => setFilterStatus(event.target.value)}
+                    className="rounded-lg border border-gray-200 px-3 py-1.5 text-sm text-gray-600 focus:outline-none focus:ring-2 focus:ring-blue-500/20"
+                  >
+                    <option value="">Tất cả trạng thái</option>
+                    <option value="paid">Thành công</option>
+                    <option value="pending">Đang xử lý</option>
+                    <option value="cancelled">Đã huỷ</option>
+                    <option value="expired">Hết hạn</option>
+                    <option value="failed">Thất bại</option>
+                  </select>
+                  {filterStatus && (
+                    <button
+                      type="button"
+                      onClick={() => setFilterStatus("")}
+                      className="text-sm text-gray-400 transition-colors hover:text-gray-600"
+                    >
+                      Reset
+                    </button>
+                  )}
+                </div>
               </div>
               <div className="overflow-x-auto">
                 <table className="w-full">
@@ -315,7 +350,6 @@ const RevenuePage = () => {
                         "GIÁ GỐC",
                         "GIÁ SAU GIẢM",
                         "TRẠNG THÁI",
-                        "HÀNH ĐỘNG",
                       ].map((h) => (
                         <th
                           key={h}
@@ -327,42 +361,42 @@ const RevenuePage = () => {
                     </tr>
                   </thead>
                   <tbody>
-                    {transactions.length === 0 ? (
+                    {filteredTransactions.length === 0 ? (
                       <tr>
                         <td
-                          colSpan={9}
+                          colSpan={8}
                           className="px-5 py-10 text-center text-sm text-gray-500"
                         >
                           Chưa có giao dịch thanh toán nào.
                         </td>
                       </tr>
                     ) : (
-                      transactions.map((t) => (
+                      filteredTransactions.map((t) => (
                         <tr
                           key={t.id}
                           className="border-b border-gray-50 last:border-0 hover:bg-gray-50/50 transition-colors"
                         >
-                          <td className="w-24 px-3 py-4 text-sm text-gray-500 whitespace-nowrap">
-                            {formatDate(t.createdAt)}
+                          <td className="px-5 py-4 text-sm text-gray-500 whitespace-nowrap">
+                            {formatDateTime(t.createdAt)}
                           </td>
-                          <td className="max-w-[140px] px-3 py-4">
-                            <div className="flex items-center gap-2">
-                              <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-blue-500 text-[10px] font-bold text-white">
+                          <td className="px-5 py-4">
+                            <div className="flex items-center gap-3">
+                              <div className="w-8 h-8 rounded-full bg-blue-500 flex items-center justify-center text-white text-xs font-bold">
                                 {initials(t.user?.name)}
                               </div>
-                              <div className="min-w-0">
-                                <span className="block truncate text-sm font-medium text-gray-900">
+                              <div>
+                                <span className="block text-sm font-medium text-gray-900">
                                   {t.user?.name || "Không rõ"}
                                 </span>
-                                <span className="block truncate text-xs text-gray-400">
+                                <span className="block text-xs text-gray-400">
                                   {t.user?.email || "—"}
                                 </span>
                               </div>
                             </div>
                           </td>
-                          <td className="min-w-[140px] px-5 py-4">
+                          <td className="px-5 py-4">
                             <span
-                              className={`inline-block text-xs font-semibold px-2.5 py-1 rounded-full ${planColors[t.planType] || planColors[t.planCode] || "bg-gray-100 text-gray-700"}`}
+                              className={`text-xs font-semibold px-2.5 py-1 rounded-full ${planColors[t.planType] || planColors[t.planCode] || "bg-gray-100 text-gray-700"}`}
                             >
                               {t.planName}
                             </span>
@@ -398,11 +432,7 @@ const RevenuePage = () => {
                               {statusLabels[t.status] || t.status}
                             </span>
                           </td>
-                          <td className="px-5 py-4">
-                            <button className="text-gray-400 hover:text-gray-600">
-                              <MoreVertical size={16} />
-                            </button>
-                          </td>
+
                         </tr>
                       ))
                     )}
