@@ -1,6 +1,8 @@
 const User = require("../models/User");
 const { getPayOSClient } = require("./payosClient");
 const { applyPaidPlanToUser } = require("./subscriptionService");
+const { recordCouponUsage } = require("./couponService");
+const CouponUsage = require("../models/CouponUsage");
 
 const PAYOS_STATUS_TO_PAYMENT_STATUS = {
   PAID: "paid",
@@ -34,6 +36,19 @@ async function applyPaidPayment(payment, remotePaymentLink) {
   await user.save();
 
   payment.status = "paid";
+
+  // Chỉ trừ lượt coupon khi giao dịch thành công.
+  if (payment.coupon) {
+    const already = await CouponUsage.exists({ payment: payment._id });
+    if (!already) {
+      await recordCouponUsage({
+        couponId: payment.coupon,
+        userId: user._id,
+        paymentId: payment._id,
+        discountAmount: payment.discountAmount || 0,
+      });
+    }
+  }
 }
 
 async function syncPaymentStatusFromPayOS(payment) {

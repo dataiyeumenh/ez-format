@@ -218,7 +218,15 @@ function formatPayment(payment) {
     paymentLinkId: payment.paymentLinkId,
     planCode: payment.planCode,
     planName: payment.planName || PLAN_LABELS[payment.planCode] || payment.planCode,
+    planType: payment.planCode,
     amount: payment.amount,
+    originalAmount:
+      payment.originalAmount !== null && payment.originalAmount !== undefined
+        ? payment.originalAmount
+        : payment.amount,
+    discountAmount: Number(payment.discountAmount || 0),
+    couponCode: payment.couponCode || "",
+    couponApplied: Boolean(payment.couponApplied),
     status: payment.status,
     checkoutUrl: payment.checkoutUrl,
     paidAt: payment.paidAt,

@@ -139,3 +139,17 @@ test("calculates percent discount with optional max cap", () => {
   assert.equal(cappedHard.discountAmount, 50000);
   assert.equal(cappedHard.finalAmount, 450000);
 });
+
+test("pending payments must not count toward limit_per_user logic contract", () => {
+  // Contract: countUserCouponUses only reads CouponUsage (paid success),
+  // never Payment status=pending. Apply-coupon / cancelled checkout must not consume quota.
+  const countUserCouponUsesSource = require("node:fs").readFileSync(
+    require("node:path").join(__dirname, "../services/couponService.js"),
+    "utf8",
+  );
+  assert.match(countUserCouponUsesSource, /CouponUsage\.countDocuments/);
+  assert.doesNotMatch(
+    countUserCouponUsesSource,
+    /Payment\.countDocuments\([\s\S]*status:\s*"pending"/,
+  );
+});
