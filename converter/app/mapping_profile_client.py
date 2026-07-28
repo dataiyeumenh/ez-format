@@ -80,6 +80,15 @@ def mark_mapping_profile_used(token: str, profile_id: str) -> None:
     _request("POST", f"/mapping-profiles/{profile_id}/used", token)
 
 
+def quarantine_mapping_profile(token: str, profile_id: str, reason: str) -> None:
+    _request(
+        "POST",
+        f"/mapping-profiles/{profile_id}/quarantine",
+        token,
+        json_body={"reason": str(reason or "semantic_validation_failed")[:500]},
+    )
+
+
 def _request(
     method: str,
     path: str,
@@ -128,6 +137,10 @@ def _request(
 
 
 def _profile_from_payload(payload: dict[str, Any]) -> MappingProfile:
+    workspace_id = str(payload.get("workspaceId") or "")
+    owner_scope = str(payload.get("ownerScope") or "").strip()
+    if not owner_scope and workspace_id:
+        owner_scope = f"workspace:{workspace_id}"
     return MappingProfile(
         id=str(payload.get("id") or ""),
         name=str(payload.get("name") or ""),
@@ -141,5 +154,9 @@ def _profile_from_payload(payload: dict[str, Any]) -> MappingProfile:
         formulas=dict(payload.get("formulas") or {}),
         confidence=float(payload.get("confidence") or 0),
         usage_count=int(payload.get("usageCount") or 0),
-        workspace_id=str(payload.get("workspaceId") or ""),
+        owner_scope=owner_scope,
+        workspace_id=workspace_id,
+        status=str(payload.get("status") or "active"),
+        quarantined_at=str(payload.get("quarantinedAt") or ""),
+        quarantine_reason=str(payload.get("quarantineReason") or ""),
     )

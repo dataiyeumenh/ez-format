@@ -5,6 +5,11 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "test": "node --test src/utils/converterUx.test.mjs src/utils/masterData.test.mjs src/utils/reconstruction.test.mjs src/utils/studentAssistant.test.mjs src/utils/validationUi.test.mjs src/utils/operationSession.test.mjs src/utils/converterOperations.test.mjs src/utils/converterFeatureSurfaces.test.mjs src/utils/converterGatewayContract.test.mjs src/hooks/useConverterApi.status.test.mjs src/services/api.test.mjs tests/converter-gateway.journey.spec.mjs",
+    "test:converter-gateway-journey": "node --test tests/converter-gateway.journey.spec.mjs",
+    "test:converter-gateway-integration": "playwright test tests/converter-gateway.integration.spec.mjs --workers=1 --reporter=line",
+    "test:converter-gateway-api-integration": "playwright test tests/converter-gateway.api.integration.spec.mjs --workers=1 --reporter=line",
+    "prebuild": "node scripts/check-production-env.mjs",
     "build": "vite build",
     "preview": "vite preview",
     "lint": "eslint .",
@@ -30,6 +35,7 @@
   },
   "devDependencies": {
     "@eslint/js": "^9.19.0",
+    "@playwright/test": "^1.62.0",
     "@types/react": "^18.2.66",
     "@types/react-dom": "^18.2.22",
     "@vitejs/plugin-react": "^4.2.1",

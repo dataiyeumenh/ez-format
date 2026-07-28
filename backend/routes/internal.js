@@ -4,11 +4,24 @@ const {
   getInternalMappingProfile,
   getInternalMasterDataContext,
   markInternalMappingProfileUsed,
+  quarantineInternalMappingProfile,
   saveInternalMappingProfile,
   validateInternalMasterDataContext,
 } = require("../controllers/accountingWorkspaceController");
 
 const router = express.Router();
+const {
+  checkInternalReconstructionProfile,
+  findInternalReconstructionProfile,
+  recordInternalReconstructionEvent,
+} = require("../controllers/reconstructionController");
+const {
+  checkStudentSessionActive,
+  getInternalStudentActivities,
+  recordStudentActivity,
+  recordStudentAnalysisCompleted,
+  recordStudentQuestionEvent,
+} = require("../controllers/studentSessionController");
 router.get("/master-data/context/:snapshotSetHash", (req, res, next) => {
   Promise.resolve(getInternalMasterDataContext(req, res, next)).catch(next);
 });
@@ -28,6 +41,37 @@ router.post("/mapping-profiles", (req, res, next) => {
 });
 router.post("/mapping-profiles/:profileId/used", (req, res, next) => {
   Promise.resolve(markInternalMappingProfileUsed(req, res, next)).catch(next);
+});
+router.post("/mapping-profiles/:profileId/quarantine", (req, res, next) => {
+  Promise.resolve(quarantineInternalMappingProfile(req, res, next)).catch(next);
+});
+router.get("/reconstruction-profiles/by-signature", (req, res, next) => {
+  Promise.resolve(findInternalReconstructionProfile(req, res, next)).catch(
+    next,
+  );
+});
+router.get("/reconstruction-profiles/:profileId/current", (req, res, next) => {
+  Promise.resolve(checkInternalReconstructionProfile(req, res, next)).catch(next);
+});
+router.post("/reconstructions/:id/events", (req, res, next) => {
+  Promise.resolve(recordInternalReconstructionEvent(req, res, next)).catch(
+    next,
+  );
+});
+router.post("/student/sessions/:id/events", (req, res, next) => {
+  Promise.resolve(recordStudentAnalysisCompleted(req, res, next)).catch(next);
+});
+router.post("/student/sessions/:id/questions", (req, res, next) => {
+  Promise.resolve(recordStudentQuestionEvent(req, res, next)).catch(next);
+});
+router.post("/student/sessions/:id/activities", (req, res, next) => {
+  Promise.resolve(recordStudentActivity(req, res, next)).catch(next);
+});
+router.get("/student/sessions/:id/activities", (req, res, next) => {
+  Promise.resolve(getInternalStudentActivities(req, res, next)).catch(next);
+});
+router.get("/student/sessions/:id/active", (req, res, next) => {
+  Promise.resolve(checkStudentSessionActive(req, res, next)).catch(next);
 });
 
 module.exports = router;

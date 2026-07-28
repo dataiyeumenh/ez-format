@@ -4,6 +4,7 @@ import hashlib
 import io
 import json
 import random
+import re
 import zipfile
 from dataclasses import dataclass
 from datetime import datetime
@@ -398,7 +399,14 @@ def _save_deterministic_xlsx(workbook: openpyxl.Workbook, path: Path) -> None:
             info = zipfile.ZipInfo(name, date_time=(2020, 1, 1, 0, 0, 0))
             info.compress_type = zipfile.ZIP_DEFLATED
             info.external_attr = source.getinfo(name).external_attr
-            target.writestr(info, source.read(name))
+            content = source.read(name)
+            if name == "docProps/core.xml":
+                # openpyxl may refresh modified during save; generated fixtures must not.
+                content = re.sub(
+                    rb"(<dcterms:modified[^>]*>)[^<]*(</dcterms:modified>)",
+                    rb"\g<1>2026-01-01T00:00:00Z\g<2>",
+                    content,
+                )
+            target.writestr(info, content)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(output.getvalue())
-

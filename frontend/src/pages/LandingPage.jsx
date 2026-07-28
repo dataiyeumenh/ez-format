@@ -82,7 +82,7 @@ const LandingPage = () => {
               className="font-black text-gray-900 leading-[1.05] tracking-tight mb-4"
               aria-label="Chuẩn hóa dữ liệu kế toán tự động Excel sang Chuẩn phần mềm kế toán"
             >
-              <span className="mx-auto block whitespace-nowrap text-[2rem] sm:text-4xl lg:text-5xl">
+              <span className="mx-auto block whitespace-normal text-[2rem] sm:whitespace-nowrap sm:text-4xl lg:text-5xl">
                 Chuẩn hóa dữ liệu kế toán tự động
               </span>
               <span className="mt-3 flex items-center justify-center text-3xl sm:text-5xl lg:text-6xl">

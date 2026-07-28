@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 from datetime import date, datetime
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 
-def parse_number(value: Any) -> float | int | None:
+def parse_number(value: Any) -> float | int | Decimal | None:
     if value is None:
         return None
     if isinstance(value, bool):
@@ -22,10 +23,45 @@ def parse_number(value: Any) -> float | int | None:
     text = _normalize_number_separators(text)
 
     try:
-        number = float(text)
-    except ValueError:
+        number = Decimal(text)
+    except InvalidOperation:
         return None
-    return int(number) if number.is_integer() else number
+    if not number.is_finite():
+        return None
+    if number == number.to_integral_value():
+        return int(number)
+
+    # Keep ordinary values compatible with the existing pipeline, but never
+    # coerce a decimal that binary64 cannot represent exactly.
+    as_float = float(number)
+    if Decimal(str(as_float)) == number:
+        return as_float
+    return number
+
+
+def parse_decimal(value: Any) -> Decimal | None:
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, Decimal):
+        return value if value.is_finite() else None
+    if isinstance(value, int):
+        return Decimal(value)
+    if isinstance(value, float):
+        if value != value or value in (float("inf"), float("-inf")):
+            return None
+        return Decimal(str(value))
+
+    text = str(value).strip()
+    if not text:
+        return None
+    text = text.replace("₫", "").replace("VND", "").replace("VNĐ", "").strip()
+    text = text.replace(" ", "").replace("\u00a0", "")
+    text = _normalize_number_separators(text)
+    try:
+        number = Decimal(text)
+    except InvalidOperation:
+        return None
+    return number if number.is_finite() else None
 
 
 def _normalize_number_separators(text: str) -> str:

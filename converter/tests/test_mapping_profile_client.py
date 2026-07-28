@@ -17,6 +17,7 @@ class FakeResponse:
 def _profile_payload():
     return {
         "id": "profile-1",
+        "ownerScope": "workspace:workspace-1",
         "workspaceId": "workspace-1",
         "name": "BAE purchase",
         "targetTemplateId": "bsn_purchase",
@@ -50,6 +51,7 @@ def test_find_mapping_profile_uses_internal_context_headers(monkeypatch):
     )
 
     assert profile is not None
+    assert profile.owner_scope == "workspace:workspace-1"
     assert profile.workspace_id == "workspace-1"
     assert captured["headers"]["x-conversion-context"] == "context-token"
     assert captured["headers"]["x-converter-service-token"] == "service-secret"
@@ -84,3 +86,18 @@ def test_save_and_get_mapping_profile(monkeypatch):
     assert loaded.mapping == {"Mã NCC": "Mã nhà cung cấp"}
     assert calls[0][0] == "POST"
     assert calls[0][2]["json"]["targetTemplateId"] == "bsn_purchase"
+
+
+def test_profile_payload_keeps_workspace_compatibility_when_owner_scope_is_absent(monkeypatch):
+    payload = _profile_payload()
+    payload.pop("ownerScope")
+
+    monkeypatch.setattr(
+        "app.mapping_profile_client.httpx.request",
+        lambda *args, **kwargs: FakeResponse({"profile": payload}),
+    )
+
+    profile = get_mapping_profile("context-token", "profile-1")
+
+    assert profile.owner_scope == "workspace:workspace-1"
+    assert profile.workspace_id == "workspace-1"

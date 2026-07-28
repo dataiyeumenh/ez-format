@@ -126,6 +126,223 @@ def test_validate_warns_when_vat_amount_does_not_match_taxable_amount_and_rate(t
     assert warning.cell == "N2"
 
 
+def test_validate_warns_when_vat_basis_is_ambiguous_after_discount(tmp_path):
+    input_path = _write_sales_workbook(
+        tmp_path / "ambiguous_vat_basis.xlsx",
+        [
+            _base_row(
+                **{
+                    "Số lượng": 1,
+                    "Đơn giá": 100,
+                    "Giảm giá": 10,
+                    "Thành tiền": 90,
+                    "Tổng tiền hàng": 90,
+                    "Tiền thuế": 7,
+                    "Khách cần trả": 97,
+                }
+            )
+        ],
+    )
+
+    report = validate_file(input_path, "bsn_sales")
+
+    assert any(warning.code == "calculation_vat_basis_ambiguous" for warning in report.warnings)
+    assert not any(warning.code == "calculation_vat_mismatch" for warning in report.warnings)
+
+
+def test_validate_reconciles_discounted_vat_without_explicit_basis(tmp_path):
+    input_path = _write_sales_workbook(
+        tmp_path / "reconciled_vat_basis.xlsx",
+        [
+            _base_row(
+                **{
+                    "Số lượng": 1,
+                    "Đơn giá": 100,
+                    "Giảm giá": 10,
+                    "Thành tiền": 90,
+                    "Tổng tiền hàng": 90,
+                    "Tiền thuế": 9,
+                    "Khách cần trả": 99,
+                }
+            )
+        ],
+    )
+
+    report = validate_file(input_path, "bsn_sales")
+
+    assert not any(warning.code == "calculation_vat_basis_ambiguous" for warning in report.warnings)
+    assert not any(warning.code == "calculation_vat_mismatch" for warning in report.warnings)
+
+
+def test_validate_skips_vat_basis_ambiguity_for_zero_vat(tmp_path):
+    input_path = _write_sales_workbook(
+        tmp_path / "zero_vat_basis.xlsx",
+        [
+            _base_row(
+                **{
+                    "Số lượng": 1,
+                    "Đơn giá": 100,
+                    "Giảm giá": 10,
+                    "Thành tiền": 90,
+                    "Tổng tiền hàng": 90,
+                    "% VAT": 0,
+                    "Tiền thuế": 0,
+                    "Khách cần trả": 90,
+                }
+            )
+        ],
+    )
+
+    report = validate_file(input_path, "bsn_sales")
+
+    assert not any(warning.code == "calculation_vat_basis_ambiguous" for warning in report.warnings)
+
+
+def test_validate_skips_unknown_invoice_basis_for_zero_discount(tmp_path):
+    input_path = _write_sales_workbook(
+        tmp_path / "zero_discount_invoice_basis.xlsx",
+        [_base_row(**{"Số lượng": 1, "Đơn giá": 100, "Thành tiền": 100})],
+    )
+
+    report = validate_file(
+        input_path,
+        "bsn_sales",
+        {"vat_basis": "invoice_taxable_base"},
+    )
+
+    assert not any(warning.code == "calculation_vat_basis_unknown" for warning in report.warnings)
+
+
+def test_validate_skips_unknown_invoice_basis_for_blank_discount(tmp_path):
+    input_path = _write_sales_workbook(
+        tmp_path / "blank_discount_invoice_basis.xlsx",
+        [
+            _base_row(
+                **{
+                    "Số lượng": 1,
+                    "Đơn giá": 100,
+                    "Giảm giá": None,
+                    "Thành tiền": 100,
+                }
+            )
+        ],
+    )
+
+    report = validate_file(
+        input_path,
+        "bsn_sales",
+        {"vat_basis": "invoice_taxable_base"},
+    )
+
+    assert not any(warning.code == "calculation_vat_basis_unknown" for warning in report.warnings)
+
+
+def test_validate_skips_unknown_invoice_basis_for_zero_vat_rate(tmp_path):
+    input_path = _write_sales_workbook(
+        tmp_path / "zero_rate_invoice_basis.xlsx",
+        [
+            _base_row(
+                **{
+                    "Số lượng": 1,
+                    "Đơn giá": 100,
+                    "Giảm giá": 10,
+                    "Thành tiền": 90,
+                    "% VAT": 0,
+                    "Tiền thuế": 5,
+                }
+            )
+        ],
+    )
+
+    report = validate_file(
+        input_path,
+        "bsn_sales",
+        {"vat_basis": "invoice_taxable_base"},
+    )
+
+    assert not any(warning.code == "calculation_vat_basis_unknown" for warning in report.warnings)
+    mismatch = next(
+        warning for warning in report.warnings if warning.code == "calculation_vat_mismatch"
+    )
+    assert mismatch.expected == 0
+
+
+def test_validate_skips_unknown_invoice_basis_for_zero_vat(tmp_path):
+    input_path = _write_sales_workbook(
+        tmp_path / "zero_vat_invoice_basis.xlsx",
+        [
+            _base_row(
+                **{
+                    "Số lượng": 1,
+                    "Đơn giá": 100,
+                    "Giảm giá": 10,
+                    "Thành tiền": 90,
+                    "% VAT": 10,
+                    "Tiền thuế": 0,
+                }
+            )
+        ],
+    )
+
+    report = validate_file(
+        input_path,
+        "bsn_sales",
+        {"vat_basis": "invoice_taxable_base"},
+    )
+
+    assert not any(warning.code == "calculation_vat_basis_unknown" for warning in report.warnings)
+
+
+def test_validate_warns_for_materially_unresolved_invoice_basis(tmp_path):
+    input_path = _write_sales_workbook(
+        tmp_path / "unresolved_invoice_basis.xlsx",
+        [
+            _base_row(
+                **{
+                    "Số lượng": 1,
+                    "Đơn giá": 100,
+                    "Giảm giá": 10,
+                    "Thành tiền": 90,
+                    "% VAT": 10,
+                    "Tiền thuế": 7,
+                }
+            )
+        ],
+    )
+
+    report = validate_file(
+        input_path,
+        "bsn_sales",
+        {"vat_basis": "invoice_taxable_base"},
+    )
+
+    assert any(warning.code == "calculation_vat_basis_unknown" for warning in report.warnings)
+
+
+def test_validate_uses_explicit_vat_basis_for_discounted_line(tmp_path):
+    input_path = _write_sales_workbook(
+        tmp_path / "explicit_vat_basis.xlsx",
+        [
+            _base_row(
+                **{
+                    "Số lượng": 1,
+                    "Đơn giá": 100,
+                    "Giảm giá": 10,
+                    "Thành tiền": 90,
+                    "Tổng tiền hàng": 90,
+                    "Tiền thuế": 10,
+                    "Khách cần trả": 100,
+                }
+            )
+        ],
+    )
+
+    report = validate_file(input_path, "bsn_sales", {"vat_basis": "line_before_discount"})
+
+    assert not any(warning.code == "calculation_vat_basis_ambiguous" for warning in report.warnings)
+    assert not any(warning.code == "calculation_vat_mismatch" for warning in report.warnings)
+
+
 def test_validate_warns_when_invoice_subtotal_does_not_match_sum_of_lines(tmp_path):
     input_path = _write_sales_workbook(
         tmp_path / "wrong_invoice_subtotal.xlsx",
@@ -172,6 +389,54 @@ def test_validate_warns_when_payable_does_not_match_invoice_amounts(tmp_path):
     assert warning.expected == 105
     assert warning.actual == 100
     assert warning.delta == -5
+
+
+def test_validate_does_not_calculate_line_amount_from_zero_placeholder_operands(tmp_path):
+    input_path = _write_sales_workbook(
+        tmp_path / "zero_placeholder.xlsx",
+        [
+            _base_row(
+                **{
+                    "Số lượng": 804,
+                    "Đơn giá": 0,
+                    "Thành tiền": 2_905_880,
+                    "Tổng tiền hàng": 2_905_880,
+                    "Tiền thuế": 0,
+                    "Khách cần trả": 2_905_880,
+                }
+            )
+        ],
+    )
+
+    report = validate_file(input_path, "bsn_sales")
+
+    assert not any(
+        warning.code == "calculation_line_amount_mismatch" for warning in report.warnings
+    )
+
+
+def test_validate_accepts_line_amount_explained_by_displayed_unit_price_rounding(tmp_path):
+    input_path = _write_sales_workbook(
+        tmp_path / "rounded_unit_price.xlsx",
+        [
+            _base_row(
+                **{
+                    "Số lượng": 1500,
+                    "Đơn giá": 213.33,
+                    "Thành tiền": 320_000,
+                    "Tổng tiền hàng": 320_000,
+                    "Tiền thuế": 0,
+                    "Khách cần trả": 320_000,
+                }
+            )
+        ],
+    )
+
+    report = validate_file(input_path, "bsn_sales")
+
+    assert not any(
+        warning.code == "calculation_line_amount_mismatch" for warning in report.warnings
+    )
 
 
 def test_convert_blocks_calculation_warnings_until_override_is_set(tmp_path):

@@ -1,7 +1,7 @@
 from app.ai_gateway import _build_prompt
 
 
-def test_purchase_prompt_includes_accounting_context_and_sample_values():
+def test_purchase_prompt_includes_accounting_context_and_redacted_samples():
     prompt = _build_prompt(
         {
             "target_template": {
@@ -34,7 +34,13 @@ def test_purchase_prompt_includes_accounting_context_and_sample_values():
     assert "ACCOUNTING_MAPPING_CONTEXT" in prompt
     assert "do_not_invent_codes" in prompt
     assert '"alias_profile": "accounting_codes"' in prompt
-    assert '"LOAI_MUA": "Dịch vụ"' in prompt
+    assert '"LOAI_MUA": "dich_vu"' in prompt
+    assert '"NGAYCT": "<date>"' in prompt
+    assert '"TTVND": "<number>"' in prompt
+    assert "Dịch vụ" not in prompt
+    assert "PN001" not in prompt
+    assert "DV001" not in prompt
+    assert "2905880" not in prompt
     assert len(prompt) < 30_000
 
 
@@ -53,4 +59,3 @@ def test_sales_prompt_does_not_include_purchase_knowledge_pack():
 
     assert "ACCOUNTING_MAPPING_CONTEXT" not in prompt
     assert len(prompt) < 10_000
-

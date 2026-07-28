@@ -96,10 +96,8 @@ def test_analyze_preview_and_export_purchase_file(tmp_path, monkeypatch):
     assert payload["detected"]["header_row"] == 1
     assert payload["detected"]["row_count"] == 2
     suggestion = payload["mapping_suggestion"]
-    assert suggestion["mapping"]["Phân loại"] == [
-        "Hình thức mua hàng",
-        "TK kho/TK chi phí (*)",
-    ]
+    assert suggestion["mapping"]["Phân loại"] == "Hình thức mua hàng"
+    assert any("ánh xạ thủ công" in warning for warning in suggestion["warnings"])
     assert suggestion["mapping"]["NGAYCT"] == [
         "Ngày hạch toán (*)",
         "Ngày chứng từ (*)",
@@ -109,13 +107,17 @@ def test_analyze_preview_and_export_purchase_file(tmp_path, monkeypatch):
     assert suggestion["mapping"]["TENKH"] == "Tên nhà cung cấp"
     assert suggestion["mapping"]["TTVND"] == "Thành tiền"
 
+    approved_defaults = {
+        **suggestion["defaults"],
+        "TK kho/TK chi phí (*)": "154",
+    }
     preview = client.post(
         "/api/v1/mappings/preview",
         json={
             "upload_id": payload["upload_id"],
             "target_template_id": TARGET_ID,
             "mapping": suggestion["mapping"],
-            "defaults": suggestion["defaults"],
+            "defaults": approved_defaults,
             "formulas": suggestion["formulas"],
         },
     )
@@ -128,13 +130,13 @@ def test_analyze_preview_and_export_purchase_file(tmp_path, monkeypatch):
     assert service_row["Mã hàng (*)"]
     assert service_row["Thành tiền"] == 2905880
     assert service_row["% thuế GTGT"] == 8
-    assert service_row["TK kho/TK chi phí (*)"] == "6428"
+    assert service_row["TK kho/TK chi phí (*)"] == "154"
     goods_row = next(
         row
         for row in preview_payload["rows"]
         if row["Hình thức mua hàng"] == "Mua hàng trong nước nhập kho"
     )
-    assert goods_row["TK kho/TK chi phí (*)"] == "1561"
+    assert goods_row["TK kho/TK chi phí (*)"] == "154"
     assert goods_row["TK công nợ/TK tiền (*)"] in {"1111", "331"}
 
     confirm = client.post(
@@ -143,22 +145,27 @@ def test_analyze_preview_and_export_purchase_file(tmp_path, monkeypatch):
             "upload_id": payload["upload_id"],
             "target_template_id": TARGET_ID,
             "mapping": suggestion["mapping"],
-            "defaults": suggestion["defaults"],
+            "defaults": approved_defaults,
             "formulas": suggestion["formulas"],
             "profile_name": "BAE Foods mua vào",
         },
     )
     assert confirm.status_code == 200
+    confirmed = confirm.json()
 
     export = client.post(
         "/api/v1/conversions/export",
         json={
             "upload_id": payload["upload_id"],
-            "profile_id": confirm.json()["profile_id"],
+            "profile_id": confirmed["profile_id"],
+            "session_id": confirmed["session"]["session_id"],
+            "revision": confirmed["session"]["active_revision"],
+            "state_hash": confirmed["session"]["state_hash"],
+            "conversion_run_id": "pytest-run-1",
             "acknowledge_warnings": True,
         },
     )
-    assert export.status_code == 200
+    assert export.status_code == 200, export.text
     workbook = xlrd.open_workbook(file_contents=export.content, formatting_info=True)
     sheet = workbook.sheet_by_name("Mua hang trong nuoc")
     assert sheet.row_values(7) == preview_payload["headers"]

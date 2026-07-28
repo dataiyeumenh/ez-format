@@ -1,5 +1,5 @@
+const crypto = require("node:crypto");
 const ConversionRun = require("../models/ConversionRun");
-const User = require("../models/User");
 const mongoose = require("mongoose");
 const AccountingWorkspace = require("../models/AccountingWorkspace");
 const MasterDataSnapshot = require("../models/MasterDataSnapshot");
@@ -14,28 +14,23 @@ const {
   serializeConversionRun,
 } = require("../services/conversionRunService");
 const {
-  normalizeDailyFileCredit,
-  deductConversionCredit,
-} = require("../services/subscriptionService");
-
-// Trừ 1 lượt chuyển đổi của chủ run khi run hoàn tất (download thành công).
-async function deductCreditForCompletedRun(userId) {
-  const user = await User.findById(userId).populate("plan");
-  if (!user) return;
-  normalizeDailyFileCredit(user);
-  deductConversionCredit(user);
-  await user.save();
-}
+  assertCurrentConversionEntitlement,
+} = require("../services/conversionEntitlementService");
 
 // Quét các run "processing" quá 5 giờ -> chuyển sang "cancelled"
 // (user upload nhưng không tải xuống nên không bao giờ completed).
 async function cancelStaleProcessingRuns() {
   const cutoff = new Date(Date.now() - STALE_PROCESSING_MS);
   await ConversionRun.updateMany(
-    { status: "processing", startedAt: { $lt: cutoff } },
+    {
+      status: "processing",
+      startedAt: { $lt: cutoff },
+      exportArtifactKey: { $in: ["", null] },
+    },
     {
       $set: {
         status: "cancelled",
+        usageState: "charge_failed",
         completedAt: new Date(),
         errorMessage: "Tự động hủy: quá 5 giờ chưa tải file MISA.",
       },
@@ -50,6 +45,26 @@ function cleanFileName(fileName) {
     .slice(0, 255);
 }
 
+function cleanIdempotencyKey(value) {
+  return String(value || "").trim().slice(0, 256);
+}
+
+function requestIdempotencyKey(req) {
+  return (
+    cleanIdempotencyKey(req.headers?.["idempotency-key"]) ||
+    cleanIdempotencyKey(req.body?.idempotencyKey || req.body?.idempotency_key) ||
+    crypto.randomUUID()
+  );
+}
+
+function sendControllerError(res, error) {
+  const statusCode = Number(error.statusCode) || 500;
+  return res.status(statusCode).json({
+    success: false,
+    message: statusCode >= 500 ? "Lỗi server" : error.message,
+  });
+}
+
 async function createConversionRun(req, res) {
   try {
     const fileName = cleanFileName(req.body.fileName);
@@ -60,6 +75,17 @@ async function createConversionRun(req, res) {
     }
     if (!Number.isFinite(fileSizeBytes) || fileSizeBytes < 0) {
       return res.status(400).json({ success: false, message: "Kích thước file không hợp lệ" });
+    }
+    const entitlement = await assertCurrentConversionEntitlement({
+      userId: req.user._id,
+    });
+    const usageIdempotencyKey = requestIdempotencyKey(req);
+    const existing = await ConversionRun.findOne({
+      user: req.user._id,
+      usageIdempotencyKey,
+    });
+    if (existing) {
+      return res.json({ success: true, idempotent: true, run: serializeConversionRun(existing) });
     }
 
     let workspace = null;
@@ -94,14 +120,14 @@ async function createConversionRun(req, res) {
 
     const run = await ConversionRun.create({
       user: req.user._id,
-      userNameSnapshot: req.user.name || "",
-      userEmailSnapshot: req.user.email || "",
+      userNameSnapshot: entitlement.user.name || req.user.name || "",
+      userEmailSnapshot: entitlement.user.email || req.user.email || "",
       fileName,
       fileSizeBytes,
       outputFormat: "MISA",
       status: "processing",
       targetTemplateId: req.body.targetTemplateId || "",
-      converterUploadId: req.body.converterUploadId || "",
+      usageIdempotencyKey,
       workspace: workspace?._id || null,
       workspaceNameSnapshot: workspace?.name || "",
       snapshotSetHash,
@@ -110,13 +136,36 @@ async function createConversionRun(req, res) {
 
     res.status(201).json({ success: true, run: serializeConversionRun(run) });
   } catch (error) {
-    res.status(500).json({ success: false, message: "Lỗi server", error: error.message });
+    if (error?.code === 11000) {
+      const usageIdempotencyKey = cleanIdempotencyKey(
+        req.headers?.["idempotency-key"] ||
+          req.body?.idempotencyKey ||
+          req.body?.idempotency_key,
+      );
+      const existing = await ConversionRun.findOne({
+        usageIdempotencyKey,
+      }).catch(() => null);
+      if (existing) {
+        if (String(existing.user) !== String(req.user?._id)) {
+          return res.status(409).json({
+            success: false,
+            message: "Idempotency key đã được dùng cho conversion run khác",
+          });
+        }
+        return res.json({
+          success: true,
+          idempotent: true,
+          run: serializeConversionRun(existing),
+        });
+      }
+    }
+    return sendControllerError(res, error);
   }
 }
 
 async function updateConversionRunStatus(req, res) {
   try {
-    const { status, errorMessage, converterUploadId, targetTemplateId } = req.body;
+    const { status, errorMessage } = req.body;
     if (!VALID_STATUSES.has(String(status))) {
       return res.status(400).json({ success: false, message: "Trạng thái không hợp lệ" });
     }
@@ -131,10 +180,13 @@ async function updateConversionRunStatus(req, res) {
       return res.status(403).json({ success: false, message: "Không có quyền cập nhật lịch sử này" });
     }
 
-    const wasCompleted = run.status === "completed";
+    if (String(status) === "completed" && run.usageState !== "charged") {
+      return res.status(409).json({
+        success: false,
+        message: "Export phải charge usage thành công trước khi hoàn tất run",
+      });
+    }
     run.status = String(status);
-    if (converterUploadId !== undefined) run.converterUploadId = String(converterUploadId || "");
-    if (targetTemplateId !== undefined) run.targetTemplateId = String(targetTemplateId || "");
     if (errorMessage !== undefined) run.errorMessage = String(errorMessage || "").slice(0, 1000);
     if (
       run.status === "completed" ||
@@ -143,19 +195,22 @@ async function updateConversionRunStatus(req, res) {
     ) {
       run.completedAt = new Date();
     }
+    if (
+      run.status === "cancelled" &&
+      !run.exportArtifactKey
+    ) {
+      run.usageState = "charge_failed";
+    } else if (run.status === "failed" && !run.exportArtifactKey) {
+      run.usageState = "not_chargeable";
+    }
 
     await run.save();
-
-    // Chỉ trừ lượt khi run chuyển sang "completed" lần đầu (tránh trừ lặp).
-    if (run.status === "completed" && !wasCompleted) {
-      await deductCreditForCompletedRun(run.user);
-    }
 
     await run.populate("user", "name email");
 
     res.json({ success: true, run: serializeConversionRun(run) });
   } catch (error) {
-    res.status(500).json({ success: false, message: "Lỗi server", error: error.message });
+    return sendControllerError(res, error);
   }
 }
 
@@ -209,6 +264,7 @@ async function getAdminConversionRuns(req, res) {
 }
 
 module.exports = {
+  cancelStaleProcessingRuns,
   createConversionRun,
   updateConversionRunStatus,
   getAdminConversionRuns,

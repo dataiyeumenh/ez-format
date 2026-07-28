@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from decimal import Decimal
 from typing import Any
 
 from app.cell_ref import column_index as header_column_index
@@ -9,6 +10,7 @@ from app.field_detection import semantic_value
 from app.models import JsonDict, ReportIssue, ValidationReport
 from app.normalization import is_blank
 from app.parsing import parse_number
+from app.vat_basis import resolve_vat_taxable_base
 
 
 CALCULATION_CODE_PREFIX = "calculation_"
@@ -35,6 +37,7 @@ def check_calculation_rules(
     first_data_row: int = 2,
 ) -> list[ReportIssue]:
     tolerance = _calculation_tolerance(options)
+    vat_basis = str((options or {}).get("vat_basis") or "").strip().lower()
     headers = headers or []
     warnings: list[ReportIssue] = []
     invoices: dict[str, InvoiceCalculation] = {}
@@ -42,16 +45,22 @@ def check_calculation_rules(
     for row_number, row in enumerate(rows, start=first_data_row):
         invoice = _text(semantic_value(row, detected_columns, "invoice")) or None
         quantity = _number(row, detected_columns, "quantity")
+        raw_unit_price = semantic_value(row, detected_columns, "unit_price")
         unit_price = _number(row, detected_columns, "unit_price")
         line_amount = _number(row, detected_columns, "line_amount")
         discount_total = line_discount_total(row, detected_columns, tolerance)
 
         expected_line_amount: float | None = None
-        if quantity is not None and unit_price is not None:
+        if quantity not in (None, 0) and unit_price not in (None, 0):
             gross_amount = quantity * unit_price
             expected_line_amount = gross_amount - (discount_total or 0)
+            line_tolerance = _line_amount_tolerance(
+                quantity,
+                raw_unit_price,
+                tolerance,
+            )
             if line_amount is not None and _outside_tolerance(
-                expected_line_amount, line_amount, tolerance
+                expected_line_amount, line_amount, line_tolerance
             ):
                 warnings.append(
                     _issue(
@@ -61,7 +70,7 @@ def check_calculation_rules(
                         code="calculation_line_amount_mismatch",
                         expected=expected_line_amount,
                         actual=line_amount,
-                        tolerance=tolerance,
+                        tolerance=line_tolerance,
                         message="Line amount must equal quantity × unit price − line discount.",
                         detected_columns=detected_columns,
                         headers=headers,
@@ -93,9 +102,33 @@ def check_calculation_rules(
                         )
                     )
 
-        taxable_amount = line_amount if line_amount is not None else expected_line_amount
         vat_rate = _percent(row, detected_columns, "vat_rate")
         vat_amount = _number(row, detected_columns, "vat_amount")
+        taxable_amount, vat_basis_warning = _vat_taxable_amount(
+            row=row,
+            detected_columns=detected_columns,
+            line_amount=line_amount,
+            expected_line_amount=expected_line_amount,
+            discount_total=discount_total,
+            vat_rate=vat_rate,
+            vat_amount=vat_amount,
+            vat_basis=vat_basis,
+        )
+        if vat_basis_warning is not None:
+            warnings.append(
+                _issue(
+                    row=row_number,
+                    invoice=invoice,
+                    field="vat_amount",
+                    code=vat_basis_warning,
+                    expected=0,
+                    actual=0,
+                    tolerance=0,
+                    message="VAT basis chưa rõ vì dòng có chiết khấu; chưa kết luận lệch tiền thuế.",
+                    detected_columns=detected_columns,
+                    headers=headers,
+                )
+            )
         if taxable_amount is not None and vat_rate is not None and vat_amount is not None:
             expected_vat = taxable_amount * vat_rate
             if _outside_tolerance(expected_vat, vat_amount, tolerance):
@@ -178,6 +211,50 @@ def check_calculation_rules(
                 )
 
     return warnings
+
+
+def _vat_taxable_amount(
+    *,
+    row: dict[str, Any],
+    detected_columns: dict[str, str],
+    line_amount: float | None,
+    expected_line_amount: float | None,
+    discount_total: float | None,
+    vat_rate: float | None,
+    vat_amount: float | None,
+    vat_basis: str,
+) -> tuple[float | None, str | None]:
+    after_discount = line_amount if line_amount is not None else expected_line_amount
+    invoice_base = semantic_value(row, detected_columns, "invoice_taxable_base")
+    resolution = resolve_vat_taxable_base(
+        amount=after_discount,
+        discount=discount_total,
+        vat_rate=vat_rate,
+        vat_amount=vat_amount,
+        basis=vat_basis,
+        invoice_taxable_base=parse_number(invoice_base),
+    )
+    if resolution.status == "unknown":
+        if vat_basis == "invoice_taxable_base":
+            has_material_discount = discount_total is not None and abs(discount_total) > 0
+            has_taxable_vat = (
+                vat_rate is not None
+                and abs(vat_rate) > 0
+                and vat_amount is not None
+                and abs(vat_amount) > 0
+            )
+            if not has_material_discount:
+                return after_discount, None
+            if vat_rate is not None and abs(vat_rate) == 0:
+                return after_discount, None
+            if not has_taxable_vat:
+                return None, None
+        return None, "calculation_vat_basis_unknown"
+    if resolution.status == "ambiguous":
+        return None, "calculation_vat_basis_ambiguous"
+    if resolution.taxable_base is None:
+        return None, None
+    return float(resolution.taxable_base), None
 
 
 def line_discount_total(
@@ -304,6 +381,20 @@ def _outside_tolerance(expected: float, actual: float, tolerance: float | int) -
 
 def _percentage_amount_tolerance(base_amount: float, tolerance: float | int) -> float:
     return max(float(tolerance), abs(base_amount) * 0.001)
+
+
+def _line_amount_tolerance(
+    quantity: float,
+    raw_unit_price: Any,
+    tolerance: float | int,
+) -> float:
+    parsed_unit_price = parse_number(raw_unit_price)
+    if parsed_unit_price is None:
+        return float(tolerance)
+    decimal_price = Decimal(str(parsed_unit_price))
+    quantum = Decimal("1").scaleb(decimal_price.as_tuple().exponent)
+    rounding_tolerance = Decimal(str(abs(quantity))) * quantum / 2
+    return max(float(tolerance), float(rounding_tolerance))
 
 
 def _clean_number(value: float | int) -> float | int:

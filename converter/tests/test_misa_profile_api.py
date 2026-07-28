@@ -8,6 +8,7 @@ import xlrd
 from fastapi.testclient import TestClient
 
 from app.main import app
+from app.misa_profiles import ProfileStore
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -15,6 +16,172 @@ SAMPLES = ROOT / "fixtures" / "samples"
 
 
 client = TestClient(app)
+
+
+def _profile_values(**overrides):
+    values = {
+        "name": "Owner-scoped mapping",
+        "target_template_id": "bsn_purchase",
+        "source_signature_hash": "signature-1",
+        "source_headers": ["Mã NCC"],
+        "sheet_name": "Sheet1",
+        "header_row": 1,
+        "mapping": {"Mã NCC": "Mã nhà cung cấp"},
+        "defaults": {},
+        "formulas": {},
+        "confidence": 1.0,
+    }
+    values.update(overrides)
+    return values
+
+
+def test_sqlite_profiles_are_isolated_by_non_empty_owner_scope(tmp_path):
+    store = ProfileStore(tmp_path / "profiles.sqlite")
+    owner_a = store.save_profile(**_profile_values(), owner_scope="user:user-a")
+    owner_b = store.save_profile(**_profile_values(), owner_scope="user:user-b")
+
+    assert owner_a.id != owner_b.id
+    assert owner_a.owner_scope == "user:user-a"
+    assert owner_b.owner_scope == "user:user-b"
+    assert (
+        store.find_by_signature(
+            target_template_id="bsn_purchase",
+            source_signature_hash="signature-1",
+            owner_scope="user:user-a",
+        ).id
+        == owner_a.id
+    )
+
+    try:
+        store.get_profile(owner_a.id, owner_scope="user:user-b")
+    except KeyError:
+        pass
+    else:
+        raise AssertionError("cross-owner profile get must fail")
+
+    try:
+        store.mark_used(owner_a.id, owner_scope="user:user-b")
+    except KeyError:
+        pass
+    else:
+        raise AssertionError("cross-owner profile use must fail")
+
+
+def test_sqlite_profile_migration_backfills_owner_scope_and_rejects_empty(tmp_path):
+    path = tmp_path / "legacy.sqlite"
+    with sqlite3.connect(path) as connection:
+        connection.executescript(
+            """
+            CREATE TABLE mapping_profiles (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                target_template_id TEXT NOT NULL,
+                source_signature_hash TEXT NOT NULL,
+                source_headers_json TEXT NOT NULL,
+                sheet_name TEXT NOT NULL,
+                header_row INTEGER NOT NULL,
+                mapping_json TEXT NOT NULL,
+                defaults_json TEXT NOT NULL,
+                formulas_json TEXT NOT NULL,
+                confidence REAL NOT NULL,
+                usage_count INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                workspace_id TEXT NOT NULL DEFAULT ''
+            );
+            """
+        )
+        rows = [
+            ("workspace-profile", "workspace-123"),
+            ("local-profile", ""),
+            ("local-get-profile", ""),
+        ]
+        for profile_id, workspace_id in rows:
+            connection.execute(
+                """
+                INSERT INTO mapping_profiles (
+                    id, name, target_template_id, source_signature_hash,
+                    source_headers_json, sheet_name, header_row, mapping_json,
+                    defaults_json, formulas_json, confidence, usage_count,
+                    created_at, updated_at, workspace_id
+                ) VALUES (?, 'Legacy', 'bsn_purchase', ?, '[]', 'Sheet1', 1,
+                          '{}', '{}', '{}', 1, 0, 'now', 'now', ?)
+                """,
+                (profile_id, f"signature-{profile_id}", workspace_id),
+            )
+
+    ProfileStore(path)
+
+    with sqlite3.connect(path) as connection:
+        migrated = dict(
+            connection.execute(
+                "SELECT id, owner_scope FROM mapping_profiles ORDER BY id"
+            ).fetchall()
+        )
+        assert migrated == {
+            "local-get-profile": "local:legacy",
+            "local-profile": "local:legacy",
+            "workspace-profile": "workspace:workspace-123",
+        }
+        try:
+            connection.execute(
+                "UPDATE mapping_profiles SET owner_scope = '' WHERE id = 'local-profile'"
+            )
+        except sqlite3.IntegrityError:
+            pass
+        else:
+            raise AssertionError("empty owner_scope update must fail")
+
+    store = ProfileStore(path)
+    found = store.find_by_signature(
+        target_template_id="bsn_purchase",
+        source_signature_hash="signature-local-profile",
+    )
+    loaded = store.get_profile("local-get-profile")
+
+    assert found is not None
+    assert found.owner_scope == "local:default"
+    assert loaded.owner_scope == "local:default"
+    with sqlite3.connect(path) as connection:
+        claimed = dict(
+            connection.execute(
+                "SELECT id, owner_scope FROM mapping_profiles WHERE id LIKE 'local-%'"
+            ).fetchall()
+        )
+    assert claimed == {
+        "local-get-profile": "local:default",
+        "local-profile": "local:default",
+    }
+
+
+def test_sqlite_new_local_profiles_default_to_local_owner_scope(tmp_path, monkeypatch):
+    monkeypatch.delenv("LOCAL_MAPPING_OWNER_SCOPE", raising=False)
+    profile = ProfileStore(tmp_path / "profiles.sqlite").save_profile(**_profile_values())
+
+    assert profile.owner_scope == "local:default"
+
+
+def test_sqlite_quarantine_excludes_unsafe_profile_from_match_and_export_lookup(tmp_path):
+    store = ProfileStore(tmp_path / "profiles.sqlite")
+    profile = store.save_profile(**_profile_values(), owner_scope="user:user-a")
+
+    store.quarantine_profile(
+        profile.id,
+        owner_scope="user:user-a",
+        reason="semantic_validation_failed:mapping_domain_mismatch",
+    )
+
+    assert store.find_by_signature(
+        target_template_id=profile.target_template_id,
+        source_signature_hash=profile.source_signature_hash,
+        owner_scope="user:user-a",
+    ) is None
+    try:
+        store.get_profile(profile.id, owner_scope="user:user-a")
+    except KeyError:
+        pass
+    else:
+        raise AssertionError("quarantined profile must not be exportable")
 
 
 def test_templates_endpoint_reads_real_misa_headers():
@@ -69,7 +236,7 @@ def test_analyze_preview_confirm_export_learns_profile(tmp_path, monkeypatch):
     ]
     assert suggestion["mapping"]["Column1"] == "Tiền chiết khấu"
     assert "Địa chỉ (Khách hàng)" not in suggestion["mapping"]
-    assert suggestion["defaults"]["Mã khách hàng"] == "KH_LE"
+    assert "Mã khách hàng" not in suggestion["defaults"]
     assert suggestion["formulas"]["Số phiếu xuất"] == "XK_${Số chứng từ (*)}"
 
     preview = client.post(
@@ -96,23 +263,29 @@ def test_analyze_preview_confirm_export_learns_profile(tmp_path, monkeypatch):
     assert first["Số lô"] == "01072029"
     assert first["Hạn sử dụng"] == "2029-07-01T00:00:00"
     assert preview_payload["rows"][35]["ĐVT"] == "Hộp"
-    assert preview_payload["rows"][113]["Mã khách hàng"] == "KH_LE"
+    assert preview_payload["rows"][113]["Mã khách hàng"] == ""
     assert preview_payload["rows"][1870]["Số chứng từ (*)"] == "HDO1764925151999"
     assert preview_payload["rows"][1870]["Số phiếu xuất"] == "XK_HDO1764925151999"
 
+    approved_defaults = {
+        **suggestion["defaults"],
+        "TK Tiền/Chi phí/Nợ (*)": "131",
+        "TK Doanh thu/Có (*)": "5111",
+    }
     confirm = client.post(
         "/api/v1/mappings/confirm",
         json={
             "upload_id": analyze_payload["upload_id"],
             "target_template_id": "bsn_sales",
             "mapping": suggestion["mapping"],
-            "defaults": suggestion["defaults"],
+            "defaults": approved_defaults,
             "formulas": suggestion["formulas"],
             "profile_name": "KiotViet bán hàng chi tiết",
         },
     )
     assert confirm.status_code == 200
-    profile_id = confirm.json()["profile_id"]
+    confirmed = confirm.json()
+    profile_id = confirmed["profile_id"]
     db = tmp_path / "profiles.sqlite"
     with sqlite3.connect(db) as connection:
         stored = connection.execute(
@@ -130,6 +303,10 @@ def test_analyze_preview_confirm_export_learns_profile(tmp_path, monkeypatch):
         json={
             "upload_id": analyze_payload["upload_id"],
             "profile_id": profile_id,
+            "session_id": confirmed["session"]["session_id"],
+            "revision": confirmed["session"]["active_revision"],
+            "state_hash": confirmed["session"]["state_hash"],
+            "conversion_run_id": "pytest-run-1",
             "acknowledge_warnings": True,
         },
     )
@@ -148,9 +325,9 @@ def test_analyze_preview_confirm_export_learns_profile(tmp_path, monkeypatch):
     assert sheet.cell_value(8, headers.index("Hạn sử dụng")) == 47300
     assert sheet.cell_value(8, headers.index("Ngày hạch toán (*)")) == 46016.724817905095
     assert sheet.cell_value(9, headers.index("Mã hàng (*)")) == "SP094013"
-    assert sheet.cell_value(9, headers.index("ĐVT")) == "Hộp"
+    assert sheet.cell_value(9, headers.index("ĐVT")) == ""
     assert sheet.cell_value(43, headers.index("ĐVT")) == "Hộp"
-    assert sheet.cell_value(121, headers.index("Mã khách hàng")) == "KH_LE"
+    assert sheet.cell_value(121, headers.index("Mã khách hàng")) == ""
     assert sheet.cell_value(1878, headers.index("Số chứng từ (*)")) == "HDO1764925151999"
     assert sheet.cell_value(1878, headers.index("Số phiếu xuất")) == "XK_HDO1764925151999"
 
@@ -180,7 +357,7 @@ def test_high_confidence_heuristic_skips_remote_ai(tmp_path, monkeypatch):
     def fail_if_called(_payload):
         raise AssertionError("AI should not be called when heuristic confidence is already high")
 
-    monkeypatch.setattr("app.misa_workflow.request_mapping_suggestion", fail_if_called)
+    monkeypatch.setattr("app.ai_mapping_client.request_mapping_suggestion", fail_if_called)
 
     with (SAMPLES / "raw_sales_sample.xlsx").open("rb") as handle:
         response = client.post(
@@ -200,7 +377,7 @@ def test_high_confidence_heuristic_skips_remote_ai(tmp_path, monkeypatch):
     assert suggestion["source"] == "heuristic"
 
 
-def test_analyze_repairs_stale_profile_missing_required_mapping(tmp_path, monkeypatch):
+def test_analyze_quarantines_stale_profile_missing_required_mapping(tmp_path, monkeypatch):
     monkeypatch.setenv("MAPPING_DB_PATH", str(tmp_path / "profiles.sqlite"))
     monkeypatch.setenv("AI_PROVIDER", "disabled")
 
@@ -234,6 +411,7 @@ def test_analyze_repairs_stale_profile_missing_required_mapping(tmp_path, monkey
         },
     )
     assert confirm.status_code == 200
+    profile_id = confirm.json()["profile_id"]
 
     with (SAMPLES / "raw_sales_sample.xlsx").open("rb") as handle:
         repaired = client.post(
@@ -250,12 +428,21 @@ def test_analyze_repairs_stale_profile_missing_required_mapping(tmp_path, monkey
 
     assert repaired.status_code == 200
     repaired_suggestion = repaired.json()["mapping_suggestion"]
-    assert repaired_suggestion["source"] == "mixed"
+    assert repaired_suggestion["source"] == "heuristic"
     assert repaired_suggestion["mapping"]["Mã hàng"] == "Mã hàng (*)"
-    assert not any(issue["code"] == "missing_required_mapping" for issue in repaired.json()["issues"])
+    assert any("bị loại" in warning for warning in repaired_suggestion["warnings"])
+    with sqlite3.connect(tmp_path / "profiles.sqlite") as connection:
+        status, reason = connection.execute(
+            "SELECT status, quarantine_reason FROM mapping_profiles WHERE id = ?",
+            (profile_id,),
+        ).fetchone()
+    assert status == "quarantined"
+    assert "required_mapping_missing" in reason
 
 
-def test_high_confidence_unknown_schema_still_uses_remote_ai(tmp_path, monkeypatch):
+def test_high_confidence_unknown_schema_does_not_call_ai_inside_analyze(
+    tmp_path, monkeypatch
+):
     import openpyxl
 
     from app.conversion_types import CONVERSION_TYPES
@@ -294,12 +481,12 @@ def test_high_confidence_unknown_schema_still_uses_remote_ai(tmp_path, monkeypat
         return {"mapping": {}, "defaults": {}, "formulas": {}, "confidence": 0.0}
 
     monkeypatch.setattr("app.misa_workflow.heuristic_suggestion", high_confidence_unknown_heuristic)
-    monkeypatch.setattr("app.misa_workflow.request_mapping_suggestion", mark_ai_called)
+    monkeypatch.setattr("app.ai_mapping_client.request_mapping_suggestion", mark_ai_called)
 
     with raw_path.open("rb") as handle:
         response = client.post(
             "/api/v1/uploads/analyze",
-            data={"target_template_id": "bsn_sales"},
+            data={"target_template_id": "bsn_sales", "use_ai": "true"},
             files={
                 "file": (
                     raw_path.name,
@@ -310,10 +497,11 @@ def test_high_confidence_unknown_schema_still_uses_remote_ai(tmp_path, monkeypat
         )
 
     assert response.status_code == 200
-    assert ai_called is True
+    assert ai_called is False
+    assert response.json()["mapping_suggestion"]["source"] == "heuristic"
 
 
-def test_analyze_falls_back_when_low_confidence_remote_ai_fails(tmp_path, monkeypatch):
+def test_analyze_remains_deterministic_when_remote_ai_is_unavailable(tmp_path, monkeypatch):
     import openpyxl
 
     monkeypatch.setenv("MAPPING_DB_PATH", str(tmp_path / "profiles.sqlite"))
@@ -333,7 +521,7 @@ def test_analyze_falls_back_when_low_confidence_remote_ai_fails(tmp_path, monkey
     with raw_path.open("rb") as handle:
         response = client.post(
             "/api/v1/uploads/analyze",
-            data={"target_template_id": "bsn_sales"},
+                data={"target_template_id": "bsn_sales", "use_ai": "true"},
             files={
                 "file": (
                     raw_path.name,
@@ -346,7 +534,7 @@ def test_analyze_falls_back_when_low_confidence_remote_ai_fails(tmp_path, monkey
     assert response.status_code == 200
     suggestion = response.json()["mapping_suggestion"]
     assert suggestion["source"] == "heuristic"
-    assert any("AI" in warning for warning in suggestion["warnings"])
+    assert not any("AI Gateway unavailable" in warning for warning in suggestion["warnings"])
 
 
 def test_ai_gateway_requires_bearer_token(monkeypatch):

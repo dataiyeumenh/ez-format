@@ -23,6 +23,26 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def local_mapping_owner_scope() -> str:
+    return os.getenv("LOCAL_MAPPING_OWNER_SCOPE", "local:default").strip() or "local:default"
+
+
+def resolve_owner_scope(
+    owner_scope: str | None = None,
+    *,
+    workspace_id: str = "",
+) -> str:
+    if owner_scope is not None:
+        normalized = str(owner_scope).strip()
+        if not normalized:
+            raise ValueError("Mapping profile owner_scope must not be empty")
+        return normalized
+    normalized_workspace = str(workspace_id or "").strip()
+    if normalized_workspace:
+        return f"workspace:{normalized_workspace}"
+    return local_mapping_owner_scope()
+
+
 @dataclass(frozen=True)
 class MappingProfile:
     id: str
@@ -37,7 +57,11 @@ class MappingProfile:
     formulas: dict[str, Any]
     confidence: float
     usage_count: int
+    owner_scope: str = ""
     workspace_id: str = ""
+    status: str = "active"
+    quarantined_at: str = ""
+    quarantine_reason: str = ""
 
 
 class ProfileStore:
@@ -68,6 +92,11 @@ class ProfileStore:
                     formulas_json TEXT NOT NULL,
                     confidence REAL NOT NULL,
                     usage_count INTEGER NOT NULL DEFAULT 0,
+                    owner_scope TEXT NOT NULL CHECK (length(trim(owner_scope)) > 0),
+                    workspace_id TEXT NOT NULL DEFAULT '',
+                    status TEXT NOT NULL DEFAULT 'active',
+                    quarantined_at TEXT,
+                    quarantine_reason TEXT NOT NULL DEFAULT '',
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
@@ -100,10 +129,67 @@ class ProfileStore:
                 connection.execute(
                     "ALTER TABLE mapping_profiles ADD COLUMN workspace_id TEXT NOT NULL DEFAULT ''"
                 )
+            if "status" not in columns:
+                connection.execute(
+                    "ALTER TABLE mapping_profiles ADD COLUMN status TEXT NOT NULL DEFAULT 'active'"
+                )
+            if "quarantined_at" not in columns:
+                connection.execute(
+                    "ALTER TABLE mapping_profiles ADD COLUMN quarantined_at TEXT"
+                )
+            if "quarantine_reason" not in columns:
+                connection.execute(
+                    "ALTER TABLE mapping_profiles ADD COLUMN quarantine_reason TEXT NOT NULL DEFAULT ''"
+                )
+            owner_scope_added = "owner_scope" not in columns
+            if owner_scope_added:
+                connection.execute(
+                    "ALTER TABLE mapping_profiles ADD COLUMN owner_scope TEXT NOT NULL DEFAULT 'local:legacy'"
+                )
+            if owner_scope_added:
+                connection.execute(
+                    """
+                    UPDATE mapping_profiles
+                    SET owner_scope = CASE
+                        WHEN length(trim(workspace_id)) > 0
+                            THEN 'workspace:' || trim(workspace_id)
+                        ELSE 'local:legacy'
+                    END
+                    """
+                )
+            else:
+                connection.execute(
+                    """
+                    UPDATE mapping_profiles
+                    SET owner_scope = CASE
+                        WHEN length(trim(workspace_id)) > 0
+                            THEN 'workspace:' || trim(workspace_id)
+                        ELSE 'local:legacy'
+                    END
+                    WHERE length(trim(owner_scope)) = 0
+                    """
+                )
             connection.execute(
                 """
-                CREATE INDEX IF NOT EXISTS idx_mapping_profiles_workspace_signature
-                ON mapping_profiles(workspace_id, target_template_id, source_signature_hash)
+                CREATE INDEX IF NOT EXISTS idx_mapping_profiles_owner_signature
+                ON mapping_profiles(owner_scope, target_template_id, source_signature_hash)
+                """
+            )
+            connection.executescript(
+                """
+                CREATE TRIGGER IF NOT EXISTS mapping_profiles_owner_scope_insert
+                BEFORE INSERT ON mapping_profiles
+                WHEN length(trim(NEW.owner_scope)) = 0
+                BEGIN
+                    SELECT RAISE(ABORT, 'mapping_profiles.owner_scope must not be empty');
+                END;
+
+                CREATE TRIGGER IF NOT EXISTS mapping_profiles_owner_scope_update
+                BEFORE UPDATE OF owner_scope ON mapping_profiles
+                WHEN length(trim(NEW.owner_scope)) = 0
+                BEGIN
+                    SELECT RAISE(ABORT, 'mapping_profiles.owner_scope must not be empty');
+                END;
                 """
             )
 
@@ -112,18 +198,30 @@ class ProfileStore:
         *,
         target_template_id: str,
         source_signature_hash: str,
+        owner_scope: str | None = None,
         workspace_id: str = "",
     ) -> MappingProfile | None:
+        resolved_owner_scope = resolve_owner_scope(
+            owner_scope,
+            workspace_id=workspace_id,
+        )
         with self._connect() as connection:
             row = connection.execute(
                 """
                 SELECT * FROM mapping_profiles
-                WHERE workspace_id = ? AND target_template_id = ? AND source_signature_hash = ?
+                WHERE owner_scope = ? AND target_template_id = ? AND source_signature_hash = ?
+                  AND status = 'active'
                 ORDER BY updated_at DESC
                 LIMIT 1
                 """,
-                (workspace_id, target_template_id, source_signature_hash),
+                (resolved_owner_scope, target_template_id, source_signature_hash),
             ).fetchone()
+            if row is None and resolved_owner_scope == "local:default":
+                row = self._claim_legacy_profile_by_signature(
+                    connection,
+                    target_template_id=target_template_id,
+                    source_signature_hash=source_signature_hash,
+                )
         return self._row_to_profile(row) if row else None
 
     def save_profile(
@@ -140,12 +238,17 @@ class ProfileStore:
         formulas: dict[str, Any],
         confidence: float,
         previous: dict[str, Any] | None = None,
+        owner_scope: str | None = None,
         workspace_id: str = "",
     ) -> MappingProfile:
+        resolved_owner_scope = resolve_owner_scope(
+            owner_scope,
+            workspace_id=workspace_id,
+        )
         existing = self.find_by_signature(
             target_template_id=target_template_id,
             source_signature_hash=source_signature_hash,
-            workspace_id=workspace_id,
+            owner_scope=resolved_owner_scope,
         )
         now = utc_now()
         profile_id = existing.id if existing else str(uuid.uuid4())
@@ -176,15 +279,16 @@ class ProfileStore:
                 connection.execute(
                     """
                     INSERT INTO mapping_profiles (
-                        id, name, workspace_id, target_template_id, source_signature_hash,
+                        id, name, owner_scope, workspace_id, target_template_id, source_signature_hash,
                         source_headers_json, sheet_name, header_row, mapping_json,
                         defaults_json, formulas_json, confidence, usage_count,
                         created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
                     """,
                     (
                         profile_id,
                         name,
+                        resolved_owner_scope,
                         workspace_id,
                         target_template_id,
                         source_signature_hash,
@@ -221,27 +325,130 @@ class ProfileStore:
                         now,
                     ),
                 )
-        return self.get_profile(profile_id)
+        return self.get_profile(profile_id, owner_scope=resolved_owner_scope)
 
-    def get_profile(self, profile_id: str) -> MappingProfile:
+    def get_profile(
+        self,
+        profile_id: str,
+        *,
+        owner_scope: str | None = None,
+        workspace_id: str = "",
+    ) -> MappingProfile:
+        resolved_owner_scope = resolve_owner_scope(
+            owner_scope,
+            workspace_id=workspace_id,
+        )
         with self._connect() as connection:
             row = connection.execute(
-                "SELECT * FROM mapping_profiles WHERE id = ?", (profile_id,)
+                "SELECT * FROM mapping_profiles WHERE id = ? AND owner_scope = ? AND status = 'active'",
+                (profile_id, resolved_owner_scope),
             ).fetchone()
+            if row is None and resolved_owner_scope == "local:default":
+                row = self._claim_legacy_profile_by_id(connection, profile_id)
         if not row:
             raise KeyError(f"Mapping profile not found: {profile_id}")
         return self._row_to_profile(row)
 
-    def mark_used(self, profile_id: str) -> None:
+    def mark_used(
+        self,
+        profile_id: str,
+        *,
+        owner_scope: str | None = None,
+        workspace_id: str = "",
+    ) -> None:
+        resolved_owner_scope = resolve_owner_scope(
+            owner_scope,
+            workspace_id=workspace_id,
+        )
         with self._connect() as connection:
-            connection.execute(
+            cursor = connection.execute(
                 """
                 UPDATE mapping_profiles
                 SET usage_count = usage_count + 1, updated_at = ?
-                WHERE id = ?
+                WHERE id = ? AND owner_scope = ? AND status = 'active'
                 """,
-                (utc_now(), profile_id),
+                (utc_now(), profile_id, resolved_owner_scope),
             )
+            if cursor.rowcount != 1:
+                raise KeyError(f"Mapping profile not found: {profile_id}")
+
+    def quarantine_profile(
+        self,
+        profile_id: str,
+        *,
+        reason: str,
+        owner_scope: str | None = None,
+        workspace_id: str = "",
+    ) -> None:
+        resolved_owner_scope = resolve_owner_scope(
+            owner_scope,
+            workspace_id=workspace_id,
+        )
+        normalized_reason = str(reason or "semantic_validation_failed").strip()[:500]
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE mapping_profiles
+                SET status = 'quarantined', quarantined_at = ?, quarantine_reason = ?,
+                    updated_at = ?
+                WHERE id = ? AND owner_scope = ? AND status = 'active'
+                """,
+                (utc_now(), normalized_reason, utc_now(), profile_id, resolved_owner_scope),
+            )
+            if cursor.rowcount != 1:
+                raise KeyError(f"Mapping profile not found or already inactive: {profile_id}")
+
+    @staticmethod
+    def _claim_legacy_profile_by_signature(
+        connection: sqlite3.Connection,
+        *,
+        target_template_id: str,
+        source_signature_hash: str,
+    ) -> sqlite3.Row | None:
+        legacy = connection.execute(
+            """
+            SELECT id FROM mapping_profiles
+            WHERE owner_scope = 'local:legacy'
+              AND status = 'active'
+              AND target_template_id = ?
+              AND source_signature_hash = ?
+            ORDER BY updated_at DESC
+            LIMIT 1
+            """,
+            (target_template_id, source_signature_hash),
+        ).fetchone()
+        if legacy is None:
+            return None
+        connection.execute(
+            """
+            UPDATE mapping_profiles
+            SET owner_scope = 'local:default'
+            WHERE id = ? AND owner_scope = 'local:legacy' AND status = 'active'
+            """,
+            (legacy["id"],),
+        )
+        return connection.execute(
+            "SELECT * FROM mapping_profiles WHERE id = ? AND owner_scope = 'local:default' AND status = 'active'",
+            (legacy["id"],),
+        ).fetchone()
+
+    @staticmethod
+    def _claim_legacy_profile_by_id(
+        connection: sqlite3.Connection,
+        profile_id: str,
+    ) -> sqlite3.Row | None:
+        connection.execute(
+            """
+            UPDATE mapping_profiles
+            SET owner_scope = 'local:default'
+            WHERE id = ? AND owner_scope = 'local:legacy'
+            """,
+            (profile_id,),
+        )
+        return connection.execute(
+            "SELECT * FROM mapping_profiles WHERE id = ? AND owner_scope = 'local:default' AND status = 'active'",
+            (profile_id,),
+        ).fetchone()
 
     def record_run(
         self,
@@ -289,5 +496,9 @@ class ProfileStore:
             formulas=json.loads(row["formulas_json"]),
             confidence=float(row["confidence"]),
             usage_count=int(row["usage_count"]),
+            owner_scope=str(row["owner_scope"] or ""),
             workspace_id=str(row["workspace_id"] or ""),
+            status=str(row["status"] or "active"),
+            quarantined_at=str(row["quarantined_at"] or ""),
+            quarantine_reason=str(row["quarantine_reason"] or ""),
         )

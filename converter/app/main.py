@@ -3,8 +3,11 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import threading
+import time
 import uuid
 import hmac
+import hashlib
 from pathlib import Path
 from typing import Annotated
 
@@ -14,7 +17,7 @@ try:
 except ImportError:
     pass  # python-dotenv not installed, rely on system env vars
 
-from fastapi import FastAPI, File, Form, Header, HTTPException, Request, UploadFile
+from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Query, Request, UploadFile
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
@@ -22,25 +25,194 @@ from fastapi.responses import JSONResponse, Response
 from starlette.concurrency import run_in_threadpool
 
 from app.ai_assistant import explain_validation_report, suggest_mapping_for_file
+from app.accounting_assistant import (
+    AccountingAssistantFeatureDisabledError,
+    ask_accounting_question,
+)
+from app.anomaly_workflow import (
+    AnomalyFeatureDisabledError,
+    detect_anomalies,
+    get_anomalies,
+    review_anomaly,
+)
 from app.calculation_rules import allow_calculation_warnings, has_calculation_warnings
 from app.conversion_types import BACKEND_ROOT, CONVERSION_TYPES
 from app.converter import convert_file, export_rows, preview_file, validate_file
+from app.correction_workflow import (
+    CorrectionFeatureDisabledError,
+    apply_corrections,
+    propose_corrections,
+    simulate_corrections,
+    undo_corrections,
+)
+from app.document_structure import validate_excel_magic
 from app.error_check import check_file_for_errors
+from app.excel_io import InputReadError
+from app.internal_auth import (
+    assert_secure_production_config as _assert_internal_auth_config,
+    bind_local_mode_request,
+    production_environment,
+    require_internal_service,
+    reset_local_mode_request,
+)
+from app.mapping_profile_v2 import MappingProfileV2Error
 from app.misa_workflow import (
     EXPORT_MEDIA_TYPE,
     ReadinessGateError,
     analyze_upload,
     confirm_mapping,
+    cleanup_expired_uploads,
     export_confirmed_profile,
     preview_mapping,
     readiness_mapping,
+    _read_metadata as _read_upload_metadata,
+    sync_mapping_session,
     templates_payload,
 )
 from app.master_data import parse_master_data_file
+from app.master_data_client import (
+    ConversionContextError,
+    conversion_context_owner_scope,
+    verify_conversion_context_token,
+)
 from app.models import ExportRowsRequest, PreviewResponse, ValidationReport
+from app.operation_store import (
+    OperationStore,
+    OperationStoreConflictError,
+    OperationStoreError,
+    OperationStoreExpiredError,
+    assert_operation_store_configured,
+    operation_context_required,
+    unauthenticated_local_operations_enabled,
+)
+from app.reconciliation_workflow_v2 import (
+    ReconciliationFeatureDisabledError,
+    add_comparison_file,
+    confirm_candidate_match,
+    get_reconciliation_report,
+    remove_comparison_file,
+    run_reconciliation,
+)
+from app.reconstruction_store import ReconstructionStoreError
+from app.reconstruction_workflow import (
+    ReconstructionConflictError,
+    ReconstructionGateError,
+    analyze_reconstruction,
+    approve_reconstruction,
+    export_reconstruction,
+    get_reconstruction,
+    get_reconstruction_draft,
+    merge_reconstruction_drafts,
+    split_reconstruction_draft,
+    update_reconstruction_draft,
+    validate_reconstruction,
+)
+from app.student_store import cleanup_expired_student_uploads
+from app.student_context import StudentContextClaims, verify_student_context
+from app.student_models import (
+    StudentAnonymizationRequest,
+    StudentInternshipReportRequest,
+    StudentQuestionRequest,
+)
+from app.student_workflow import (
+    StudentWorkflowError,
+    analyze_student_file,
+    ask_student_question,
+    build_student_internship_report,
+    export_student_anonymized_workbook,
+    get_student_accounting_map,
+    get_student_overview,
+    get_student_reconciliation,
+    get_student_source_row,
+    preview_student_anonymization,
+)
 
 
-app = FastAPI(title="EzFormat Converter API")
+app = FastAPI(
+    title="EzFormat Converter API",
+    docs_url=None if production_environment() else "/docs",
+    redoc_url=None if production_environment() else "/redoc",
+    openapi_url=None if production_environment() else "/openapi.json",
+)
+INTERNAL_SERVICE_DEPENDENCIES = [Depends(require_internal_service)]
+
+
+def require_operation_service_or_local_session(
+    request: Request,
+    session_id: str,
+    x_converter_service_token: Annotated[str | None, Header()] = None,
+) -> str:
+    try:
+        return require_internal_service(request, x_converter_service_token)
+    except HTTPException as auth_error:
+        if str(x_converter_service_token or "").strip():
+            raise auth_error
+        if not unauthenticated_local_operations_enabled():
+            raise auth_error
+        try:
+            session = OperationStore().load_session(session_id)
+        except OperationStoreError:
+            raise auth_error
+        if not session.owner_scope.startswith("local:"):
+            raise auth_error
+        return str(getattr(request.state, "request_id", "") or "")
+
+
+OPERATION_SERVICE_DEPENDENCIES = [
+    Depends(require_operation_service_or_local_session)
+]
+_RECONSTRUCTION_RATE_LOCK = threading.Lock()
+_RECONSTRUCTION_RATE_BUCKETS: dict[str, tuple[float, int]] = {}
+_STUDENT_RATE_LOCK = threading.Lock()
+_STUDENT_RATE_BUCKETS: dict[str, tuple[float, int]] = {}
+_STUDENT_CLEANUP_LOCK = threading.Lock()
+_LAST_STUDENT_CLEANUP = 0.0
+
+
+def _opportunistic_student_cleanup(*, force: bool = False) -> None:
+    global _LAST_STUDENT_CLEANUP
+    try:
+        interval_seconds = max(
+            1,
+            int(os.getenv("STUDENT_UPLOAD_CLEANUP_INTERVAL_SECONDS", "300")),
+        )
+    except ValueError:
+        interval_seconds = 300
+    now = time.monotonic()
+    with _STUDENT_CLEANUP_LOCK:
+        if not force and now - _LAST_STUDENT_CLEANUP < interval_seconds:
+            return
+        _LAST_STUDENT_CLEANUP = now
+    cleanup_expired_student_uploads()
+    cleanup_expired_uploads()
+
+
+async def _cleanup_student_uploads_at_startup() -> None:
+    await run_in_threadpool(_opportunistic_student_cleanup, force=True)
+
+
+def _assert_secure_production_config() -> None:
+    _assert_internal_auth_config()
+    assert_operation_store_configured()
+
+
+app.router.add_event_handler("startup", _assert_secure_production_config)
+app.router.add_event_handler("startup", _cleanup_student_uploads_at_startup)
+
+
+@app.middleware("http")
+async def attach_request_id(request: Request, call_next):
+    local_mode_token = bind_local_mode_request(request)
+    try:
+        await run_in_threadpool(_opportunistic_student_cleanup)
+        supplied = str(request.headers.get("x-request-id") or "").strip()
+        request_id = supplied[:128] if supplied else uuid.uuid4().hex
+        request.state.request_id = request_id
+        response = await call_next(request)
+        response.headers["X-Request-ID"] = request_id
+        return response
+    finally:
+        reset_local_mode_request(local_mode_token)
 
 
 def _sanitize_validation_payload(value):
@@ -82,6 +254,7 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["Content-Disposition", "X-Request-ID"],
 )
 
 TMP_ROOT = BACKEND_ROOT / ".tmp"
@@ -90,43 +263,323 @@ EXCEL_MEDIA_TYPE = "application/vnd.ms-excel"
 
 
 @app.get("/healthz")
-def healthz() -> dict[str, str]:
+def healthz() -> dict[str, object]:
+    payload: dict[str, object] = {
+        "status": "ok",
+        "capabilities": {
+            "converter": True,
+            "operations": True,
+        },
+    }
+    if os.getenv("AI_PROVIDER", "disabled").lower() == "remote_http":
+        ai_state = _ai_runtime_state()
+        payload["ai"] = ai_state
+        payload["capabilities"]["ai"] = ai_state
+    return payload
+
+
+def _ai_runtime_state() -> dict[str, str]:
     import os
     import urllib.request
 
-    ai_status = "disabled"
     ai_provider = os.getenv("AI_PROVIDER", "disabled").lower()
-    if ai_provider == "remote_http":
-        base_url = os.getenv("AI_BASE_URL", "").strip()
-        if base_url:
-            # Derive gateway root from the full endpoint URL
-            from urllib.parse import urlparse
-            parsed = urlparse(base_url)
-            gateway_root = f"{parsed.scheme}://{parsed.netloc}/docs"
-            try:
-                urllib.request.urlopen(gateway_root, timeout=2)
-                ai_status = "online"
-            except Exception:
-                ai_status = "offline"
-        else:
-            ai_status = "offline"
-    elif ai_provider == "ollama":
-        ollama_url = os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434").rstrip("/")
-        try:
-            urllib.request.urlopen(f"{ollama_url}/api/tags", timeout=2)
-            ai_status = "online"
-        except Exception:
-            ai_status = "offline"
+    if ai_provider != "remote_http":
+        return {
+            "gateway": "offline",
+            "model": "offline",
+            "mapping": "not_run",
+        }
 
-    return {"status": "ok", "ai": ai_status}
+    base_url = os.getenv("AI_BASE_URL", "").strip()
+    if not base_url:
+        return {
+            "gateway": "offline",
+            "model": "offline",
+            "mapping": "not_run",
+        }
+
+    try:
+        # The docs endpoint proves only that the gateway is reachable.
+        from urllib.parse import urlparse
+
+        parsed = urlparse(base_url)
+        gateway_root = f"{parsed.scheme}://{parsed.netloc}/docs"
+        urllib.request.urlopen(gateway_root, timeout=2)
+    except Exception:
+        return {
+            "gateway": "offline",
+            "model": "offline",
+            "mapping": "not_run",
+        }
+
+    return {
+        "gateway": "online",
+        "model": "unknown",
+        "mapping": "not_run",
+    }
 
 
-@app.get("/api/v1/templates")
+def _ai_runtime_status() -> str:
+    """Backward-compatible gateway-only status for existing callers."""
+    return _ai_runtime_state()["gateway"]
+
+
+def _converter_capabilities(ai_status: str | dict[str, str] | None = None) -> dict[str, object]:
+    import os
+
+    if isinstance(ai_status, dict):
+        ai_state = ai_status
+    elif isinstance(ai_status, str):
+        ai_state = {
+            "gateway": ai_status,
+            "model": "unknown" if ai_status == "online" else "offline",
+            "mapping": "not_run",
+        }
+    else:
+        ai_state = _ai_runtime_state()
+    effective_ai_status = ai_state["gateway"]
+    return {
+            "voucherReconstruction": os.getenv(
+                "VOUCHER_RECONSTRUCTION_ENABLED", "false"
+            ).lower()
+            == "true",
+            "studentAssistant": os.getenv(
+                "STUDENT_ASSISTANT_ENABLED", "false"
+            ).lower()
+            == "true",
+            "studentFileExplain": os.getenv(
+                "STUDENT_FILE_EXPLAIN_ENABLED", "false"
+            ).lower()
+            == "true",
+            "studentFileQa": os.getenv("STUDENT_FILE_QA_ENABLED", "false").lower()
+            == "true",
+            "studentAccountingMap": os.getenv(
+                "STUDENT_ACCOUNTING_MAP_ENABLED", "false"
+            ).lower()
+            == "true",
+            "studentReconciliation": os.getenv(
+                "STUDENT_RECONCILIATION_ENABLED", "false"
+            ).lower()
+            == "true",
+            "studentInternship": os.getenv(
+                "STUDENT_INTERNSHIP_ENABLED", "false"
+            ).lower()
+            == "true",
+            "mapping_profile_v2": _env_enabled("FEATURE_MAPPING_PROFILE_V2"),
+            "anomaly_detection": _env_enabled("FEATURE_ANOMALY_DETECTION"),
+            "bulk_correction": _env_enabled("FEATURE_BULK_CORRECTION"),
+            "reconciliation": _env_enabled("FEATURE_RECONCILIATION"),
+            "accounting_assistant": _env_enabled("FEATURE_ACCOUNTING_ASSISTANT"),
+            "ai_explanation": _env_enabled("FEATURE_ACCOUNTING_ASSISTANT")
+            and _env_enabled("FEATURE_AI_EXPLANATION")
+            and effective_ai_status == "online",
+            "ai": ai_state,
+            "limits": {
+                "comparison_files": min(
+                    2, _positive_env_int("RECONCILIATION_MAX_COMPARISON_FILES", 2)
+                ),
+                "raw_ttl_minutes": max(
+                    1, _positive_env_int("OPERATION_SESSION_TTL_SECONDS", 3600) // 60
+                ),
+                "max_rows_per_file": _positive_env_int("RECONCILIATION_MAX_ROWS", 50000),
+                "max_columns_per_file": _positive_env_int(
+                    "RECONCILIATION_MAX_COLUMNS", 500
+                ),
+            },
+    }
+
+
+def _env_enabled(name: str) -> bool:
+    return os.getenv(name, "false").strip().lower() in {"1", "true", "yes"}
+
+
+def _domain_context_token(
+    header_token: str | None,
+    supplied_token: str | None,
+    *,
+    domain: str,
+) -> str:
+    header = str(header_token or "").strip()
+    supplied = str(supplied_token or "").strip()
+    if header and supplied and not hmac.compare_digest(header, supplied):
+        raise HTTPException(status_code=401, detail=f"{domain} context không khớp")
+    if not header:
+        raise HTTPException(status_code=401, detail=f"Thiếu {domain} context")
+    return header
+
+
+def _conversion_context_for_request(
+    header_token: str | None,
+    supplied_token: str | None = None,
+    *,
+    required_scope: str,
+    upload_id: object | None = None,
+    session_id: object | None = None,
+    target_template_id: object | None = None,
+    conversion_run_id: object | None = None,
+) -> tuple[str | None, dict[str, object] | None]:
+    token = _domain_context_token(
+        header_token,
+        supplied_token,
+        domain="conversion",
+    )
+    try:
+        claims = verify_conversion_context_token(token)
+    except ConversionContextError as exc:
+        raise HTTPException(status_code=exc.status_code or 401, detail=str(exc)) from exc
+
+    scopes = claims.get("scopes")
+    if not isinstance(scopes, list) or required_scope not in scopes:
+        raise HTTPException(
+            status_code=403,
+            detail=f"Conversion context thiếu quyền {required_scope}",
+        )
+    if not claims.get("user_id") or not claims.get("conversion_run_id"):
+        raise HTTPException(status_code=401, detail="Conversion context thiếu binding bắt buộc")
+    allow_initial_auto_detect = (
+        required_scope == "analyze"
+        and not str(target_template_id or "").strip()
+        and not str(claims.get("upload_id") or "").strip()
+    )
+    if (
+        not allow_initial_auto_detect
+        and not str(claims.get("target_template_id") or "").strip()
+    ):
+        raise HTTPException(
+            status_code=401,
+            detail="Conversion context thiếu target template",
+        )
+
+    expected_bindings = {
+        "upload_id": upload_id,
+        "operation_session_id": session_id,
+        "target_template_id": target_template_id,
+        "conversion_run_id": conversion_run_id,
+    }
+    for claim_name, expected in expected_bindings.items():
+        normalized = str(expected or "").strip()
+        if normalized and str(claims.get(claim_name) or "") != normalized:
+            raise HTTPException(
+                status_code=409,
+                detail=f"{claim_name} không khớp conversion context",
+            )
+    return token, claims
+
+
+def _mapping_operation_context(
+    body: dict,
+    header_token: str | None,
+    *,
+    required_scope: str,
+) -> str:
+    required = ("upload_id", "session_id", "target_template_id", "conversion_run_id")
+    bindings = {name: str(body.get(name) or "").strip() for name in required}
+    token, claims = _conversion_context_for_request(
+        header_token,
+        body.get("conversion_context_token"),
+        required_scope=required_scope,
+        upload_id=bindings["upload_id"],
+        session_id=bindings["session_id"],
+        target_template_id=bindings["target_template_id"],
+        conversion_run_id=bindings["conversion_run_id"],
+    )
+    if claims is None:
+        raise HTTPException(status_code=401, detail="Conversion context token là bắt buộc")
+    if any(not value for value in bindings.values()):
+        raise HTTPException(
+            status_code=409,
+            detail="Mapping operation thiếu upload, session, template hoặc conversion run binding",
+        )
+    try:
+        revision = int(body["revision"])
+        state_hash = str(body["state_hash"] or "").strip()
+    except (KeyError, TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=409,
+            detail="Mapping operation phải gửi session_id, revision và state_hash",
+        ) from exc
+    if revision < 1 or not state_hash:
+        raise HTTPException(
+            status_code=409,
+            detail="Mapping operation phải gửi session_id, revision và state_hash",
+        )
+
+    store = OperationStore(conversion_context_token=token)
+    try:
+        session = store.assert_context_binding(
+            bindings["session_id"],
+            claims,
+            required_scope=required_scope,
+        )
+        store.assert_current(
+            bindings["session_id"],
+            expected_revision=revision,
+            expected_state_hash=state_hash,
+        )
+        metadata = _read_upload_metadata(
+            bindings["upload_id"],
+            operation_store=store,
+            session=session,
+        )
+    except OperationStoreConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except OperationStoreExpiredError as exc:
+        raise HTTPException(status_code=410, detail=str(exc)) from exc
+    except (KeyError, OperationStoreError) as exc:
+        raise HTTPException(status_code=404, detail="Không tìm thấy operation session") from exc
+
+    context = metadata.get("conversion_context")
+    context = context if isinstance(context, dict) else {}
+    stored_run_id = str(
+        metadata.get("conversion_run_id") or context.get("conversion_run_id") or ""
+    ).strip()
+    stored = {
+        "operation_session_id": str(metadata.get("operation_session_id") or "").strip(),
+        "target_template_id": str(metadata.get("target_template_id") or "").strip(),
+        "conversion_run_id": stored_run_id,
+        "owner_scope": str(
+            metadata.get("owner_scope") or context.get("owner_scope") or ""
+        ).strip(),
+        "user_id": str(context.get("user_id") or "").strip(),
+        "workspace_id": str(context.get("workspace_id") or "").strip(),
+    }
+    expected = {
+        "operation_session_id": session.session_id,
+        "target_template_id": session.target_template_id,
+        "conversion_run_id": bindings["conversion_run_id"],
+        "owner_scope": session.owner_scope,
+        "user_id": str(session.user_id or ""),
+        "workspace_id": str(session.workspace_id or ""),
+    }
+    if stored != expected:
+        raise HTTPException(status_code=404, detail="Không tìm thấy operation session")
+    return str(token)
+
+
+def _max_upload_bytes(claims: dict[str, object] | None = None) -> int:
+    configured = _positive_env_int("MAX_UPLOAD_BYTES", 20 * 1024 * 1024)
+    if not claims:
+        return configured
+    try:
+        claimed = int(claims.get("max_file_bytes") or 0)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=409, detail="max_file_bytes không hợp lệ") from exc
+    if claimed <= 0:
+        raise HTTPException(status_code=409, detail="Conversion context thiếu max_file_bytes")
+    return min(configured, claimed)
+
+
+@app.get("/api/v1/capabilities", dependencies=INTERNAL_SERVICE_DEPENDENCIES)
+def converter_capabilities() -> dict[str, object]:
+    return _converter_capabilities()
+
+
+@app.get("/api/v1/templates", dependencies=INTERNAL_SERVICE_DEPENDENCIES)
 def templates() -> JSONResponse:
     return JSONResponse(jsonable_encoder(templates_payload()))
 
 
-@app.get("/api/v1/conversion-types")
+@app.get("/api/v1/conversion-types", dependencies=INTERNAL_SERVICE_DEPENDENCIES)
 def conversion_types() -> dict[str, list[dict[str, str]]]:
     return {
         "items": [
@@ -136,20 +589,25 @@ def conversion_types() -> dict[str, list[dict[str, str]]]:
     }
 
 
-@app.post("/api/v1/master-data/parse")
+@app.post("/api/v1/master-data/parse", dependencies=INTERNAL_SERVICE_DEPENDENCIES)
 async def parse_master_data_upload(
     file: Annotated[UploadFile, File()],
     catalog_type: Annotated[str, Form()],
     x_converter_service_token: Annotated[str | None, Header()] = None,
+    x_conversion_context: Annotated[str | None, Header()] = None,
 ) -> JSONResponse:
     expected_token = os.getenv("CONVERTER_SERVICE_TOKEN", "").strip()
     if expected_token and not hmac.compare_digest(
         x_converter_service_token or "", expected_token
     ):
         raise HTTPException(status_code=401, detail="Service token không hợp lệ")
+    _, claims = _conversion_context_for_request(
+        x_conversion_context,
+        required_scope="analyze",
+    )
     workdir = _create_workdir()
     try:
-        input_path = await _save_upload(file, workdir)
+        input_path = await _save_upload(file, workdir, max_bytes=_max_upload_bytes(claims))
         payload = await run_in_threadpool(
             parse_master_data_file,
             input_path,
@@ -163,29 +621,570 @@ async def parse_master_data_upload(
         _cleanup_tmp_root()
 
 
-@app.post("/api/v1/uploads/analyze")
+@app.post("/api/v1/uploads/analyze", dependencies=INTERNAL_SERVICE_DEPENDENCIES)
 async def analyze_raw_upload(
     file: Annotated[UploadFile, File()],
     target_template_id: Annotated[str | None, Form()] = None,
+    conversion_run_id: Annotated[str | None, Form()] = None,
+    operation_session_id: Annotated[str | None, Form()] = None,
     conversion_context_token: Annotated[str | None, Form()] = None,
+    student_context_token: Annotated[str | None, Form()] = None,
+    use_ai: Annotated[bool, Form()] = False,
+    ai_mapping_opt_in: Annotated[bool, Form()] = False,
+    x_conversion_context: Annotated[str | None, Header()] = None,
 ) -> JSONResponse:
     try:
-        content = await file.read()
+        if student_context_token:
+            raise HTTPException(
+                status_code=401,
+                detail="Student context không hợp lệ cho conversion route",
+            )
+        context_token, claims = _conversion_context_for_request(
+            x_conversion_context,
+            conversion_context_token,
+            required_scope="analyze",
+            session_id=operation_session_id,
+            target_template_id=target_template_id,
+            conversion_run_id=conversion_run_id,
+        )
+        claimed_session_id = str((claims or {}).get("operation_session_id") or "").strip()
+        supplied_session_id = str(operation_session_id or "").strip()
+        if operation_context_required() and (
+            not claimed_session_id or not supplied_session_id
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="operation_session_id là bắt buộc trong production",
+            )
+        claimed_run_id = str((claims or {}).get("conversion_run_id") or "").strip()
+        supplied_run_id = str(conversion_run_id or "").strip()
+        if bool(claimed_session_id) != bool(supplied_session_id) or (
+            claimed_session_id
+            and not hmac.compare_digest(claimed_session_id, supplied_session_id)
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="operation_session_id không khớp conversion context",
+            )
+        if claimed_session_id and (
+            not supplied_run_id
+            or not hmac.compare_digest(claimed_run_id, supplied_run_id)
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="conversion_run_id không khớp conversion context",
+            )
+        effective_target_template_id = target_template_id or (
+            str((claims or {}).get("target_template_id") or "") or None
+        )
+        content = await read_upload_with_limit(file, _max_upload_bytes(claims))
         payload = await run_in_threadpool(
             analyze_upload,
             filename=file.filename or "upload.xlsx",
             content=content,
-            requested_target_template_id=target_template_id,
-            conversion_context_token=conversion_context_token,
+            requested_target_template_id=effective_target_template_id,
+            conversion_context_token=context_token,
+            operation_session_id=supplied_session_id or None,
+            conversion_run_id=supplied_run_id or None,
+            student_context_token=None,
+            use_ai=use_ai,
+            ai_mapping_opt_in=ai_mapping_opt_in
+            or bool((claims or {}).get("ai_mapping_opt_in")),
         )
         return JSONResponse(jsonable_encoder(payload))
+    except InputReadError as exc:
+        message = exc.message
+        if exc.code == "corrupt_xlsx":
+            message = (
+                "Không thể đọc file Excel. File có thể bị hỏng hoặc không đúng "
+                "định dạng .xlsx."
+            )
+        raise HTTPException(
+            status_code=422,
+            detail={"code": exc.code, "message": message},
+        ) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
-@app.post("/api/v1/mappings/preview")
-async def preview_misa_mapping(body: dict) -> JSONResponse:
+@app.post("/api/v1/student/sessions/analyze", dependencies=INTERNAL_SERVICE_DEPENDENCIES)
+async def analyze_student_session(
+    file: Annotated[UploadFile, File()],
+    context_token: Annotated[str, Form()],
+    target_template_id: Annotated[str | None, Form()] = None,
+    x_student_context: Annotated[str | None, Header()] = None,
+) -> JSONResponse:
     try:
+        verified_token = _domain_context_token(
+            x_student_context,
+            context_token,
+            domain="student",
+        )
+        rate_claims = _verified_student_rate_claims(verified_token, "analyze")
+        _check_student_rate_limit(
+            _student_rate_key("analyze", rate_claims),
+            limit=_positive_env_int("STUDENT_ANALYZE_LIMIT_PER_15_MINUTES", 5),
+        )
+        content = await _read_limited_student_upload(file)
+        payload = await run_in_threadpool(
+            analyze_student_file,
+            filename=file.filename or "upload.xlsx",
+            content=content,
+            context_token=verified_token,
+            target_template_id=target_template_id,
+        )
+        return JSONResponse(jsonable_encoder(payload))
+    except StudentWorkflowError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+@app.get("/api/v1/student/sessions/{session_id}/overview", dependencies=INTERNAL_SERVICE_DEPENDENCIES)
+async def student_session_overview(
+    session_id: str,
+    x_student_context: Annotated[str | None, Header()] = None,
+) -> JSONResponse:
+    try:
+        payload = await run_in_threadpool(
+            get_student_overview,
+            session_id=session_id,
+            context_token=x_student_context or "",
+        )
+        return JSONResponse(jsonable_encoder(payload))
+    except StudentWorkflowError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+@app.get("/api/v1/student/sessions/{session_id}/accounting-map", dependencies=INTERNAL_SERVICE_DEPENDENCIES)
+async def student_session_accounting_map(
+    session_id: str,
+    x_student_context: Annotated[str | None, Header()] = None,
+) -> JSONResponse:
+    try:
+        payload = await run_in_threadpool(
+            get_student_accounting_map,
+            session_id=session_id,
+            context_token=x_student_context or "",
+        )
+        return JSONResponse(jsonable_encoder(payload))
+    except StudentWorkflowError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+@app.get("/api/v1/student/sessions/{session_id}/reconciliation", dependencies=INTERNAL_SERVICE_DEPENDENCIES)
+async def student_session_reconciliation(
+    session_id: str,
+    x_student_context: Annotated[str | None, Header()] = None,
+) -> JSONResponse:
+    try:
+        payload = await run_in_threadpool(
+            get_student_reconciliation,
+            session_id=session_id,
+            context_token=x_student_context or "",
+        )
+        return JSONResponse(jsonable_encoder(payload))
+    except StudentWorkflowError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+@app.post("/api/v1/student/sessions/{session_id}/anonymization/preview", dependencies=INTERNAL_SERVICE_DEPENDENCIES)
+async def student_session_anonymization_preview(
+    session_id: str,
+    request: StudentAnonymizationRequest,
+    x_student_context: Annotated[str | None, Header()] = None,
+) -> JSONResponse:
+    try:
+        rate_claims = _verified_student_rate_claims(
+            x_student_context or "", "export", session_id
+        )
+        _check_student_rate_limit(
+            _student_rate_key("anonymization", rate_claims),
+            limit=_positive_env_int(
+                "STUDENT_ANONYMIZATION_LIMIT_PER_15_MINUTES",
+                20,
+            ),
+        )
+        payload = await run_in_threadpool(
+            preview_student_anonymization,
+            session_id=session_id,
+            context_token=x_student_context or "",
+            full_document_numbers=request.full_document_numbers,
+        )
+        return JSONResponse(jsonable_encoder(payload))
+    except StudentWorkflowError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+@app.post("/api/v1/student/sessions/{session_id}/anonymization/export", dependencies=INTERNAL_SERVICE_DEPENDENCIES)
+async def student_session_anonymization_export(
+    session_id: str,
+    request: StudentAnonymizationRequest,
+    x_student_context: Annotated[str | None, Header()] = None,
+) -> Response:
+    try:
+        rate_claims = _verified_student_rate_claims(
+            x_student_context or "", "export", session_id
+        )
+        _check_student_rate_limit(
+            _student_rate_key("export", rate_claims),
+            limit=_positive_env_int("STUDENT_EXPORT_LIMIT_PER_15_MINUTES", 10),
+        )
+        exported = await run_in_threadpool(
+            export_student_anonymized_workbook,
+            session_id=session_id,
+            context_token=x_student_context or "",
+            full_document_numbers=request.full_document_numbers,
+        )
+        media_type = (
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            if exported.filename.lower().endswith(".xlsx")
+            else EXPORT_MEDIA_TYPE
+        )
+        return Response(
+            content=exported.content,
+            media_type=media_type,
+            headers={
+                "Content-Disposition": f'attachment; filename="{exported.filename}"',
+                "X-Anonymization-Scanner": "passed",
+            },
+        )
+    except StudentWorkflowError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+@app.post("/api/v1/student/sessions/{session_id}/internship-report", dependencies=INTERNAL_SERVICE_DEPENDENCIES)
+async def student_session_internship_report(
+    session_id: str,
+    request: StudentInternshipReportRequest,
+    x_student_context: Annotated[str | None, Header()] = None,
+) -> Response:
+    try:
+        rate_claims = _verified_student_rate_claims(
+            x_student_context or "", "export", session_id
+        )
+        _check_student_rate_limit(
+            _student_rate_key("report", rate_claims),
+            limit=_positive_env_int("STUDENT_REPORT_LIMIT_PER_15_MINUTES", 10),
+        )
+        report = await run_in_threadpool(
+            build_student_internship_report,
+            session_id=session_id,
+            context_token=x_student_context or "",
+            activity_ids=request.activity_ids,
+            approved_notes=request.approved_notes,
+        )
+        return Response(
+            content=report.encode("utf-8"),
+            media_type="text/markdown",
+            headers={
+                "Content-Disposition": 'attachment; filename="internship-handoff.md"',
+            },
+        )
+    except StudentWorkflowError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+@app.post("/api/v1/student/sessions/{session_id}/questions", dependencies=INTERNAL_SERVICE_DEPENDENCIES)
+async def student_session_question(
+    session_id: str,
+    request: StudentQuestionRequest,
+    x_student_context: Annotated[str | None, Header()] = None,
+) -> JSONResponse:
+    try:
+        rate_claims = _verified_student_rate_claims(
+            x_student_context or "", "ask", session_id
+        )
+        _check_student_rate_limit(
+            _student_rate_key("question", rate_claims),
+            limit=_positive_env_int("STUDENT_QUESTION_LIMIT_PER_15_MINUTES", 60),
+        )
+        payload = await run_in_threadpool(
+            ask_student_question,
+            session_id=session_id,
+            context_token=x_student_context or "",
+            question=request.question,
+        )
+        return JSONResponse(jsonable_encoder(payload))
+    except StudentWorkflowError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+@app.get("/api/v1/student/sessions/{session_id}/source-rows/{worksheet_row}", dependencies=INTERNAL_SERVICE_DEPENDENCIES)
+async def student_session_source_row(
+    session_id: str,
+    worksheet_row: int,
+    x_student_context: Annotated[str | None, Header()] = None,
+) -> JSONResponse:
+    try:
+        payload = await run_in_threadpool(
+            get_student_source_row,
+            session_id=session_id,
+            worksheet_row=worksheet_row,
+            context_token=x_student_context or "",
+        )
+        return JSONResponse(jsonable_encoder(payload))
+    except StudentWorkflowError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+@app.post("/api/v1/reconstructions/analyze", dependencies=INTERNAL_SERVICE_DEPENDENCIES)
+async def analyze_voucher_reconstruction(
+    file: Annotated[UploadFile, File()],
+    context_token: Annotated[str, Form()],
+    mode: Annotated[str, Form()] = "auto",
+    target_template_id: Annotated[str | None, Form()] = None,
+    use_ai: Annotated[bool, Form()] = False,
+    x_reconstruction_context: Annotated[str | None, Header()] = None,
+) -> JSONResponse:
+    try:
+        verified_token = _domain_context_token(
+            x_reconstruction_context,
+            context_token,
+            domain="reconstruction",
+        )
+        _check_reconstruction_rate_limit(
+            "analyze:" + hashlib.sha256(verified_token.encode("utf-8")).hexdigest(),
+            limit=max(
+                1,
+                int(os.getenv("RECONSTRUCTION_ANALYZE_LIMIT_PER_15_MINUTES", "5")),
+            ),
+        )
+        content = await _read_limited_reconstruction_upload(file)
+        payload = await run_in_threadpool(
+            analyze_reconstruction,
+            filename=file.filename or "upload.xlsx",
+            content=content,
+            context_token=verified_token,
+            mode=mode,
+            target_template_id=target_template_id,
+            use_ai=use_ai,
+        )
+        return JSONResponse(jsonable_encoder(payload))
+    except ConversionContextError as exc:
+        raise HTTPException(status_code=exc.status_code or 401, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/v1/reconstructions/{reconstruction_id}", dependencies=INTERNAL_SERVICE_DEPENDENCIES)
+async def get_voucher_reconstruction(
+    reconstruction_id: str,
+    x_reconstruction_context: Annotated[str | None, Header()] = None,
+    page: Annotated[int, Query(ge=1)] = 1,
+    limit: Annotated[int, Query(ge=1, le=500)] = 100,
+) -> JSONResponse:
+    try:
+        payload = await run_in_threadpool(
+            get_reconstruction,
+            reconstruction_id,
+            context_token=x_reconstruction_context or "",
+            page=page,
+            limit=limit,
+        )
+        return JSONResponse(jsonable_encoder(payload))
+    except ConversionContextError as exc:
+        raise HTTPException(status_code=exc.status_code or 401, detail=str(exc)) from exc
+    except ReconstructionConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ReconstructionStoreError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.get("/api/v1/reconstructions/{reconstruction_id}/drafts/{draft_id}", dependencies=INTERNAL_SERVICE_DEPENDENCIES)
+async def get_voucher_reconstruction_draft(
+    reconstruction_id: str,
+    draft_id: str,
+    x_reconstruction_context: Annotated[str | None, Header()] = None,
+) -> JSONResponse:
+    try:
+        payload = await run_in_threadpool(
+            get_reconstruction_draft,
+            reconstruction_id,
+            draft_id,
+            context_token=x_reconstruction_context or "",
+        )
+        return JSONResponse(jsonable_encoder(payload))
+    except ConversionContextError as exc:
+        raise HTTPException(status_code=exc.status_code or 401, detail=str(exc)) from exc
+    except ReconstructionConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except (KeyError, ReconstructionStoreError) as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.patch("/api/v1/reconstructions/{reconstruction_id}/drafts/{draft_id}", dependencies=INTERNAL_SERVICE_DEPENDENCIES)
+async def patch_voucher_reconstruction_draft(
+    reconstruction_id: str,
+    draft_id: str,
+    body: dict,
+    x_reconstruction_context: Annotated[str | None, Header()] = None,
+) -> JSONResponse:
+    try:
+        payload = await run_in_threadpool(
+            update_reconstruction_draft,
+            reconstruction_id,
+            draft_id,
+            context_token=x_reconstruction_context or "",
+            expected_revision=int(body.get("expected_revision") or 0),
+            operations=body.get("operations") or [],
+        )
+        return JSONResponse(jsonable_encoder(payload))
+    except ConversionContextError as exc:
+        raise HTTPException(status_code=exc.status_code or 401, detail=str(exc)) from exc
+    except ReconstructionConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except (ReconstructionStoreError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/v1/reconstructions/{reconstruction_id}/split", dependencies=INTERNAL_SERVICE_DEPENDENCIES)
+async def split_voucher_reconstruction(
+    reconstruction_id: str,
+    body: dict,
+    x_reconstruction_context: Annotated[str | None, Header()] = None,
+) -> JSONResponse:
+    try:
+        payload = await run_in_threadpool(
+            split_reconstruction_draft,
+            reconstruction_id,
+            context_token=x_reconstruction_context or "",
+            draft_id=str(body.get("draft_id") or ""),
+            expected_revision=int(body.get("expected_revision") or 0),
+            source_rows=body.get("source_rows") or [],
+        )
+        return JSONResponse(jsonable_encoder(payload))
+    except ConversionContextError as exc:
+        raise HTTPException(status_code=exc.status_code or 401, detail=str(exc)) from exc
+    except ReconstructionConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except (ReconstructionStoreError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/v1/reconstructions/{reconstruction_id}/merge", dependencies=INTERNAL_SERVICE_DEPENDENCIES)
+async def merge_voucher_reconstruction(
+    reconstruction_id: str,
+    body: dict,
+    x_reconstruction_context: Annotated[str | None, Header()] = None,
+) -> JSONResponse:
+    try:
+        payload = await run_in_threadpool(
+            merge_reconstruction_drafts,
+            reconstruction_id,
+            context_token=x_reconstruction_context or "",
+            draft_ids=body.get("draft_ids") or [],
+            expected_revisions=body.get("expected_revisions") or {},
+        )
+        return JSONResponse(jsonable_encoder(payload))
+    except ConversionContextError as exc:
+        raise HTTPException(status_code=exc.status_code or 401, detail=str(exc)) from exc
+    except ReconstructionConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except (ReconstructionStoreError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/v1/reconstructions/{reconstruction_id}/validate", dependencies=INTERNAL_SERVICE_DEPENDENCIES)
+async def validate_voucher_reconstruction(
+    reconstruction_id: str,
+    x_reconstruction_context: Annotated[str | None, Header()] = None,
+) -> JSONResponse:
+    try:
+        payload = await run_in_threadpool(
+            validate_reconstruction,
+            reconstruction_id,
+            context_token=x_reconstruction_context or "",
+        )
+        return JSONResponse(jsonable_encoder(payload))
+    except ConversionContextError as exc:
+        raise HTTPException(status_code=exc.status_code or 401, detail=str(exc)) from exc
+    except ReconstructionConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ReconstructionStoreError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/v1/reconstructions/{reconstruction_id}/approve", dependencies=INTERNAL_SERVICE_DEPENDENCIES)
+async def approve_voucher_reconstruction(
+    reconstruction_id: str,
+    body: dict,
+    x_reconstruction_context: Annotated[str | None, Header()] = None,
+) -> JSONResponse:
+    try:
+        payload = await run_in_threadpool(
+            approve_reconstruction,
+            reconstruction_id,
+            context_token=x_reconstruction_context or "",
+            acknowledge_warnings=bool(body.get("acknowledge_warnings")),
+        )
+        return JSONResponse(jsonable_encoder(payload))
+    except ConversionContextError as exc:
+        raise HTTPException(status_code=exc.status_code or 401, detail=str(exc)) from exc
+    except ReconstructionConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ReconstructionGateError as exc:
+        return JSONResponse(status_code=422, content=jsonable_encoder(exc.validation))
+    except ReconstructionStoreError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/v1/reconstructions/{reconstruction_id}/export", dependencies=INTERNAL_SERVICE_DEPENDENCIES)
+async def export_voucher_reconstruction(
+    reconstruction_id: str,
+    body: dict,
+    x_reconstruction_context: Annotated[str | None, Header()] = None,
+    idempotency_key: Annotated[str | None, Header()] = None,
+) -> Response:
+    try:
+        _check_reconstruction_rate_limit(
+            f"export:{reconstruction_id}",
+            limit=max(
+                1,
+                int(os.getenv("RECONSTRUCTION_EXPORT_LIMIT_PER_15_MINUTES", "20")),
+            ),
+        )
+        content, filename, media_type = await run_in_threadpool(
+            export_reconstruction,
+            reconstruction_id,
+            context_token=x_reconstruction_context or "",
+            acknowledge_warnings=bool(body.get("acknowledge_warnings")),
+            idempotency_key=idempotency_key or "",
+        )
+        return Response(
+            content=content,
+            media_type=media_type,
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+    except ConversionContextError as exc:
+        raise HTTPException(status_code=exc.status_code or 401, detail=str(exc)) from exc
+    except ReconstructionConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ReconstructionGateError as exc:
+        return JSONResponse(status_code=422, content=jsonable_encoder(exc.validation))
+    except ReconstructionStoreError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/v1/mappings/preview", dependencies=INTERNAL_SERVICE_DEPENDENCIES)
+async def preview_misa_mapping(
+    body: dict,
+    x_conversion_context: Annotated[str | None, Header()] = None,
+) -> JSONResponse:
+    try:
+        context_token = _mapping_operation_context(
+            body,
+            x_conversion_context,
+            required_scope="preview",
+        )
         payload = await run_in_threadpool(
             preview_mapping,
             upload_id=str(body["upload_id"]),
@@ -193,18 +1192,35 @@ async def preview_misa_mapping(body: dict) -> JSONResponse:
             mapping=body.get("mapping") or {},
             defaults=body.get("defaults") or {},
             formulas=body.get("formulas") or {},
-            conversion_context_token=body.get("conversion_context_token"),
+            conversion_context_token=context_token,
+            student_context_token=None,
+            session_id=body.get("session_id"),
+            revision=body.get("revision"),
+            state_hash=body.get("state_hash"),
         )
         return JSONResponse(jsonable_encoder(payload))
+    except OperationStoreConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except OperationStoreExpiredError as exc:
+        raise HTTPException(status_code=410, detail=str(exc)) from exc
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
-@app.post("/api/v1/mappings/readiness")
-async def readiness_misa_mapping(body: dict) -> JSONResponse:
+@app.post("/api/v1/mappings/readiness", dependencies=INTERNAL_SERVICE_DEPENDENCIES)
+@app.post("/api/v1/mappings/validate", dependencies=INTERNAL_SERVICE_DEPENDENCIES)
+async def readiness_misa_mapping(
+    body: dict,
+    x_conversion_context: Annotated[str | None, Header()] = None,
+) -> JSONResponse:
     try:
+        context_token = _mapping_operation_context(
+            body,
+            x_conversion_context,
+            required_scope="readiness",
+        )
         edited_rows = body.get("rows")
         payload = await run_in_threadpool(
             readiness_mapping,
@@ -214,18 +1230,35 @@ async def readiness_misa_mapping(body: dict) -> JSONResponse:
             defaults=body.get("defaults") or {},
             formulas=body.get("formulas") or {},
             edited_rows=edited_rows if isinstance(edited_rows, list) else None,
-            conversion_context_token=body.get("conversion_context_token"),
+            conversion_context_token=context_token,
+            student_context_token=None,
+            session_id=body.get("session_id"),
+            revision=body.get("revision"),
+            state_hash=body.get("state_hash"),
+            vat_basis=body.get("vat_basis"),
         )
         return JSONResponse(jsonable_encoder(payload))
+    except OperationStoreConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except OperationStoreExpiredError as exc:
+        raise HTTPException(status_code=410, detail=str(exc)) from exc
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
-@app.post("/api/v1/mappings/confirm")
-async def confirm_misa_mapping(body: dict) -> JSONResponse:
+@app.post("/api/v1/mappings/confirm", dependencies=INTERNAL_SERVICE_DEPENDENCIES)
+async def confirm_misa_mapping(
+    body: dict,
+    x_conversion_context: Annotated[str | None, Header()] = None,
+) -> JSONResponse:
     try:
+        context_token = _mapping_operation_context(
+            body,
+            x_conversion_context,
+            required_scope="confirm",
+        )
         payload = await run_in_threadpool(
             confirm_mapping,
             upload_id=str(body["upload_id"]),
@@ -234,25 +1267,440 @@ async def confirm_misa_mapping(body: dict) -> JSONResponse:
             defaults=body.get("defaults") or {},
             formulas=body.get("formulas") or {},
             profile_name=body.get("profile_name"),
-            conversion_context_token=body.get("conversion_context_token"),
+            conversion_context_token=context_token,
+            student_context_token=None,
+            session_id=body.get("session_id"),
+            revision=body.get("revision"),
+            state_hash=body.get("state_hash"),
         )
         return JSONResponse(jsonable_encoder(payload))
+    except OperationStoreConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
-@app.post("/api/v1/conversions/validate")
+@app.post("/api/v1/mappings/session", dependencies=INTERNAL_SERVICE_DEPENDENCIES)
+async def sync_misa_mapping_session(
+    body: dict,
+    x_conversion_context: Annotated[str | None, Header()] = None,
+) -> JSONResponse:
+    try:
+        context_token = _mapping_operation_context(
+            body,
+            x_conversion_context,
+            required_scope="confirm",
+        )
+        payload = await run_in_threadpool(
+            sync_mapping_session,
+            upload_id=str(body["upload_id"]),
+            target_template_id=str(body["target_template_id"]),
+            mapping=body.get("mapping") or {},
+            defaults=body.get("defaults") or {},
+            formulas=body.get("formulas") or {},
+            conversion_context_token=context_token,
+            student_context_token=None,
+            session_id=str(body["session_id"]),
+            revision=int(body["revision"]),
+            state_hash=str(body["state_hash"]),
+        )
+        return JSONResponse(jsonable_encoder(payload))
+    except OperationStoreConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except OperationStoreExpiredError as exc:
+        raise HTTPException(status_code=410, detail=str(exc)) from exc
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/v1/sessions/{session_id}/revisions", dependencies=OPERATION_SERVICE_DEPENDENCIES)
+async def operation_revisions(
+    session_id: str,
+    x_conversion_context: Annotated[str | None, Header()] = None,
+) -> JSONResponse:
+    try:
+        store = _authorized_operation_store(session_id, x_conversion_context)
+        session = await run_in_threadpool(store.load_session, session_id)
+        return JSONResponse(
+            jsonable_encoder(
+                {
+                    "session_id": session_id,
+                    "active_revision": session.active_revision,
+                    "state_hash": session.state_hash,
+                    "items": [item.model_dump(mode="json") for item in session.revisions],
+                }
+            )
+        )
+    except (OperationStoreError, ConversionContextError) as exc:
+        _raise_operation_http(exc)
+
+
+@app.post("/api/v1/sessions/{session_id}/revisions/{revision}/activate", dependencies=OPERATION_SERVICE_DEPENDENCIES)
+async def activate_operation_revision(
+    session_id: str,
+    revision: int,
+    body: dict,
+    x_conversion_context: Annotated[str | None, Header()] = None,
+) -> JSONResponse:
+    try:
+        store = _authorized_operation_store(
+            session_id, x_conversion_context, required_scope="confirm"
+        )
+        session = await run_in_threadpool(
+            store.activate_revision,
+            session_id,
+            revision=revision,
+            expected_revision=int(body["expected_revision"]),
+            expected_state_hash=str(body["state_hash"]),
+            activated_by=store.load_session(session_id).owner_scope,
+        )
+        return JSONResponse(jsonable_encoder(session.model_dump(mode="json")))
+    except (KeyError, ValueError, OperationStoreError, ConversionContextError) as exc:
+        _raise_operation_http(exc)
+
+
+@app.post("/api/v1/sessions/{session_id}/anomalies/detect", dependencies=OPERATION_SERVICE_DEPENDENCIES)
+async def detect_operation_anomalies(
+    session_id: str,
+    body: dict,
+    x_conversion_context: Annotated[str | None, Header()] = None,
+) -> JSONResponse:
+    try:
+        store = _authorized_operation_store(
+            session_id, x_conversion_context, required_scope="readiness"
+        )
+        payload = await run_in_threadpool(
+            detect_anomalies,
+            store,
+            session_id=session_id,
+            revision=int(body["revision"]),
+            state_hash=str(body["state_hash"]),
+        )
+        return JSONResponse(jsonable_encoder(payload))
+    except (KeyError, ValueError, OperationStoreError, ConversionContextError) as exc:
+        _raise_operation_http(exc)
+
+
+@app.get("/api/v1/sessions/{session_id}/anomalies", dependencies=OPERATION_SERVICE_DEPENDENCIES)
+async def list_operation_anomalies(
+    session_id: str,
+    revision: int = Query(ge=1),
+    x_conversion_context: Annotated[str | None, Header()] = None,
+) -> JSONResponse:
+    try:
+        store = _authorized_operation_store(
+            session_id, x_conversion_context, required_scope="readiness"
+        )
+        payload = await run_in_threadpool(
+            get_anomalies, store, session_id=session_id, revision=revision
+        )
+        return JSONResponse(jsonable_encoder(payload))
+    except (OperationStoreError, ConversionContextError) as exc:
+        _raise_operation_http(exc)
+
+
+@app.post("/api/v1/sessions/{session_id}/anomalies/{anomaly_id}/review", dependencies=OPERATION_SERVICE_DEPENDENCIES)
+async def review_operation_anomaly(
+    session_id: str,
+    anomaly_id: str,
+    body: dict,
+    x_conversion_context: Annotated[str | None, Header()] = None,
+) -> JSONResponse:
+    try:
+        store = _authorized_operation_store(
+            session_id, x_conversion_context, required_scope="confirm"
+        )
+        session = store.load_session(session_id)
+        payload = await run_in_threadpool(
+            review_anomaly,
+            store,
+            session_id=session_id,
+            anomaly_id=anomaly_id,
+            revision=int(body["revision"]),
+            state_hash=str(body["state_hash"]),
+            action=str(body["action"]),
+            reviewed_by=session.owner_scope,
+        )
+        return JSONResponse(jsonable_encoder(payload))
+    except (KeyError, ValueError, OperationStoreError, ConversionContextError) as exc:
+        _raise_operation_http(exc)
+
+
+@app.post("/api/v1/sessions/{session_id}/corrections/propose", dependencies=OPERATION_SERVICE_DEPENDENCIES)
+async def propose_operation_corrections(
+    session_id: str,
+    body: dict,
+    x_conversion_context: Annotated[str | None, Header()] = None,
+) -> JSONResponse:
+    try:
+        store = _authorized_operation_store(
+            session_id, x_conversion_context, required_scope="readiness"
+        )
+        payload = await run_in_threadpool(
+            propose_corrections,
+            store,
+            session_id=session_id,
+            revision=int(body["revision"]),
+            state_hash=str(body["state_hash"]),
+        )
+        return JSONResponse(jsonable_encoder(payload))
+    except (KeyError, ValueError, OperationStoreError, ConversionContextError) as exc:
+        _raise_operation_http(exc)
+
+
+@app.post("/api/v1/sessions/{session_id}/corrections/simulate", dependencies=OPERATION_SERVICE_DEPENDENCIES)
+async def simulate_operation_corrections(
+    session_id: str,
+    body: dict,
+    x_conversion_context: Annotated[str | None, Header()] = None,
+) -> JSONResponse:
+    try:
+        store = _authorized_operation_store(
+            session_id, x_conversion_context, required_scope="readiness"
+        )
+        payload = await run_in_threadpool(
+            simulate_corrections,
+            store,
+            session_id=session_id,
+            patch_set_id=str(body["patch_set_id"]),
+            revision=int(body["revision"]),
+            state_hash=str(body["state_hash"]),
+            selected_patch_ids=[str(item) for item in body.get("selected_patch_ids") or []],
+        )
+        return JSONResponse(jsonable_encoder(payload))
+    except (KeyError, ValueError, OperationStoreError, ConversionContextError) as exc:
+        _raise_operation_http(exc)
+
+
+@app.post("/api/v1/sessions/{session_id}/corrections/apply", dependencies=OPERATION_SERVICE_DEPENDENCIES)
+async def apply_operation_corrections(
+    session_id: str,
+    body: dict,
+    idempotency_key: Annotated[str | None, Header()] = None,
+    x_conversion_context: Annotated[str | None, Header()] = None,
+) -> JSONResponse:
+    try:
+        store = _authorized_operation_store(
+            session_id, x_conversion_context, required_scope="confirm"
+        )
+        session = store.load_session(session_id)
+        payload = await run_in_threadpool(
+            apply_corrections,
+            store,
+            session_id=session_id,
+            patch_set_id=str(body["patch_set_id"]),
+            revision=int(body["revision"]),
+            state_hash=str(body["state_hash"]),
+            selected_patch_ids=[str(item) for item in body.get("selected_patch_ids") or []],
+            idempotency_key=str(idempotency_key or body.get("idempotency_key") or ""),
+            applied_by=session.owner_scope,
+        )
+        return JSONResponse(jsonable_encoder(payload))
+    except (KeyError, ValueError, OperationStoreError, ConversionContextError) as exc:
+        _raise_operation_http(exc)
+
+
+@app.post("/api/v1/sessions/{session_id}/corrections/undo", dependencies=OPERATION_SERVICE_DEPENDENCIES)
+async def undo_operation_corrections(
+    session_id: str,
+    body: dict,
+    idempotency_key: Annotated[str | None, Header()] = None,
+    x_conversion_context: Annotated[str | None, Header()] = None,
+) -> JSONResponse:
+    try:
+        store = _authorized_operation_store(
+            session_id, x_conversion_context, required_scope="confirm"
+        )
+        session = store.load_session(session_id)
+        payload = await run_in_threadpool(
+            undo_corrections,
+            store,
+            session_id=session_id,
+            patch_set_id=str(body["patch_set_id"]),
+            revision=int(body["revision"]),
+            state_hash=str(body["state_hash"]),
+            idempotency_key=str(idempotency_key or body.get("idempotency_key") or ""),
+            undone_by=session.owner_scope,
+        )
+        return JSONResponse(jsonable_encoder(payload))
+    except (KeyError, ValueError, OperationStoreError, ConversionContextError) as exc:
+        _raise_operation_http(exc)
+
+
+@app.post("/api/v1/sessions/{session_id}/comparison-files", dependencies=OPERATION_SERVICE_DEPENDENCIES)
+async def upload_operation_comparison(
+    session_id: str,
+    file: Annotated[UploadFile, File()],
+    role: Annotated[str, Form()],
+    revision: Annotated[int, Form()],
+    state_hash: Annotated[str, Form()],
+    x_conversion_context: Annotated[str | None, Header()] = None,
+) -> JSONResponse:
+    try:
+        store = _authorized_operation_store(
+            session_id, x_conversion_context, required_scope="readiness"
+        )
+        content = await read_upload_with_limit(
+            file,
+            _positive_env_int("RECONCILIATION_MAX_FILE_BYTES", 30 * 1024 * 1024),
+        )
+        payload = await run_in_threadpool(
+            add_comparison_file,
+            store,
+            session_id=session_id,
+            revision=revision,
+            state_hash=state_hash,
+            filename=file.filename or "comparison.xlsx",
+            content=content,
+            role=role,
+        )
+        return JSONResponse(jsonable_encoder(payload), status_code=201)
+    except (ValueError, OperationStoreError, ConversionContextError) as exc:
+        _raise_operation_http(exc)
+
+
+@app.delete("/api/v1/sessions/{session_id}/comparison-files/{file_id}", dependencies=OPERATION_SERVICE_DEPENDENCIES)
+async def delete_operation_comparison(
+    session_id: str,
+    file_id: str,
+    revision: int = Query(ge=1),
+    state_hash: str = Query(min_length=1),
+    x_conversion_context: Annotated[str | None, Header()] = None,
+) -> Response:
+    try:
+        store = _authorized_operation_store(
+            session_id, x_conversion_context, required_scope="readiness"
+        )
+        await run_in_threadpool(
+            remove_comparison_file,
+            store,
+            session_id=session_id,
+            file_id=file_id,
+            revision=revision,
+            state_hash=state_hash,
+        )
+        return Response(status_code=204)
+    except (ValueError, OperationStoreError, ConversionContextError) as exc:
+        _raise_operation_http(exc)
+
+
+@app.post("/api/v1/sessions/{session_id}/reconciliation/run", dependencies=OPERATION_SERVICE_DEPENDENCIES)
+async def run_operation_reconciliation(
+    session_id: str,
+    body: dict,
+    x_conversion_context: Annotated[str | None, Header()] = None,
+) -> JSONResponse:
+    try:
+        store = _authorized_operation_store(
+            session_id, x_conversion_context, required_scope="readiness"
+        )
+        payload = await run_in_threadpool(
+            run_reconciliation,
+            store,
+            session_id=session_id,
+            revision=int(body["revision"]),
+            state_hash=str(body["state_hash"]),
+        )
+        return JSONResponse(jsonable_encoder(payload))
+    except (KeyError, ValueError, OperationStoreError, ConversionContextError) as exc:
+        _raise_operation_http(exc)
+
+
+@app.get("/api/v1/sessions/{session_id}/reconciliation/{report_id}", dependencies=OPERATION_SERVICE_DEPENDENCIES)
+async def get_operation_reconciliation(
+    session_id: str,
+    report_id: str,
+    x_conversion_context: Annotated[str | None, Header()] = None,
+) -> JSONResponse:
+    try:
+        store = _authorized_operation_store(
+            session_id, x_conversion_context, required_scope="readiness"
+        )
+        payload = await run_in_threadpool(
+            get_reconciliation_report,
+            store,
+            session_id=session_id,
+            report_id=report_id,
+        )
+        return JSONResponse(jsonable_encoder(payload))
+    except (OperationStoreError, ConversionContextError) as exc:
+        _raise_operation_http(exc)
+
+
+@app.post(
+    "/api/v1/sessions/{session_id}/reconciliation/{report_id}/matches/{match_id}/confirm",
+    dependencies=OPERATION_SERVICE_DEPENDENCIES,
+)
+async def confirm_operation_reconciliation_candidate(
+    session_id: str,
+    report_id: str,
+    match_id: str,
+    body: dict,
+    x_conversion_context: Annotated[str | None, Header()] = None,
+) -> JSONResponse:
+    try:
+        store = _authorized_operation_store(
+            session_id, x_conversion_context, required_scope="confirm"
+        )
+        session = store.load_session(session_id)
+        payload = await run_in_threadpool(
+            confirm_candidate_match,
+            store,
+            session_id=session_id,
+            report_id=report_id,
+            match_id=match_id,
+            revision=int(body["revision"]),
+            state_hash=str(body["state_hash"]),
+            confirmed_by=session.owner_scope,
+            selected_comparison_record_id=body.get("comparison_record_id"),
+            action=str(body.get("action") or "confirm"),
+        )
+        return JSONResponse(jsonable_encoder(payload))
+    except (KeyError, ValueError, OperationStoreError, ConversionContextError) as exc:
+        _raise_operation_http(exc)
+
+
+@app.post("/api/v1/sessions/{session_id}/questions", dependencies=OPERATION_SERVICE_DEPENDENCIES)
+async def ask_operation_question(
+    session_id: str,
+    body: dict,
+    x_conversion_context: Annotated[str | None, Header()] = None,
+) -> JSONResponse:
+    try:
+        store = _authorized_operation_store(session_id, x_conversion_context)
+        payload = await run_in_threadpool(
+            ask_accounting_question,
+            store,
+            session_id=session_id,
+            revision=int(body["revision"]),
+            state_hash=str(body["state_hash"]),
+            question=str(body["question"]),
+            use_ai=bool(body.get("use_ai")),
+        )
+        return JSONResponse(jsonable_encoder(payload))
+    except (KeyError, ValueError, OperationStoreError, ConversionContextError) as exc:
+        _raise_operation_http(exc)
+
+
+@app.post("/api/v1/conversions/validate", dependencies=INTERNAL_SERVICE_DEPENDENCIES)
 async def validate_conversion(
     conversion_type: Annotated[str, Form()],
     file: Annotated[UploadFile, File()],
     options: Annotated[str | None, Form()] = None,
+    x_conversion_context: Annotated[str | None, Header()] = None,
 ) -> JSONResponse:
+    _, claims = _conversion_context_for_request(
+        x_conversion_context,
+        required_scope="preview",
+    )
     option_payload = _parse_options(options)
     workdir = _create_workdir()
     try:
-        input_path = await _save_upload(file, workdir)
+        input_path = await _save_upload(file, workdir, max_bytes=_max_upload_bytes(claims))
         report = await run_in_threadpool(validate_file, input_path, conversion_type, option_payload)
         return JSONResponse(report.model_dump(mode="json"))
     finally:
@@ -260,16 +1708,21 @@ async def validate_conversion(
         _cleanup_tmp_root()
 
 
-@app.post("/api/v1/conversions/preview")
+@app.post("/api/v1/conversions/preview", dependencies=INTERNAL_SERVICE_DEPENDENCIES)
 async def preview_conversion(
     conversion_type: Annotated[str, Form()],
     file: Annotated[UploadFile, File()],
     options: Annotated[str | None, Form()] = None,
+    x_conversion_context: Annotated[str | None, Header()] = None,
 ) -> JSONResponse:
+    _, claims = _conversion_context_for_request(
+        x_conversion_context,
+        required_scope="preview",
+    )
     option_payload = _parse_options(options)
     workdir = _create_workdir()
     try:
-        input_path = await _save_upload(file, workdir)
+        input_path = await _save_upload(file, workdir, max_bytes=_max_upload_bytes(claims))
         headers, rows, report = await run_in_threadpool(
             preview_file,
             input_path,
@@ -287,19 +1740,82 @@ async def preview_conversion(
         _cleanup_tmp_root()
 
 
-@app.post("/api/v1/conversions/export", response_model=None)
-async def export_conversion_rows(body: dict) -> Response:
+@app.post("/api/v1/conversions/export", response_model=None, dependencies=INTERNAL_SERVICE_DEPENDENCIES)
+async def export_conversion_rows(
+    body: dict,
+    x_conversion_context: Annotated[str | None, Header()] = None,
+) -> Response:
+    context_token, initial_claims = _conversion_context_for_request(
+        x_conversion_context,
+        body.get("conversion_context_token"),
+        required_scope="export",
+    )
     if "upload_id" in body and "profile_id" in body:
+        upload_id = str(body["upload_id"] or "").strip()
+        try:
+            binding = _read_export_binding(
+                upload_id,
+                conversion_context_token=context_token,
+                claims=initial_claims,
+            )
+        except OperationStoreConflictError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except OperationStoreExpiredError as exc:
+            raise HTTPException(status_code=410, detail=str(exc)) from exc
+        except (KeyError, OperationStoreError) as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+        effective_target_template_id = str(
+            body.get("target_template_id") or binding["target_template_id"]
+        ).strip()
+        effective_session_id = str(
+            body.get("session_id") or binding.get("operation_session_id") or ""
+        ).strip() or None
+        requested_run_id = str(body.get("conversion_run_id") or "").strip()
+        if not requested_run_id:
+            raise HTTPException(
+                status_code=409,
+                detail="Export thiếu conversion_run_id binding",
+            )
+        context_token, claims = _conversion_context_for_request(
+            x_conversion_context,
+            context_token,
+            required_scope="export",
+            upload_id=upload_id,
+            session_id=effective_session_id,
+            target_template_id=effective_target_template_id,
+            conversion_run_id=requested_run_id,
+        )
+        _assert_export_binding(
+            upload_id=upload_id,
+            profile_id=str(body["profile_id"]),
+            requested_target_template_id=body.get("target_template_id"),
+            requested_session_id=body.get("session_id"),
+            requested_conversion_run_id=requested_run_id,
+            binding=binding,
+            claims=claims,
+        )
         try:
             edited_rows = body.get("rows")
             content, filename = await run_in_threadpool(
                 export_confirmed_profile,
-                upload_id=str(body["upload_id"]),
+                upload_id=upload_id,
                 profile_id=str(body["profile_id"]),
                 edited_rows=edited_rows if isinstance(edited_rows, list) and edited_rows else None,
                 acknowledge_warnings=bool(body.get("acknowledge_warnings")),
-                conversion_context_token=body.get("conversion_context_token"),
+                conversion_context_token=context_token,
+                student_context_token=None,
+                session_id=body.get("session_id"),
+                revision=body.get("revision"),
+                state_hash=body.get("state_hash"),
+                requested_profile_version=body.get("profile_version"),
+                requested_profile_state_hash=body.get("profile_state_hash"),
+                vat_basis=body.get("vat_basis"),
             )
+        except OperationStoreConflictError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except OperationStoreExpiredError as exc:
+            raise HTTPException(status_code=410, detail=str(exc)) from exc
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         except ReadinessGateError as exc:
@@ -307,6 +1823,8 @@ async def export_conversion_rows(body: dict) -> Response:
                 status_code=422,
                 content=jsonable_encoder(exc.report.model_dump(mode="json")),
             )
+        except MappingProfileV2Error as exc:
+            raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return Response(
@@ -315,6 +1833,15 @@ async def export_conversion_rows(body: dict) -> Response:
             headers={"Content-Disposition": f'attachment; filename="{filename}"'},
         )
 
+    if os.getenv("ALLOW_LEGACY_ROW_EXPORT", "false").strip().lower() not in {
+        "1",
+        "true",
+        "yes",
+    }:
+        raise HTTPException(
+            status_code=403,
+            detail="Legacy client-row export is disabled unless explicitly enabled.",
+        )
     legacy_body = ExportRowsRequest.model_validate(body)
     workdir = _create_workdir()
     try:
@@ -342,16 +1869,130 @@ async def export_conversion_rows(body: dict) -> Response:
         _cleanup_tmp_root()
 
 
-@app.post("/api/v1/conversions", response_model=None)
+def _read_export_binding(
+    upload_id: str,
+    *,
+    conversion_context_token: str | None,
+    claims: dict[str, object] | None,
+) -> dict[str, str]:
+    operation_session_id = str((claims or {}).get("operation_session_id") or "").strip()
+    if not conversion_context_token or not operation_session_id or claims is None:
+        raise OperationStoreConflictError("Export thiếu operation session binding")
+    store = OperationStore(conversion_context_token=conversion_context_token)
+    session = store.assert_context_binding(
+        operation_session_id,
+        claims,
+        required_scope="export",
+    )
+    if session.upload_id != upload_id:
+        raise OperationStoreError("Upload và operation session không khớp")
+    metadata = _read_upload_metadata(
+        upload_id,
+        operation_store=store,
+        session=session,
+    )
+    target_template_id = str(metadata.get("target_template_id") or "").strip()
+    operation_session_id = str(metadata.get("operation_session_id") or "").strip()
+    context = metadata.get("conversion_context")
+    context = context if isinstance(context, dict) else {}
+    conversion_run_id = str(
+        metadata.get("conversion_run_id") or context.get("conversion_run_id") or ""
+    ).strip()
+    if operation_session_id:
+        session_target = str(session.target_template_id or "").strip()
+        if target_template_id and target_template_id != session_target:
+            raise OperationStoreError("Upload và operation session khác target template")
+        target_template_id = session_target
+        session_run_id = str(
+            session.revisions[0].context.get("conversion_run_id") or ""
+        ).strip()
+        if conversion_run_id != session_run_id:
+            raise OperationStoreError("Upload và operation session khác conversion run")
+        conversion_run_id = session_run_id
+    if not target_template_id:
+        raise OperationStoreError("Export thiếu target template binding")
+    if not conversion_run_id:
+        raise OperationStoreError("Export thiếu conversion run binding")
+
+    suggestion = metadata.get("suggestion")
+    suggested_profile_id = (
+        str(suggestion.get("profile_id") or "").strip()
+        if isinstance(suggestion, dict)
+        else ""
+    )
+    return {
+        "target_template_id": target_template_id,
+        "operation_session_id": operation_session_id,
+        "conversion_run_id": conversion_run_id,
+        "profile_id": str(metadata.get("profile_id") or suggested_profile_id).strip(),
+        "owner_scope": str(
+            metadata.get("owner_scope") or context.get("owner_scope") or ""
+        ).strip(),
+        "user_id": str(context.get("user_id") or "").strip(),
+        "workspace_id": str(context.get("workspace_id") or "").strip(),
+        "snapshot_set_hash": str(context.get("snapshot_set_hash") or "").strip(),
+    }
+
+
+def _assert_export_binding(
+    *,
+    upload_id: str,
+    profile_id: str,
+    requested_target_template_id: object,
+    requested_session_id: object,
+    requested_conversion_run_id: object,
+    binding: dict[str, str],
+    claims: dict[str, object] | None,
+) -> None:
+    stored_target = binding["target_template_id"]
+    requested_target = str(requested_target_template_id or "").strip()
+    if requested_target and requested_target != stored_target:
+        raise HTTPException(status_code=409, detail="Target template không khớp upload")
+    stored_profile = binding.get("profile_id") or ""
+    if stored_profile and profile_id != stored_profile:
+        raise HTTPException(status_code=409, detail="Mapping profile không khớp upload")
+    stored_session = binding.get("operation_session_id") or ""
+    requested_session = str(requested_session_id or "").strip()
+    if stored_session and requested_session and requested_session != stored_session:
+        raise HTTPException(status_code=409, detail="Operation session không khớp upload")
+    stored_run_id = binding.get("conversion_run_id") or ""
+    requested_run_id = str(requested_conversion_run_id or "").strip()
+    if not requested_run_id or requested_run_id != stored_run_id:
+        raise HTTPException(status_code=409, detail="Conversion run không khớp upload")
+    if not claims:
+        return
+    if str(claims.get("upload_id") or "") != upload_id:
+        raise HTTPException(status_code=409, detail="Upload không khớp conversion context")
+    if str(claims.get("target_template_id") or "") != stored_target:
+        raise HTTPException(status_code=409, detail="Target template không khớp conversion context")
+    if str(claims.get("conversion_run_id") or "") != stored_run_id:
+        raise HTTPException(status_code=409, detail="Conversion run không khớp conversion context")
+    if stored_session and str(claims.get("operation_session_id") or "") != stored_session:
+        raise HTTPException(status_code=409, detail="Operation session không khớp conversion context")
+    owner_scope = binding.get("owner_scope") or ""
+    if owner_scope and conversion_context_owner_scope(claims) != owner_scope:
+        raise HTTPException(status_code=409, detail="Owner không khớp upload")
+    for claim_name in ("user_id", "workspace_id", "snapshot_set_hash"):
+        expected = binding.get(claim_name) or ""
+        if expected and str(claims.get(claim_name) or "") != expected:
+            raise HTTPException(status_code=409, detail=f"{claim_name} không khớp upload")
+
+
+@app.post("/api/v1/conversions", response_model=None, dependencies=INTERNAL_SERVICE_DEPENDENCIES)
 async def convert_conversion(
     conversion_type: Annotated[str, Form()],
     file: Annotated[UploadFile, File()],
     options: Annotated[str | None, Form()] = None,
+    x_conversion_context: Annotated[str | None, Header()] = None,
 ):
+    _, claims = _conversion_context_for_request(
+        x_conversion_context,
+        required_scope="export",
+    )
     option_payload = _parse_options(options)
     workdir = _create_workdir()
     try:
-        input_path = await _save_upload(file, workdir)
+        input_path = await _save_upload(file, workdir, max_bytes=_max_upload_bytes(claims))
         if option_payload.get("strict"):
             strict_report = await run_in_threadpool(
                 check_file_for_errors,
@@ -391,16 +2032,21 @@ async def convert_conversion(
         _cleanup_tmp_root()
 
 
-@app.post("/api/v1/ai/mapping-suggestions")
+@app.post("/api/v1/ai/mapping-suggestions", dependencies=INTERNAL_SERVICE_DEPENDENCIES)
 async def ai_mapping_suggestions(
     conversion_type: Annotated[str, Form()],
     file: Annotated[UploadFile, File()],
     options: Annotated[str | None, Form()] = None,
+    x_conversion_context: Annotated[str | None, Header()] = None,
 ) -> JSONResponse:
+    _, claims = _conversion_context_for_request(
+        x_conversion_context,
+        required_scope="preview",
+    )
     option_payload = _parse_options(options)
     workdir = _create_workdir()
     try:
-        input_path = await _save_upload(file, workdir)
+        input_path = await _save_upload(file, workdir, max_bytes=_max_upload_bytes(claims))
         response = await run_in_threadpool(
             suggest_mapping_for_file,
             input_path,
@@ -413,22 +2059,34 @@ async def ai_mapping_suggestions(
         _cleanup_tmp_root()
 
 
-@app.post("/api/v1/ai/explain-validation")
-async def ai_explain_validation(report: ValidationReport) -> JSONResponse:
+@app.post("/api/v1/ai/explain-validation", dependencies=INTERNAL_SERVICE_DEPENDENCIES)
+async def ai_explain_validation(
+    report: ValidationReport,
+    x_conversion_context: Annotated[str | None, Header()] = None,
+) -> JSONResponse:
+    _conversion_context_for_request(
+        x_conversion_context,
+        required_scope="preview",
+    )
     response = await run_in_threadpool(explain_validation_report, report)
     return JSONResponse(response.model_dump(mode="json"))
 
 
-@app.post("/api/v1/ai/error-check")
+@app.post("/api/v1/ai/error-check", dependencies=INTERNAL_SERVICE_DEPENDENCIES)
 async def ai_error_check(
     conversion_type: Annotated[str, Form()],
     file: Annotated[UploadFile, File()],
     options: Annotated[str | None, Form()] = None,
+    x_conversion_context: Annotated[str | None, Header()] = None,
 ) -> JSONResponse:
+    _, claims = _conversion_context_for_request(
+        x_conversion_context,
+        required_scope="preview",
+    )
     option_payload = _parse_options(options)
     workdir = _create_workdir()
     try:
-        input_path = await _save_upload(file, workdir)
+        input_path = await _save_upload(file, workdir, max_bytes=_max_upload_bytes(claims))
         response = await run_in_threadpool(
             check_file_for_errors,
             input_path,
@@ -453,6 +2111,64 @@ def _parse_options(options: str | None) -> dict:
     return payload
 
 
+def _authorized_operation_store(
+    session_id: str,
+    conversion_context_token: str | None,
+    *,
+    required_scope: str = "preview",
+) -> OperationStore:
+    store = OperationStore(conversion_context_token=conversion_context_token)
+    session = store.load_session(session_id)
+    if (
+        session.owner_scope.startswith("local:")
+        and unauthenticated_local_operations_enabled()
+    ):
+        return store
+    if not conversion_context_token:
+        raise ConversionContextError("Conversion context token là bắt buộc", status_code=401)
+    _, claims = _conversion_context_for_request(
+        conversion_context_token,
+        conversion_context_token,
+        required_scope=required_scope,
+        session_id=session_id,
+    )
+    if claims is None:
+        raise ConversionContextError("Conversion context token là bắt buộc", status_code=401)
+    store.assert_context_binding(
+        session_id,
+        claims,
+        required_scope=required_scope,
+    )
+    return store
+
+
+def _raise_operation_http(exc: Exception) -> None:
+    if isinstance(
+        exc,
+        (
+            AnomalyFeatureDisabledError,
+            CorrectionFeatureDisabledError,
+            ReconciliationFeatureDisabledError,
+            AccountingAssistantFeatureDisabledError,
+        ),
+    ):
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    if isinstance(exc, OperationStoreConflictError):
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if isinstance(exc, OperationStoreExpiredError):
+        raise HTTPException(status_code=410, detail=str(exc)) from exc
+    if isinstance(exc, ConversionContextError):
+        raise HTTPException(status_code=exc.status_code or 401, detail=str(exc)) from exc
+    if isinstance(exc, OperationStoreError) and (
+        "không tìm thấy phiên" in str(exc).lower()
+        or "session not found" in str(exc).lower()
+    ):
+        raise HTTPException(status_code=404, detail="Không tìm thấy phiên chuyển đổi") from exc
+    if isinstance(exc, KeyError):
+        raise HTTPException(status_code=400, detail=f"Thiếu field bắt buộc: {exc}") from exc
+    raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 def _create_workdir() -> Path:
     TMP_ROOT.mkdir(parents=True, exist_ok=True)
     workdir = TMP_ROOT / uuid.uuid4().hex
@@ -460,16 +2176,167 @@ def _create_workdir() -> Path:
     return workdir
 
 
-async def _save_upload(file: UploadFile, workdir: Path) -> Path:
+async def _save_upload(
+    file: UploadFile,
+    workdir: Path,
+    *,
+    max_bytes: int | None = None,
+) -> Path:
     suffix = Path(file.filename or "").suffix.lower()
     if suffix not in SUPPORTED_SUFFIXES:
+        await file.close()
         raise HTTPException(status_code=415, detail="Only .xls and .xlsx files are supported.")
 
     input_path = workdir / f"input{suffix}"
-    input_path.write_bytes(await file.read())
+    input_path.write_bytes(
+        await read_upload_with_limit(
+            file,
+            max_bytes
+            if max_bytes is not None
+            else _positive_env_int("MAX_UPLOAD_BYTES", 20 * 1024 * 1024),
+        )
+    )
     return input_path
 
 
 def _cleanup_tmp_root() -> None:
     if TMP_ROOT.exists() and not any(TMP_ROOT.iterdir()):
         TMP_ROOT.rmdir()
+
+
+async def read_upload_with_limit(file: UploadFile, max_bytes: int) -> bytes:
+    max_bytes = max(1, int(max_bytes))
+    chunks: list[bytes] = []
+    total = 0
+    try:
+        while total <= max_bytes:
+            chunk = await file.read(min(1024 * 1024, max_bytes + 1 - total))
+            if not chunk:
+                return b"".join(chunks)
+            total += len(chunk)
+            if total > max_bytes:
+                raise HTTPException(
+                    status_code=413,
+                    detail=f"File vượt giới hạn {max_bytes} bytes",
+                )
+            chunks.append(chunk)
+        raise HTTPException(status_code=413, detail=f"File vượt giới hạn {max_bytes} bytes")
+    finally:
+        await file.close()
+
+
+async def _read_limited_reconstruction_upload(file: UploadFile) -> bytes:
+    max_bytes = _positive_env_int(
+        "RECONSTRUCTION_MAX_FILE_BYTES", 30 * 1024 * 1024
+    )
+    return await read_upload_with_limit(file, max_bytes)
+
+
+async def _read_limited_student_upload(file: UploadFile) -> bytes:
+    filename = file.filename or ""
+    suffix = Path(filename).suffix.lower()
+    if suffix not in SUPPORTED_SUFFIXES:
+        await file.close()
+        raise HTTPException(
+            status_code=415,
+            detail="Chỉ hỗ trợ file Excel .xls và .xlsx",
+        )
+
+    max_bytes = _positive_env_int("STUDENT_MAX_FILE_BYTES", 20 * 1024 * 1024)
+    content = await read_upload_with_limit(file, max_bytes)
+    try:
+        validate_excel_magic(filename, content)
+    except ValueError as exc:
+        raise HTTPException(status_code=415, detail=str(exc)) from exc
+    return content
+
+
+def _positive_env_int(name: str, default: int) -> int:
+    try:
+        return max(1, int(os.getenv(name, str(default))))
+    except ValueError:
+        return default
+
+
+def _verified_student_rate_claims(
+    context_token: str,
+    required_scope: str,
+    session_id: str = "",
+) -> StudentContextClaims:
+    if not str(context_token or "").strip():
+        raise StudentWorkflowError(401, "Thiếu student context")
+    try:
+        claims = verify_student_context(context_token, required_scope)
+    except ValueError as exc:
+        raise StudentWorkflowError(401, str(exc)) from exc
+    if session_id and claims.session_id != str(session_id).strip():
+        raise StudentWorkflowError(403, "Student context không thuộc phiên này")
+    return claims
+
+
+def _student_rate_key(action: str, claims: StudentContextClaims) -> str:
+    return f"{action}:{claims.owner_scope}:{claims.session_id}:{claims.user_id}"
+
+
+def clear_student_rate_limits() -> None:
+    with _STUDENT_RATE_LOCK:
+        _STUDENT_RATE_BUCKETS.clear()
+
+
+def _check_student_rate_limit(
+    key: str,
+    *,
+    limit: int,
+    window_seconds: int = 15 * 60,
+) -> None:
+    now = time.monotonic()
+    with _STUDENT_RATE_LOCK:
+        expired = [
+            bucket_key
+            for bucket_key, (expires_at, _) in _STUDENT_RATE_BUCKETS.items()
+            if expires_at <= now
+        ]
+        for bucket_key in expired:
+            _STUDENT_RATE_BUCKETS.pop(bucket_key, None)
+        expires_at, count = _STUDENT_RATE_BUCKETS.get(
+            key,
+            (now + window_seconds, 0),
+        )
+        if count >= limit:
+            raise HTTPException(
+                status_code=429,
+                detail="Bạn đã gửi quá nhiều yêu cầu student. Vui lòng thử lại sau.",
+            )
+        _STUDENT_RATE_BUCKETS[key] = (expires_at, count + 1)
+
+
+def clear_reconstruction_rate_limits() -> None:
+    with _RECONSTRUCTION_RATE_LOCK:
+        _RECONSTRUCTION_RATE_BUCKETS.clear()
+
+
+def _check_reconstruction_rate_limit(
+    key: str,
+    *,
+    limit: int,
+    window_seconds: int = 15 * 60,
+) -> None:
+    now = time.monotonic()
+    with _RECONSTRUCTION_RATE_LOCK:
+        expired = [
+            bucket_key
+            for bucket_key, (expires_at, _) in _RECONSTRUCTION_RATE_BUCKETS.items()
+            if expires_at <= now
+        ]
+        for bucket_key in expired:
+            _RECONSTRUCTION_RATE_BUCKETS.pop(bucket_key, None)
+        expires_at, count = _RECONSTRUCTION_RATE_BUCKETS.get(
+            key,
+            (now + window_seconds, 0),
+        )
+        if count >= limit:
+            raise HTTPException(
+                status_code=429,
+                detail="Bạn đã gửi quá nhiều yêu cầu tái tạo. Vui lòng thử lại sau.",
+            )
+        _RECONSTRUCTION_RATE_BUCKETS[key] = (expires_at, count + 1)

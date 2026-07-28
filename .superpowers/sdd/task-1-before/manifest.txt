@@ -1,0 +1,8 @@
+backend\controllers\converterGatewayController.js|missing|
+backend\routes\converterGateway.js|missing|
+backend\services\converterGatewayService.js|missing|
+backend\models\ConverterRateLimitBucket.js|missing|
+backend\middleware\converterRateLimit.js|missing|
+backend\server.js|present|0D20555761EE8562FBD130439DE40DE7E57FC2D8F95E6AF4A94110DD28663823
+backend\services\converterClient.js|present|CF0B5D52B35C559576BDFD012FAEC774A3B3E0B28BD77A0DA62A28A557429725
+backend\tests\converterGateway.test.js|missing|

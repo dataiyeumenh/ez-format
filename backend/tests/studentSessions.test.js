@@ -1,0 +1,755 @@
+const assert = require("node:assert/strict");
+const test = require("node:test");
+const jwt = require("jsonwebtoken");
+
+const {
+  createStudentContextToken,
+  verifyStudentContextToken,
+} = require("../services/conversionContextService");
+const { buildOwnerScope } = require("../services/studentSessionService");
+const StudentFileSession = require("../models/StudentFileSession");
+const {
+  cleanAnalysisCompletedPayload,
+  cleanStudentSessionPayload,
+  createContextToken,
+  getStudentSession,
+  recordStudentAnalysisCompleted,
+  refreshStudentContext,
+  sessionIsExpired,
+  serializeStudentSession,
+  sessionIsOwnedByUser,
+  studentContextMatchesSession,
+  studentContextScopesFromFlags,
+} = require("../controllers/studentSessionController");
+
+process.env.CONVERSION_CONTEXT_SECRET = "test-student-session-secret";
+
+test("owner scope uses the selected workspace or falls back to the user", () => {
+  assert.equal(buildOwnerScope({ userId: " user-1 " }), "user:user-1");
+  assert.equal(
+    buildOwnerScope({ userId: "user-1", workspaceId: " workspace-1 " }),
+    "workspace:workspace-1",
+  );
+});
+
+test("owner scope rejects requests without a user or workspace", () => {
+  assert.throws(() => buildOwnerScope({}), /owner scope/i);
+  assert.throws(() => buildOwnerScope({ userId: " ", workspaceId: " " }), /owner scope/i);
+});
+
+test("student context contains its owner and allowed scopes", () => {
+  const ownerScope = buildOwnerScope({ userId: "user-1" });
+  const retentionExpiresAt = new Date(Date.now() + 60 * 60 * 1000);
+  const token = createStudentContextToken({
+    sessionId: "session-1",
+    userId: "user-1",
+    ownerScope,
+    workspaceId: null,
+    snapshotSetHash: null,
+    allowedScopes: ["analyze", "explain"],
+    retentionExpiresAt,
+  });
+
+  const claims = verifyStudentContextToken(token, "analyze");
+  assert.equal(claims.purpose, "student_file_session");
+  assert.equal(claims.session_id, "session-1");
+  assert.equal(claims.user_id, "user-1");
+  assert.equal(claims.owner_scope, "user:user-1");
+  assert.equal(claims.workspace_id, null);
+  assert.equal(claims.snapshot_set_hash, null);
+  assert.deepEqual(claims.allowed_scopes, ["analyze", "explain"]);
+  assert.equal(claims.retention_expires_at, Math.floor(retentionExpiresAt.getTime() / 1000));
+});
+
+test("student context derives a safe signed retention boundary and rejects an expired one", () => {
+  const token = createStudentContextToken({
+    sessionId: "session-1",
+    userId: "user-1",
+    ownerScope: "user:user-1",
+    allowedScopes: ["analyze"],
+  });
+  const claims = verifyStudentContextToken(token, "analyze");
+  assert.equal(claims.retention_expires_at, claims.exp);
+  assert.throws(
+    () =>
+      createStudentContextToken({
+        sessionId: "session-1",
+        userId: "user-1",
+        ownerScope: "user:user-1",
+        allowedScopes: ["analyze"],
+        retentionExpiresAt: new Date(Date.now() - 1000),
+      }),
+    /retention/i,
+  );
+});
+
+test("student context pins JWT iat to the retention clock", () => {
+  const realDateNow = Date.now;
+  let calls = 0;
+  Date.now = () => (calls++ === 0 ? 1_000_000 : 1_001_000);
+
+  try {
+    const token = createStudentContextToken({
+      sessionId: "session-clock-boundary",
+      userId: "user-1",
+      ownerScope: "user:user-1",
+      allowedScopes: ["analyze"],
+    });
+    const claims = verifyStudentContextToken(token, "analyze");
+
+    assert.equal(claims.iat, 1000);
+    assert.equal(claims.retention_expires_at, claims.exp);
+  } finally {
+    Date.now = realDateNow;
+  }
+});
+
+test("student context rejects a token with another purpose", () => {
+  const token = jwt.sign(
+    { purpose: "misa_conversion", allowed_scopes: ["analyze"] },
+    process.env.CONVERSION_CONTEXT_SECRET,
+    { expiresIn: "10m" },
+  );
+
+  assert.throws(() => verifyStudentContextToken(token, "analyze"), /student context token/i);
+});
+
+test("student context rejects missing required scopes", () => {
+  const token = createStudentContextToken({
+    sessionId: "session-1",
+    userId: "user-1",
+    ownerScope: "user:user-1",
+    allowedScopes: ["analyze"],
+  });
+
+  assert.throws(() => verifyStudentContextToken(token, "export"), /thiếu quyền export/i);
+});
+
+test("student context requires an explicit required scope during verification", () => {
+  const token = createStudentContextToken({
+    sessionId: "session-1",
+    userId: "user-1",
+    ownerScope: "user:user-1",
+    allowedScopes: ["analyze"],
+  });
+
+  assert.throws(() => verifyStudentContextToken(token), /required scope/i);
+  assert.throws(() => verifyStudentContextToken(token, " "), /required scope/i);
+});
+
+test("student context accepts a 24-hour lifetime", () => {
+  assert.doesNotThrow(() =>
+    createStudentContextToken({
+      sessionId: "session-1",
+      userId: "user-1",
+      ownerScope: "user:user-1",
+      allowedScopes: ["analyze"],
+      expiresIn: "24h",
+    }),
+  );
+});
+
+test("student context rejects lifetimes longer than 24 hours", () => {
+  for (const expiresIn of ["48h", "2d"]) {
+    assert.throws(
+      () =>
+        createStudentContextToken({
+          sessionId: "session-1",
+          userId: "user-1",
+          ownerScope: "user:user-1",
+          allowedScopes: ["analyze"],
+          expiresIn,
+        }),
+      /lifetime/i,
+    );
+  }
+});
+
+test("student context rejects unsupported lifetime formats", () => {
+  assert.throws(
+    () =>
+      createStudentContextToken({
+        sessionId: "session-1",
+        userId: "user-1",
+        ownerScope: "user:user-1",
+        allowedScopes: ["analyze"],
+        expiresIn: "1w",
+      }),
+    /lifetime/i,
+  );
+});
+
+test("student context rejects expired tokens", () => {
+  const token = createStudentContextToken({
+    sessionId: "session-1",
+    userId: "user-1",
+    ownerScope: "user:user-1",
+    allowedScopes: ["analyze"],
+    expiresIn: "-1s",
+  });
+
+  assert.throws(() => verifyStudentContextToken(token, "analyze"), /jwt expired/i);
+});
+
+test("student context requires a numeric future exp claim", () => {
+  const noExpiry = jwt.sign(
+    {
+      purpose: "student_file_session",
+      session_id: "session-1",
+      user_id: "user-1",
+      owner_scope: "user:user-1",
+      allowed_scopes: ["analyze"],
+    },
+    process.env.CONVERSION_CONTEXT_SECRET,
+    { algorithm: "HS256", noTimestamp: true },
+  );
+
+  assert.throws(
+    () => verifyStudentContextToken(noExpiry, "analyze"),
+    /exp/i,
+  );
+});
+
+test("student context rejects scalar scopes", () => {
+  const token = jwt.sign(
+    {
+      purpose: "student_file_session",
+      session_id: "session-1",
+      user_id: "user-1",
+      owner_scope: "user:user-1",
+      allowed_scopes: "analyze",
+    },
+    process.env.CONVERSION_CONTEXT_SECRET,
+    { algorithm: "HS256", expiresIn: "10m" },
+  );
+
+  assert.throws(
+    () => verifyStudentContextToken(token, "analyze"),
+    /scopes/i,
+  );
+});
+
+test("student context rejects non-HS256 tokens", () => {
+  const token = jwt.sign(
+    {
+      purpose: "student_file_session",
+      session_id: "session-1",
+      user_id: "user-1",
+      owner_scope: "user:user-1",
+      allowed_scopes: ["analyze"],
+    },
+    process.env.CONVERSION_CONTEXT_SECRET,
+    { algorithm: "HS512", expiresIn: "10m" },
+  );
+
+  assert.throws(
+    () => verifyStudentContextToken(token, "analyze"),
+    /algorithm/i,
+  );
+});
+
+test("student context scopes never include grading or attempt capabilities", () => {
+  const flags = {
+    STUDENT_ASSISTANT_ENABLED: "true",
+    STUDENT_FILE_EXPLAIN_ENABLED: "true",
+    STUDENT_FILE_QA_ENABLED: "false",
+    STUDENT_CHECK_WORK_ENABLED: "false",
+    STUDENT_ACCOUNTING_MAP_ENABLED: "false",
+    STUDENT_RECONCILIATION_ENABLED: "false",
+    STUDENT_INTERNSHIP_ENABLED: "false",
+  };
+
+  assert.deepEqual(studentContextScopesFromFlags(flags), ["analyze", "explain"]);
+  assert.deepEqual(
+    studentContextScopesFromFlags({ ...flags, STUDENT_FILE_QA_ENABLED: "true" }),
+    ["analyze", "explain", "ask"],
+  );
+  assert.deepEqual(
+    studentContextScopesFromFlags({
+      ...flags,
+      STUDENT_FILE_QA_ENABLED: "true",
+      STUDENT_CHECK_WORK_ENABLED: "true",
+      STUDENT_ACCOUNTING_MAP_ENABLED: "true",
+      STUDENT_RECONCILIATION_ENABLED: "true",
+    }),
+    ["analyze", "explain", "ask", "accounting_map", "reconcile"],
+  );
+  assert.deepEqual(
+    studentContextScopesFromFlags({ ...flags, STUDENT_INTERNSHIP_ENABLED: "true" }),
+    ["analyze", "explain", "export"],
+  );
+  assert.deepEqual(
+    studentContextScopesFromFlags({ ...flags, STUDENT_ASSISTANT_ENABLED: "false" }),
+    [],
+  );
+});
+
+test("Phase 1 context token cannot confirm or export", () => {
+  const flagNames = [
+    "STUDENT_ASSISTANT_ENABLED",
+    "STUDENT_FILE_EXPLAIN_ENABLED",
+    "STUDENT_FILE_QA_ENABLED",
+    "STUDENT_CHECK_WORK_ENABLED",
+    "STUDENT_ACCOUNTING_MAP_ENABLED",
+    "STUDENT_RECONCILIATION_ENABLED",
+    "STUDENT_INTERNSHIP_ENABLED",
+  ];
+  const previous = Object.fromEntries(flagNames.map((name) => [name, process.env[name]]));
+  Object.assign(process.env, {
+    STUDENT_ASSISTANT_ENABLED: "true",
+    STUDENT_FILE_EXPLAIN_ENABLED: "true",
+    STUDENT_FILE_QA_ENABLED: "false",
+    STUDENT_CHECK_WORK_ENABLED: "false",
+    STUDENT_ACCOUNTING_MAP_ENABLED: "false",
+    STUDENT_RECONCILIATION_ENABLED: "false",
+    STUDENT_INTERNSHIP_ENABLED: "false",
+  });
+  try {
+    const token = createContextToken({
+      _id: "session-1",
+      userId: "user-1",
+      ownerScope: "user:user-1",
+      workspaceId: null,
+    });
+    assert.deepEqual(verifyStudentContextToken(token, "analyze").allowed_scopes, [
+      "analyze",
+      "explain",
+    ]);
+    assert.throws(() => verifyStudentContextToken(token, "attempt"), /thiếu quyền attempt/i);
+    assert.throws(() => verifyStudentContextToken(token, "export"), /thiếu quyền export/i);
+  } finally {
+    for (const name of flagNames) {
+      if (previous[name] === undefined) delete process.env[name];
+      else process.env[name] = previous[name];
+    }
+  }
+});
+
+test("student session payload keeps metadata and discards raw rows", () => {
+  assert.deepEqual(
+    cleanStudentSessionPayload({
+      workspaceId: " workspace-1 ",
+      file: {
+        originalName: " ../sales.xlsx ",
+        sizeBytes: "1024",
+        extension: "XLSX",
+        contentHash: " sha256:example ",
+      },
+      converterUploadId: " upload-1 ",
+      targetTemplateId: " bsn_sales ",
+      sourceSignatureHash: " source-hash ",
+      rawRows: [{ customer: "confidential" }],
+      workbookBytes: "confidential bytes",
+    }),
+    {
+      workspaceId: "workspace-1",
+      file: {
+        originalName: "..sales.xlsx",
+        sizeBytes: 1024,
+        extension: ".xlsx",
+        contentHash: "sha256:example",
+        rawRetained: false,
+      },
+      converterUploadId: "upload-1",
+      targetTemplateId: "bsn_sales",
+      sourceSignatureHash: "source-hash",
+    },
+  );
+});
+
+test("student session serializer never exposes raw workbook content", () => {
+  const session = {
+    _id: "session-1",
+    userId: "user-1",
+    workspaceId: "workspace-1",
+    ownerScope: "workspace:workspace-1",
+    mode: "student_assistant",
+    status: "created",
+    file: {
+      originalName: "sales.xlsx",
+      sizeBytes: 1024,
+      extension: ".xlsx",
+      contentHash: "sha256:example",
+      rawRetained: false,
+      rawRows: [{ customer: "confidential" }],
+    },
+    summary: { sheetCount: 2, rawRows: [{ customer: "confidential" }] },
+    retentionExpiresAt: new Date("2026-07-18T00:00:00Z"),
+    rawRows: [{ customer: "confidential" }],
+    workbookBytes: "confidential bytes",
+  };
+
+  const payload = serializeStudentSession(session);
+  assert.equal(payload.id, "session-1");
+  assert.equal(payload.file.rawRows, undefined);
+  assert.equal(payload.summary.rawRows, undefined);
+  assert.equal(payload.rawRows, undefined);
+  assert.equal(payload.workbookBytes, undefined);
+});
+
+test("student session ownership requires the matching user and owner scope", () => {
+  const session = {
+    userId: "user-1",
+    workspaceId: "workspace-1",
+    ownerScope: "workspace:workspace-1",
+  };
+
+  assert.equal(sessionIsOwnedByUser(session, "user-1"), true);
+  assert.equal(sessionIsOwnedByUser(session, "user-2"), false);
+  assert.equal(
+    sessionIsOwnedByUser({ ...session, ownerScope: "user:user-1" }, "user-1"),
+    false,
+  );
+});
+
+test("student context must match the requested session owner", () => {
+  const session = {
+    _id: "session-1",
+    userId: "user-1",
+    workspaceId: "workspace-1",
+    ownerScope: "workspace:workspace-1",
+  };
+  const claims = verifyStudentContextToken(
+    createStudentContextToken({
+      sessionId: "session-1",
+      userId: "user-1",
+      ownerScope: "workspace:workspace-1",
+      workspaceId: "workspace-1",
+      allowedScopes: ["analyze"],
+    }),
+    "analyze",
+  );
+
+  assert.equal(studentContextMatchesSession(claims, session), true);
+  assert.equal(
+    studentContextMatchesSession({ ...claims, session_id: "session-2" }, session),
+    false,
+  );
+  assert.equal(
+    studentContextMatchesSession({ ...claims, owner_scope: "user:user-1" }, session),
+    false,
+  );
+});
+
+test("student session expiry includes elapsed retention and terminal statuses", () => {
+  const now = new Date("2026-07-17T12:00:00Z");
+
+  assert.equal(
+    sessionIsExpired({ retentionExpiresAt: new Date("2026-07-17T12:00:00Z"), status: "created" }, now),
+    true,
+  );
+  assert.equal(
+    sessionIsExpired({ retentionExpiresAt: new Date("2026-07-17T12:01:00Z"), status: "expired" }, now),
+    true,
+  );
+  assert.equal(
+    sessionIsExpired({ retentionExpiresAt: new Date("2026-07-17T12:01:00Z"), status: "deleted" }, now),
+    true,
+  );
+  assert.equal(
+    sessionIsExpired({ retentionExpiresAt: new Date("2026-07-17T12:01:00Z"), status: "created" }, now),
+    false,
+  );
+});
+
+test("GET rejects an expired student session before the Mongo TTL sweep", async () => {
+  const session = {
+    _id: "507f1f77bcf86cd799439011",
+    userId: "user-1",
+    workspaceId: null,
+    ownerScope: "user:user-1",
+    status: "created",
+    retentionExpiresAt: new Date(0),
+  };
+  const token = createStudentContextToken({
+    sessionId: session._id,
+    userId: session.userId,
+    ownerScope: session.ownerScope,
+    allowedScopes: ["analyze"],
+  });
+  const originalFindOne = StudentFileSession.findOne;
+  const response = {
+    statusCode: 200,
+    body: null,
+    status(code) {
+      this.statusCode = code;
+      return this;
+    },
+    json(body) {
+      this.body = body;
+      return body;
+    },
+  };
+
+  StudentFileSession.findOne = async () => session;
+  try {
+    await getStudentSession(
+      {
+        params: { id: session._id },
+        user: { _id: session.userId },
+        headers: { "x-student-context": token },
+      },
+      response,
+    );
+  } finally {
+    StudentFileSession.findOne = originalFindOne;
+  }
+
+  assert.equal(response.statusCode, 410);
+  assert.match(response.body.message, /hết hạn/i);
+});
+
+test("authenticated owner can refresh an active session with an expired old context", async () => {
+  const session = {
+    _id: "507f1f77bcf86cd799439011",
+    userId: "507f1f77bcf86cd799439012",
+    workspaceId: null,
+    ownerScope: "user:507f1f77bcf86cd799439012",
+    status: "analyzed",
+    retentionExpiresAt: new Date(Date.now() + 60_000),
+    file: { originalName: "sales.xlsx", sizeBytes: 100, rawRetained: false },
+  };
+  const expiredContext = createStudentContextToken({
+    sessionId: session._id,
+    userId: session.userId,
+    ownerScope: session.ownerScope,
+    allowedScopes: ["analyze"],
+    expiresIn: "-1s",
+  });
+  const originalFindOne = StudentFileSession.findOne;
+  const response = {
+    statusCode: 200,
+    body: null,
+    status(code) {
+      this.statusCode = code;
+      return this;
+    },
+    json(body) {
+      this.body = body;
+      return body;
+    },
+  };
+
+  StudentFileSession.findOne = async () => session;
+  try {
+    await refreshStudentContext(
+      {
+        params: { id: session._id },
+        user: { _id: session.userId },
+        headers: { "x-student-context": expiredContext },
+      },
+      response,
+    );
+  } finally {
+    StudentFileSession.findOne = originalFindOne;
+  }
+
+  assert.equal(response.statusCode, 200);
+  const refreshedClaims = jwt.verify(
+    response.body.contextToken,
+    process.env.CONVERSION_CONTEXT_SECRET,
+  );
+  assert.equal(refreshedClaims.session_id, session._id);
+  assert.equal(refreshedClaims.user_id, session.userId);
+  assert.ok(refreshedClaims.exp > Math.floor(Date.now() / 1000));
+});
+
+test("student session model expires metadata and has no raw workbook fields", () => {
+  const retentionExpiresAt = StudentFileSession.schema.path("retentionExpiresAt");
+  assert.equal(retentionExpiresAt.options.expires, 0);
+  assert.equal(StudentFileSession.schema.path("rawRows"), undefined);
+  assert.equal(StudentFileSession.schema.path("workbookBytes"), undefined);
+  assert.equal(StudentFileSession.schema.path("file.rawBytes"), undefined);
+});
+
+test("analysis_completed payload keeps only safe converter metadata", () => {
+  assert.deepEqual(
+    cleanAnalysisCompletedPayload({
+      event: "analysis_completed",
+      converterUploadId: " upload-1 ",
+      targetTemplateId: " bsn_sales ",
+      sourceSignatureHash: " source-hash ",
+      status: "exported",
+      summary: {
+        dataRowCount: 2,
+        documentCount: 1,
+        recognizedColumns: 6,
+        unresolvedColumns: 0,
+        mappingCounts: { mapped: 6, default: 1, formula: 4, rawRows: 99 },
+        issueCounts: { blocker: 2, warning: 1, info: 0 },
+        masterDataStatus: "not_configured",
+        explanationCount: 77,
+        stateHash: " state-1 ",
+        rawRows: [{ customer: "confidential" }],
+        preview: { rows: [{ customer: "confidential" }] },
+      },
+      rows: [{ customer: "confidential" }],
+    }),
+    {
+      event: "analysis_completed",
+      converterUploadId: "upload-1",
+      targetTemplateId: "bsn_sales",
+      sourceSignatureHash: "source-hash",
+      summary: {
+        dataRowCount: 2,
+        documentCount: 1,
+        recognizedColumns: 6,
+        unresolvedColumns: 0,
+        mappingCounts: { mapped: 6, default: 1, formula: 4 },
+        issueCounts: { blocker: 2, warning: 1, info: 0 },
+        masterDataStatus: "not_configured",
+        explanationCount: 77,
+        stateHash: "state-1",
+      },
+      status: "analyzed",
+    },
+  );
+});
+
+test("internal analysis_completed uses an atomic conditional update and remains idempotent", async () => {
+  process.env.CONVERTER_SERVICE_TOKEN = "converter-service-secret";
+  const session = {
+    _id: "507f1f77bcf86cd799439011",
+    userId: "507f1f77bcf86cd799439012",
+    workspaceId: null,
+    ownerScope: "user:507f1f77bcf86cd799439012",
+    status: "created",
+    retentionExpiresAt: new Date(Date.now() + 60_000),
+    file: { originalName: "sales.xlsx", sizeBytes: 100, rawRetained: false },
+  };
+  const token = createStudentContextToken({
+    sessionId: session._id,
+    userId: session.userId,
+    ownerScope: session.ownerScope,
+    allowedScopes: ["analyze", "explain"],
+  });
+  const originalFindOne = StudentFileSession.findOne;
+  const originalFindOneAndUpdate = StudentFileSession.findOneAndUpdate;
+  const updateCalls = [];
+  let fallbackReads = 0;
+  StudentFileSession.findOne = async () => {
+    fallbackReads += 1;
+    return session;
+  };
+  StudentFileSession.findOneAndUpdate = async (filter, update, options) => {
+    updateCalls.push({ filter, update, options });
+    const incomingUploadId = update.$set.converterUploadId;
+    if (session.converterUploadId && session.converterUploadId !== incomingUploadId) {
+      return null;
+    }
+    Object.assign(session, update.$set);
+    return session;
+  };
+
+  const response = {
+    statusCode: 200,
+    body: null,
+    status(code) {
+      this.statusCode = code;
+      return this;
+    },
+    json(body) {
+      this.body = body;
+      return body;
+    },
+  };
+  try {
+    await recordStudentAnalysisCompleted(
+      {
+        params: { id: session._id },
+        headers: {
+          "x-converter-service-token": "converter-service-secret",
+          "x-student-context": token,
+        },
+        body: {
+          event: "analysis_completed",
+          converterUploadId: "upload-1",
+          targetTemplateId: "bsn_sales",
+          sourceSignatureHash: "source-hash",
+          summary: { dataRowCount: 2, rawRows: [{ secret: true }] },
+        },
+      },
+      response,
+    );
+    assert.equal(response.statusCode, 200);
+    assert.equal(session.status, "analyzed");
+    assert.equal(session.converterUploadId, "upload-1");
+    assert.equal(session.targetTemplateId, "bsn_sales");
+    assert.equal(session.sourceSignatureHash, "source-hash");
+    assert.deepEqual(session.summary, { dataRowCount: 2 });
+    assert.equal(fallbackReads, 0);
+    assert.deepEqual(updateCalls[0].filter.$or, [
+      { converterUploadId: "" },
+      { converterUploadId: "upload-1" },
+      { converterUploadId: { $exists: false } },
+      { converterUploadId: null },
+    ]);
+    assert.equal(updateCalls[0].filter.ownerScope, session.ownerScope);
+    assert.equal(updateCalls[0].filter.workspaceId, null);
+    assert.equal(updateCalls[0].options.new, true);
+    assert.equal(updateCalls[0].options.runValidators, true);
+
+    const idempotent = { ...response, statusCode: 200, body: null };
+    await recordStudentAnalysisCompleted(
+      {
+        params: { id: session._id },
+        headers: {
+          "x-converter-service-token": "converter-service-secret",
+          "x-student-context": token,
+        },
+        body: {
+          event: "analysis_completed",
+          converterUploadId: "upload-1",
+          targetTemplateId: "bsn_sales",
+          sourceSignatureHash: "source-hash-refreshed",
+          summary: { dataRowCount: 2, explanationCount: 5 },
+        },
+      },
+      idempotent,
+    );
+    assert.equal(idempotent.statusCode, 200);
+    assert.equal(session.converterUploadId, "upload-1");
+    assert.equal(session.sourceSignatureHash, "source-hash-refreshed");
+    assert.equal(fallbackReads, 0);
+
+    const conflict = { ...response, statusCode: 200, body: null };
+    await recordStudentAnalysisCompleted(
+      {
+        params: { id: session._id },
+        headers: {
+          "x-converter-service-token": "converter-service-secret",
+          "x-student-context": token,
+        },
+        body: {
+          event: "analysis_completed",
+          converterUploadId: "upload-2",
+          targetTemplateId: "bsn_sales",
+          sourceSignatureHash: "source-hash-2",
+          summary: { dataRowCount: 3 },
+        },
+      },
+      conflict,
+    );
+    assert.equal(conflict.statusCode, 409);
+    assert.equal(session.converterUploadId, "upload-1");
+    assert.equal(session.sourceSignatureHash, "source-hash-refreshed");
+    assert.equal(fallbackReads, 1);
+  } finally {
+    StudentFileSession.findOne = originalFindOne;
+    StudentFileSession.findOneAndUpdate = originalFindOneAndUpdate;
+  }
+
+  const rejected = { ...response, statusCode: 200, body: null };
+  await recordStudentAnalysisCompleted(
+    {
+      params: { id: session._id },
+      headers: {
+        "x-converter-service-token": "wrong",
+        "x-student-context": token,
+      },
+      body: { event: "analysis_completed" },
+    },
+    rejected,
+  );
+  assert.equal(rejected.statusCode, 401);
+});

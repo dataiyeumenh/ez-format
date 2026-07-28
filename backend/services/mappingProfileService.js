@@ -4,6 +4,58 @@ function objectValue(value) {
     : {};
 }
 
+function optionalId(value) {
+  if (value == null) return null;
+  const normalized = String(value?._id || value).trim();
+  return normalized || null;
+}
+
+function mappingProfileOwnerFromClaims(claims = {}) {
+  const purpose = String(claims.purpose || "");
+  const userId = optionalId(claims.user_id);
+  const workspaceId = optionalId(claims.workspace_id);
+
+  if (purpose === "student_file_session") {
+    const sessionId = String(claims.session_id || "").trim();
+    const ownerScope = String(claims.owner_scope || "").trim();
+    if (!sessionId || !userId || !ownerScope) {
+      throw new Error("Student context thiếu session, user hoặc owner scope");
+    }
+    if (
+      (ownerScope.startsWith("workspace:") &&
+        ownerScope !== `workspace:${workspaceId || ""}`) ||
+      (ownerScope.startsWith("user:") && ownerScope !== `user:${userId}`) ||
+      (!ownerScope.startsWith("workspace:") && !ownerScope.startsWith("user:"))
+    ) {
+      throw new Error("Student context owner scope không hợp lệ");
+    }
+    return { ownerScope, userId, workspaceId };
+  }
+
+  if (!["misa_conversion", "misa_reconstruction"].includes(purpose)) {
+    throw new Error("Conversion context token không hợp lệ");
+  }
+  if (!userId) throw new Error("Conversion context thiếu user");
+  if (purpose === "misa_reconstruction" && !workspaceId) {
+    throw new Error("Reconstruction context thiếu workspace");
+  }
+  const expectedOwnerScope = workspaceId
+    ? `workspace:${workspaceId}`
+    : `user:${userId}`;
+  const claimedOwnerScope = String(claims.owner_scope || "").trim();
+  if (
+    (claimedOwnerScope && claimedOwnerScope !== expectedOwnerScope) ||
+    (!workspaceId && claimedOwnerScope !== expectedOwnerScope)
+  ) {
+    throw new Error("Conversion context owner scope không hợp lệ");
+  }
+  return {
+    ownerScope: expectedOwnerScope,
+    userId,
+    workspaceId,
+  };
+}
+
 function cleanMappingProfilePayload(body = {}) {
   return {
     name: String(body.name || "Thiết lập ghép cột")
@@ -31,7 +83,9 @@ function cleanMappingProfilePayload(body = {}) {
 function serializeMappingProfile(profile) {
   return {
     id: String(profile._id || profile.id),
-    workspaceId: String(profile.workspace?._id || profile.workspace),
+    ownerScope: String(profile.ownerScope || ""),
+    workspaceId: optionalId(profile.workspace),
+    userId: optionalId(profile.user),
     name: profile.name,
     targetTemplateId: profile.targetTemplateId,
     sourceSignatureHash: profile.sourceSignatureHash,
@@ -44,6 +98,9 @@ function serializeMappingProfile(profile) {
     confidence: Number(profile.confidence || 0),
     usageCount: Number(profile.usageCount || 0),
     lastUsedAt: profile.lastUsedAt || null,
+    status: profile.status || "active",
+    quarantinedAt: profile.quarantinedAt || null,
+    quarantineReason: profile.quarantineReason || "",
     createdAt: profile.createdAt || null,
     updatedAt: profile.updatedAt || null,
   };
@@ -51,5 +108,6 @@ function serializeMappingProfile(profile) {
 
 module.exports = {
   cleanMappingProfilePayload,
+  mappingProfileOwnerFromClaims,
   serializeMappingProfile,
 };

@@ -133,6 +133,7 @@ if ($ollamaOnline -and (Test-Path -LiteralPath $tokenPath)) {
     $aiToken = (Get-Content -LiteralPath $tokenPath -Raw).Trim()
     $env:AI_PROVIDER      = "remote_http"
     $env:AI_BASE_URL      = "http://127.0.0.1:$GatewayPort/v1/misa/suggest-mapping"
+    $env:AI_RECONSTRUCTION_BASE_URL = "http://127.0.0.1:$GatewayPort/v1/misa/suggest-reconstruction"
     $env:AI_TOKEN         = $aiToken
     $env:AI_MAPPING_TIMEOUT_SECONDS = "15"
     $env:AI_REQUIRED      = "false"
@@ -147,6 +148,11 @@ $env:CONVERTER_SERVICE_TOKEN = Get-OrCreateSecret -Path $converterServiceTokenPa
 $env:CONVERTER_INTERNAL_URL = "http://127.0.0.1:$ConverterPort"
 $env:NODE_INTERNAL_API_URL = "http://127.0.0.1:$BackendPort/api/internal"
 $env:MASTER_DATA_WORKSPACES_ENABLED = "true"
+$env:VOUCHER_RECONSTRUCTION_ENABLED = "true"
+$env:RECONSTRUCTION_STORE_PROVIDER = "filesystem"
+$env:RECONSTRUCTION_STORE_DIR = Join-Path $resolvedRepo ".artifacts\reconstructions"
+$env:RECONSTRUCTION_STORE_TTL_HOURS = "24"
+$env:RECONSTRUCTION_NOTIFY_NODE = "true"
 
 # --- 4. Free stale local dev ports ---
 Stop-ManagedPort `

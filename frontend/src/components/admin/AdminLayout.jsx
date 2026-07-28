@@ -7,12 +7,10 @@ import {
   Package,
   BarChart2,
   MessageSquare,
-  Settings,
-  Bell,
-  Search,
   LogOut,
-  UserCircle,
   ChevronDown,
+  Menu,
+  X,
 } from "lucide-react";
 import { useAuth } from "../../context/AuthContext";
 import ezFormatMainLogo from "../../assets/ezformat-logo-128.webp";
@@ -31,6 +29,8 @@ const AdminLayout = ({ children, title: _title }) => {
   const navigate = useNavigate();
   const location = useLocation();
   const [avatarOpen, setAvatarOpen] = useState(false);
+  const [logoutConfirmOpen, setLogoutConfirmOpen] = useState(false);
+  const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const dropdownRef = useRef(null);
 
   // Close dropdown when clicking outside
@@ -38,6 +38,7 @@ const AdminLayout = ({ children, title: _title }) => {
     const handleClickOutside = (e) => {
       if (dropdownRef.current && !dropdownRef.current.contains(e.target)) {
         setAvatarOpen(false);
+        setLogoutConfirmOpen(false);
       }
     };
     document.addEventListener("mousedown", handleClickOutside);
@@ -46,6 +47,7 @@ const AdminLayout = ({ children, title: _title }) => {
 
   const handleLogout = () => {
     logout();
+    setLogoutConfirmOpen(false);
     navigate("/login");
   };
 
@@ -54,19 +56,43 @@ const AdminLayout = ({ children, title: _title }) => {
       return location.pathname === "/admin" || location.pathname === "/admin/dashboard";
     return location.pathname.startsWith(path);
   };
+  const currentSection =
+    navItems.find((item) => isActive(item.path))?.label || "Quản trị";
 
   return (
-    <div className="flex h-screen bg-gray-100 overflow-hidden">
+    <div className="flex h-screen overflow-hidden bg-gray-100">
+      {mobileNavOpen && (
+        <button
+          type="button"
+          aria-label="Đóng menu quản trị"
+          onClick={() => setMobileNavOpen(false)}
+          className="fixed inset-0 z-30 bg-slate-950/55 backdrop-blur-[2px] md:hidden"
+        />
+      )}
       {/* ── Sidebar ── */}
-      <aside className="w-56 bg-gray-900 flex flex-col flex-shrink-0">
+      <aside
+        className={`fixed inset-y-0 left-0 z-40 flex w-72 flex-shrink-0 flex-col bg-gray-900 shadow-2xl transition-transform duration-200 md:static md:w-56 md:translate-x-0 md:shadow-none ${
+          mobileNavOpen ? "translate-x-0" : "-translate-x-full"
+        }`}
+      >
         {/* Logo */}
-        <div className="flex items-center gap-2 px-5 py-4 border-b border-gray-800">
-          <img
-            src={ezFormatMainLogo}
-            alt="EzFormat logo"
-            className="h-7 w-7 object-contain"
-          />
-          <span className="font-bold text-white text-base">EzFormat</span>
+        <div className="flex items-center justify-between border-b border-gray-800 px-5 py-4">
+          <div className="flex items-center gap-2">
+            <img
+              src={ezFormatMainLogo}
+              alt="EzFormat logo"
+              className="h-7 w-7 object-contain"
+            />
+            <span className="text-base font-bold text-white">EzFormat</span>
+          </div>
+          <button
+            type="button"
+            aria-label="Đóng menu quản trị"
+            onClick={() => setMobileNavOpen(false)}
+            className="flex h-10 w-10 items-center justify-center rounded-xl text-gray-300 hover:bg-gray-800 hover:text-white md:hidden"
+          >
+            <X size={20} />
+          </button>
         </div>
 
         {/* Nav */}
@@ -75,6 +101,7 @@ const AdminLayout = ({ children, title: _title }) => {
             <Link
               key={item.label}
               to={item.path}
+              onClick={() => setMobileNavOpen(false)}
               className={`flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm transition-colors ${
                 isActive(item.path)
                   ? "bg-blue-600 text-white font-medium"
@@ -86,68 +113,38 @@ const AdminLayout = ({ children, title: _title }) => {
             </Link>
           ))}
         </nav>
-
-        {/* Storage & Settings */}
-        <div className="px-4 py-4 border-t border-gray-800 space-y-3">
-          <div>
-            <div className="flex items-center justify-between text-xs text-gray-500 mb-1">
-              <span>DUNG LƯỢNG LƯU TRỮ</span>
-            </div>
-            <div className="h-1.5 bg-gray-700 rounded-full overflow-hidden">
-              <div
-                className="h-full bg-blue-500 rounded-full"
-                style={{ width: "60%" }}
-              />
-            </div>
-            <p className="text-xs text-gray-500 mt-1">650GB of 1TB used</p>
-          </div>
-          <Link
-            to="/admin/settings"
-            className="flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm text-gray-400 hover:text-white hover:bg-gray-800 transition-colors"
-          >
-            <Settings size={16} />
-            Cài đặt
-          </Link>
-        </div>
       </aside>
 
       {/* ── Main content ── */}
       <div className="flex-1 flex flex-col overflow-hidden">
         {/* Header */}
-        <header className="bg-white border-b border-gray-200 h-14 flex items-center justify-between px-6">
-          <div className="flex items-center gap-3">
-            <div className="relative">
-              <Search
-                size={16}
-                className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400"
-              />
-              <input
-                type="text"
-                placeholder="Search by name, email or ID..."
-                className="pl-9 pr-4 py-2 bg-gray-50 border border-gray-200 rounded-lg text-sm w-72 focus:outline-none focus:ring-2 focus:ring-blue-500/20"
-              />
-            </div>
+        <header className="flex h-14 items-center justify-between border-b border-gray-200 bg-white px-3 sm:px-5 md:px-6">
+          <div className="flex min-w-0 items-center gap-2">
+            <button
+              type="button"
+              aria-label="Mở menu quản trị"
+              aria-expanded={mobileNavOpen}
+              onClick={() => setMobileNavOpen(true)}
+              className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl text-gray-600 hover:bg-gray-100 md:hidden"
+            >
+              <Menu size={20} />
+            </button>
+            <h1 className="truncate text-sm font-bold text-gray-800">{currentSection}</h1>
           </div>
 
           <div className="flex items-center gap-4">
-            <div className="flex items-center gap-1.5 text-xs text-gray-500">
-              <span className="w-2 h-2 bg-green-500 rounded-full inline-block" />
-              <span className="text-green-600 font-medium">Server: Tốt</span>
-            </div>
-            <button className="relative text-gray-500 hover:text-gray-700">
-              <Bell size={20} />
-              <span className="absolute -top-1 -right-1 w-4 h-4 bg-red-500 rounded-full text-white text-xs flex items-center justify-center">
-                3
-              </span>
-            </button>
-
             {/* Avatar Dropdown */}
             <div className="relative" ref={dropdownRef}>
               <button
-                onClick={() => setAvatarOpen(!avatarOpen)}
+                type="button"
+                onClick={() => {
+                  setLogoutConfirmOpen(false);
+                  setAvatarOpen(!avatarOpen);
+                }}
                 className="flex items-center gap-2 cursor-pointer hover:opacity-80 transition-opacity"
+                aria-expanded={avatarOpen}
               >
-                <div className="text-right">
+                <div className="hidden text-right sm:block">
                   <p className="text-sm font-medium text-gray-900 leading-tight">
                     {user?.name || "EzFormat"}
                   </p>
@@ -158,7 +155,7 @@ const AdminLayout = ({ children, title: _title }) => {
                 </div>
                 <ChevronDown
                   size={14}
-                  className={`text-gray-400 transition-transform ${avatarOpen ? "rotate-180" : ""}`}
+                  className={`hidden text-gray-400 transition-transform sm:block ${avatarOpen ? "rotate-180" : ""}`}
                 />
               </button>
 
@@ -169,28 +166,42 @@ const AdminLayout = ({ children, title: _title }) => {
                     <p className="text-sm font-semibold text-gray-900">{user?.name}</p>
                     <p className="text-xs text-gray-400 truncate">{user?.email}</p>
                   </div>
-                  <Link
-                    to="/admin/profile"
-                    onClick={() => setAvatarOpen(false)}
-                    className="flex items-center gap-3 px-4 py-2.5 text-sm text-gray-700 hover:bg-gray-50 transition-colors"
-                  >
-                    <UserCircle size={16} className="text-gray-400" />
-                    Chỉnh sửa hồ sơ
-                  </Link>
-                  <Link
-                    to="/admin/settings"
-                    onClick={() => setAvatarOpen(false)}
-                    className="flex items-center gap-3 px-4 py-2.5 text-sm text-gray-700 hover:bg-gray-50 transition-colors"
-                  >
-                    <Settings size={16} className="text-gray-400" />
-                    Cài đặt
-                  </Link>
-                  <div className="border-t border-gray-100 mt-1 pt-1">
+                  <div className="pt-1">
                     <button
-                      onClick={handleLogout}
+                      type="button"
+                      onClick={() => {
+                        setAvatarOpen(false);
+                        setLogoutConfirmOpen(true);
+                      }}
                       className="flex items-center gap-3 w-full px-4 py-2.5 text-sm text-red-600 hover:bg-red-50 transition-colors"
                     >
                       <LogOut size={16} />
+                      Đăng xuất
+                    </button>
+                  </div>
+                </div>
+              )}
+              {logoutConfirmOpen && (
+                <div className="absolute right-0 top-full z-50 mt-2 w-[min(20rem,calc(100vw-1.5rem))] rounded-2xl border border-gray-100 bg-white p-4 shadow-xl">
+                  <h2 className="text-sm font-bold text-gray-900">
+                    Xác nhận đăng xuất
+                  </h2>
+                  <p className="mt-1 text-xs leading-relaxed text-gray-500">
+                    Bạn có chắc muốn đăng xuất khỏi trang quản trị không?
+                  </p>
+                  <div className="mt-4 flex gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setLogoutConfirmOpen(false)}
+                      className="flex-1 rounded-xl border border-gray-200 px-3 py-2 text-sm font-semibold text-gray-600 hover:bg-gray-50"
+                    >
+                      Hủy
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleLogout}
+                      className="flex-1 rounded-xl bg-blue-600 px-3 py-2 text-sm font-semibold text-white hover:bg-blue-700"
+                    >
                       Đăng xuất
                     </button>
                   </div>

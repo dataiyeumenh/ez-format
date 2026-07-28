@@ -41,7 +41,7 @@ def test_non_purchase_target_does_not_receive_purchase_context():
     ) == {}
 
 
-def test_ai_merge_removes_stale_missing_mapping_warning_after_fields_are_filled():
+def test_ai_merge_keeps_account_fields_for_manual_review():
     template = get_misa_template("misa_purchase_domestic")
     fallback = MappingSuggestion(
         source="heuristic",
@@ -72,4 +72,10 @@ def test_ai_merge_removes_stale_missing_mapping_warning_after_fields_are_filled(
         target_headers=template.headers,
     )
 
-    assert not any("Thiếu mapping cho cột bắt buộc" in item for item in result.warnings)
+    missing_warning = next(
+        item for item in result.warnings if "Thiếu mapping cho cột bắt buộc" in item
+    )
+    assert "Hình thức mua hàng" not in missing_warning
+    assert "Ngày hạch toán (*)" not in missing_warning
+    assert "TK kho/TK chi phí (*)" in missing_warning
+    assert "TK công nợ/TK tiền (*)" in missing_warning

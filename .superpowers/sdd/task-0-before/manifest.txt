@@ -1,0 +1,5 @@
+backend\.env.example|present|23445F022B3BF9298AD17326FEE0F31C060AEEFD057936F57D1D4028ABFB074E
+converter\.env.example|present|0A09FA743D0C2C22C3B87FE14CF1A45293D310A3140EC37AB8A025B41C277F0A
+frontend\.env.example|present|E30CE1591F86A78541D5BD56B6934606D8BA359A0A28DD478733E8CD7310B2CD
+docs\qa\converter-gateway-baseline.md|missing|
+backend\tests\converterGatewayContract.test.js|missing|

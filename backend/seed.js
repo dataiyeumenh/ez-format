@@ -5,6 +5,10 @@
 require("dotenv").config();
 const mongoose = require("mongoose");
 const User = require("./models/User");
+const {
+  findActivePlanByCodeOrId,
+  seedDefaultPlans,
+} = require("./services/planService");
 
 async function seed() {
   const uri = process.env.MONGO_URI;
@@ -14,18 +18,20 @@ async function seed() {
   }
 
   await mongoose.connect(uri);
+  await seedDefaultPlans();
 
   const adminEmail = process.env.SEED_ADMIN_EMAIL || "admin@ezformat.local";
   const adminPassword = process.env.SEED_ADMIN_PASSWORD || "admin123456";
 
   let admin = await User.findOne({ email: adminEmail });
   if (!admin) {
+    const yearlyPlan = await findActivePlanByCodeOrId("yearly");
     admin = await User.create({
       name: "Admin",
       email: adminEmail,
       password: adminPassword,
       role: "admin",
-      plan: "Yearly",
+      plan: yearlyPlan?._id,
     });
     console.log("Created admin:", adminEmail);
   } else {

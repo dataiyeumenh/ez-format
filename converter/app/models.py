@@ -121,8 +121,8 @@ class ExportRowsRequest(BaseModel):
     sheet_name: str | None = None
 
 
-ReadinessSeverity = Literal["blocker", "warning", "info"]
-ReadinessStatus = Literal["ready", "needs_review", "blocked"]
+ReadinessSeverity = Literal["fatal", "blocker", "warning", "info"]
+ReadinessStatus = Literal["ready", "needs_review", "blocked", "fatal"]
 
 
 class MisaReadinessIssue(BaseModel):
@@ -138,6 +138,10 @@ class MisaReadinessIssue(BaseModel):
     delta: Any = None
     fix_hint: str | None = None
     source_url: str | None = None
+    blocking_scope: Literal["system", "reconciliation", "export", "none"] | None = None
+    deterministic: bool = True
+    evidence_ids: list[str] = Field(default_factory=list)
+    correction_eligibility: Literal["safe", "review_required", "forbidden"] = "forbidden"
 
 
 class MisaReadinessSummary(BaseModel):

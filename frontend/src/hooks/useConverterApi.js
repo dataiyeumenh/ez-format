@@ -1,12 +1,15 @@
 import { useCallback, useEffect, useState } from "react";
+import api from "../services/api.js";
+import {
+  DEFAULT_OPERATION_CAPABILITIES,
+  intersectOperationCapabilities,
+  normalizeOperationCapabilities,
+} from "../utils/operationSession.js";
+import {
+  buildGatewayExportPayload,
+  gatewayRequestError,
+} from "../utils/converterOperations.js";
 
-const viteEnv = import.meta.env || {};
-const pythonBaseURL = viteEnv.VITE_PYTHON_API_URL
-  ? `${viteEnv.VITE_PYTHON_API_URL}`
-  : "/python-api";
-
-const HEALTH_URL = `${pythonBaseURL}/healthz`;
-const TEMPLATES_URL = `${pythonBaseURL}/api/v1/templates`;
 const STATUS_REFRESH_MS = 15000;
 
 export const DEFAULT_CONVERTER_TEMPLATES = [
@@ -36,81 +39,326 @@ export function formatApiError(payload, fallback) {
   return fallback;
 }
 
-function buildUploadFormData(file, targetTemplateId, conversionContextToken = null) {
+export function buildUploadFormData(
+  file,
+  targetTemplateId,
+  conversionContextToken = null,
+  useAi = false,
+) {
   const formData = new FormData();
   formData.append("file", file);
   if (targetTemplateId) formData.append("target_template_id", targetTemplateId);
   if (conversionContextToken) {
     formData.append("conversion_context_token", conversionContextToken);
   }
+  if (useAi === true) {
+    formData.append("use_ai", "true");
+    formData.append("ai_mapping_opt_in", "true");
+  }
   return formData;
 }
 
-async function readJsonResponse(response, fallback) {
+export async function readJsonResponse(response, fallback) {
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
-    throw new Error(formatApiError(data, fallback));
+    const error = new Error(formatApiError(data, fallback));
+    error.status = response.status;
+    error.payload = data;
+    throw error;
   }
   return data;
 }
 
-function aiStatusFromHealth(health) {
-  const ai = health?.ai;
-  if (ai === "online") return true;
-  if (ai === "offline") return false;
-  return "disabled";
-}
-
-async function fetchJson(fetchImpl, url) {
-  const response = await fetchImpl(url, { cache: "no-store" });
+export async function readExportResponse(response, fallback) {
   if (!response.ok) {
-    throw new Error(`Request failed: ${response.status}`);
+    const data = await response.json().catch(() => ({}));
+    const error = new Error(formatApiError(data, fallback));
+    error.status = response.status;
+    error.payload = data;
+    throw error;
   }
-  return response.json();
+  return response.blob();
 }
 
-export async function fetchConverterStatus(fetchImpl = fetch) {
+export function normalizeAiStatus(value) {
+  if (value === "online") {
+    return { gateway: "online", model: "unknown", mapping: "not_run" };
+  }
+  if (value === "offline" || value === "disabled") {
+    return { gateway: "offline", model: "offline", mapping: "not_run" };
+  }
+  const source = value && typeof value === "object" ? value : {};
+  const gateway = source.gateway === "online" ? "online" : "offline";
+  const model = ["available", "unknown", "offline"].includes(source.model)
+    ? source.model
+    : gateway === "online"
+      ? "unknown"
+      : "offline";
+  const mapping = ["not_run", "heuristic", "ai", "mixed", "failed"].includes(
+    source.mapping,
+  )
+    ? source.mapping
+    : "not_run";
+  return { gateway, model, mapping };
+}
+
+export function describeAiStatus(status) {
+  const normalized = normalizeAiStatus(status);
+  if (["ai", "mixed"].includes(normalized.mapping)) return "AI mapping đã dùng";
+  if (normalized.mapping === "failed" && normalized.gateway === "online") {
+    return "AI mapping không đạt kiểm tra an toàn — đang dùng heuristic an toàn";
+  }
+  if (normalized.gateway === "offline") {
+    return "AI offline — đang dùng heuristic an toàn";
+  }
+  return "AI Gateway online — chưa chạy AI mapping";
+}
+
+function aiStatusFromHealth(health) {
+  if (!health || !Object.prototype.hasOwnProperty.call(health, "ai")) {
+    return "disabled";
+  }
+  return normalizeAiStatus(health.ai);
+}
+
+export async function fetchConverterStatus(apiClient = api) {
   const [healthResult, templatesResult] = await Promise.allSettled([
-    fetchJson(fetchImpl, HEALTH_URL),
-    fetchJson(fetchImpl, TEMPLATES_URL),
+    apiClient.get("/converter/capabilities"),
+    apiClient.get("/converter/templates"),
   ]);
 
-  const health = healthResult.status === "fulfilled" ? healthResult.value : null;
+  const health = healthResult.status === "fulfilled" ? healthResult.value.data : null;
   const templatesData =
-    templatesResult.status === "fulfilled" ? templatesResult.value : null;
+    templatesResult.status === "fulfilled" ? templatesResult.value.data : null;
 
   const serviceOnline = Boolean(health || templatesData);
+  const healthAiStatus = health ? aiStatusFromHealth(health) : null;
 
   return {
     serviceOnline,
-    aiOnline: health ? aiStatusFromHealth(health) : null,
+    aiOnline:
+      healthAiStatus === "disabled"
+        ? "disabled"
+        : healthAiStatus
+          ? healthAiStatus.gateway === "online"
+          : null,
+    aiStatus: healthAiStatus === "disabled" ? null : healthAiStatus,
+    runtimeCapabilities: normalizeOperationCapabilities(health?.capabilities),
     templates: templatesData?.items?.length
       ? templatesData.items
       : DEFAULT_CONVERTER_TEMPLATES,
   };
 }
 
+export function buildOperationHeaders(conversionContextToken, headers = {}) {
+  const token = String(conversionContextToken || "").trim();
+  if (!token) throw new Error("Thiếu conversion context cho thao tác phiên dữ liệu.");
+  return { ...headers, "X-Conversion-Context": token };
+}
+
+export function buildExportRequestConfig(
+  conversionContextToken,
+  idempotencyKey = null,
+  allowConverterContextRefresh = false,
+) {
+  const headers = idempotencyKey ? { "Idempotency-Key": idempotencyKey } : {};
+  return {
+    responseType: "blob",
+    headers: buildOperationHeaders(conversionContextToken, headers),
+    ...(allowConverterContextRefresh ? { allowConverterContextRefresh: true } : {}),
+  };
+}
+
+async function requestRunExportContext({
+  apiClient,
+  runId,
+  uploadId,
+  targetTemplateId,
+  operationSessionId,
+}) {
+  if (!runId || !uploadId || !targetTemplateId || !operationSessionId) {
+    throw new Error("Thiếu liên kết run/upload/template/session để làm mới export context.");
+  }
+  const response = await apiClient.post(
+    `/converter/runs/${encodeURIComponent(runId)}/context`,
+    {
+      upload_id: uploadId,
+      target_template_id: targetTemplateId,
+      operation_session_id: operationSessionId,
+    },
+  );
+  const contextToken = String(response.data?.contextToken || "").trim();
+  if (!contextToken) throw new Error("Gateway không trả export context hợp lệ.");
+  return contextToken;
+}
+
+export async function exportWithFreshRunContext({
+  apiClient = api,
+  runId,
+  uploadId,
+  targetTemplateId,
+  operationSessionId,
+  payload,
+  idempotencyKey,
+}) {
+  const contextRequest = {
+    apiClient,
+    runId,
+    uploadId,
+    targetTemplateId,
+    operationSessionId,
+  };
+  const contextToken = await requestRunExportContext(contextRequest);
+  try {
+    return await apiClient.post(
+      "/converter/conversions/export",
+      payload,
+      buildExportRequestConfig(contextToken, idempotencyKey, true),
+    );
+  } catch (error) {
+    if (Number(error?.response?.status || error?.status) !== 401) throw error;
+    const refreshedContextToken = await requestRunExportContext(contextRequest);
+    return apiClient.post(
+      "/converter/conversions/export",
+      payload,
+      buildExportRequestConfig(refreshedContextToken, idempotencyKey),
+    );
+  }
+}
+
+export function buildSessionExportPayload({
+  runId,
+  uploadId,
+  profileId,
+  profileVersion = null,
+  profileStateHash = null,
+  acknowledgeWarnings = false,
+  idempotencyKey,
+  session,
+  requireSession = true,
+}) {
+  if (
+    requireSession &&
+    (!session?.sessionId ||
+      !session?.stateHash ||
+      !Number.isInteger(session?.revision))
+  ) {
+    throw new Error("Phiên dữ liệu chưa có revision hợp lệ để xuất file.");
+  }
+  return buildGatewayExportPayload({
+    runId,
+    uploadId,
+    profileId,
+    profileVersion,
+    profileStateHash,
+    sessionId: requireSession ? session?.sessionId : undefined,
+    revision: requireSession ? session?.revision : undefined,
+    stateHash: requireSession ? session?.stateHash : undefined,
+    acknowledgeWarnings,
+    idempotencyKey,
+  });
+}
+
+export async function fetchConverterCapabilities(apiClient = api) {
+  try {
+    const response = await apiClient.get("/converter/capabilities");
+    return {
+      online: true,
+      capabilities: normalizeOperationCapabilities(response.data),
+      aiStatus: response.data?.ai ? normalizeAiStatus(response.data.ai) : null,
+    };
+  } catch {
+    return { online: false, capabilities: DEFAULT_OPERATION_CAPABILITIES, aiStatus: null };
+  }
+}
+
+function sessionUrl(sessionId, suffix = "") {
+  return `/converter/sessions/${encodeURIComponent(sessionId)}${suffix}`;
+}
+
+function requestData(body) {
+  if (typeof body !== "string") return body;
+  try {
+    return JSON.parse(body);
+  } catch {
+    return body;
+  }
+}
+
+async function requestSessionJson(
+  sessionId,
+  suffix,
+  options,
+  fallback,
+  conversionContextToken,
+) {
+  try {
+    const response = await api.request({
+      url: sessionUrl(sessionId, suffix),
+      method: options?.method || "GET",
+      data: requestData(options?.body),
+      signal: options?.signal,
+      headers: buildOperationHeaders(conversionContextToken, options?.headers),
+    });
+    return response.data;
+  } catch (error) {
+    throw gatewayRequestError(error, fallback);
+  }
+}
+
+export async function fetchSessionRevisions(
+  sessionId,
+  conversionContextToken,
+  apiClient = api,
+) {
+  try {
+    const response = await apiClient.get(sessionUrl(sessionId), {
+      headers: buildOperationHeaders(conversionContextToken),
+    });
+    return response.data;
+  } catch (error) {
+    throw gatewayRequestError(error, "Không thể tải phiên bản dữ liệu mới.");
+  }
+}
+
 export function useConverterApi() {
   const [templates, setTemplates] = useState(DEFAULT_CONVERTER_TEMPLATES);
   const [serviceOnline, setServiceOnline] = useState(null);
   const [aiOnline, setAiOnline] = useState(null); // null=loading, true=online, false=offline, "disabled"=không cấu hình
+  const [aiStatus, setAiStatus] = useState(null);
+  const [capabilities, setCapabilities] = useState(DEFAULT_OPERATION_CAPABILITIES);
+  const [capabilitiesOnline, setCapabilitiesOnline] = useState(null);
 
   useEffect(() => {
     let cancelled = false;
 
     const refreshStatus = () => {
-      fetchConverterStatus()
-        .then(({ serviceOnline, aiOnline, templates }) => {
+      Promise.all([fetchConverterStatus(), fetchConverterCapabilities()])
+        .then(([status, nodeCapabilities]) => {
           if (cancelled) return;
-          setServiceOnline(serviceOnline);
-          setAiOnline(aiOnline);
-          setTemplates(templates);
+          setServiceOnline(status.serviceOnline);
+          const nextAiStatus = status.aiStatus || nodeCapabilities.aiStatus;
+          setAiOnline(
+            nextAiStatus ? nextAiStatus.gateway === "online" : status.aiOnline,
+          );
+          setAiStatus(nextAiStatus);
+          setTemplates(status.templates);
+          setCapabilitiesOnline(nodeCapabilities.online && status.serviceOnline);
+          setCapabilities(
+            intersectOperationCapabilities(
+              nodeCapabilities.capabilities,
+              status.runtimeCapabilities,
+            ),
+          );
         })
         .catch(() => {
           if (cancelled) return;
           setServiceOnline(false);
           setAiOnline(false);
+          setAiStatus(normalizeAiStatus("offline"));
           setTemplates(DEFAULT_CONVERTER_TEMPLATES);
+          setCapabilitiesOnline(false);
+          setCapabilities(DEFAULT_OPERATION_CAPABILITIES);
         });
     };
 
@@ -124,81 +372,313 @@ export function useConverterApi() {
   }, []);
 
   const analyzeFile = useCallback(
-    async (file, targetTemplateId, conversionContextToken = null) => {
-      const response = await fetch(`${pythonBaseURL}/api/v1/uploads/analyze`, {
-        method: "POST",
-        body: buildUploadFormData(file, targetTemplateId, conversionContextToken),
-      });
-      return readJsonResponse(response, "Không thể phân tích file Excel.");
+    async (
+      file,
+      targetTemplateId,
+      conversionContextToken = null,
+      useAi = false,
+      idempotencyKey = null,
+    ) => {
+      try {
+        const response = await api.post(
+          "/converter/uploads/analyze",
+          buildUploadFormData(file, targetTemplateId, conversionContextToken, useAi),
+          { headers: idempotencyKey ? { "Idempotency-Key": idempotencyKey } : undefined },
+        );
+        return response.data;
+      } catch (error) {
+        throw gatewayRequestError(error, "Không thể phân tích file Excel.");
+      }
     },
     [],
   );
 
-  const previewMapping = useCallback(async (payload) => {
-    const response = await fetch(`${pythonBaseURL}/api/v1/mappings/preview`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-    });
-    return readJsonResponse(response, "Không thể xem trước mapping MISA.");
+  const postGatewayJson = useCallback(async (url, payload, fallback) => {
+    try {
+      const response = await api.post(url, payload);
+      return response.data;
+    } catch (error) {
+      throw gatewayRequestError(error, fallback);
+    }
   }, []);
 
-  const confirmMapping = useCallback(async (payload) => {
-    const response = await fetch(`${pythonBaseURL}/api/v1/mappings/confirm`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-    });
-    return readJsonResponse(response, "Không thể lưu setting mapping.");
-  }, []);
+  const previewMapping = useCallback(
+    (payload) =>
+      postGatewayJson("/converter/mappings/preview", payload, "Không thể xem trước mapping MISA."),
+    [postGatewayJson],
+  );
 
-  const checkReadiness = useCallback(async (payload) => {
-    const response = await fetch(`${pythonBaseURL}/api/v1/mappings/readiness`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-    });
-    return readJsonResponse(
-      response,
-      "Không kiểm tra được trạng thái sẵn sàng import MISA.",
-    );
-  }, []);
+  const confirmMapping = useCallback(
+    (payload) =>
+      postGatewayJson("/converter/mappings/confirm", payload, "Không thể lưu setting mapping."),
+    [postGatewayJson],
+  );
+
+  const syncMappingSession = useCallback(
+    (payload) =>
+      postGatewayJson("/converter/sessions", payload, "Không thể đồng bộ mapping với phiên dữ liệu."),
+    [postGatewayJson],
+  );
+
+  const checkReadiness = useCallback(
+    (payload) =>
+      postGatewayJson(
+        "/converter/mappings/readiness",
+        payload,
+        "Không kiểm tra được trạng thái sẵn sàng import MISA.",
+      ),
+    [postGatewayJson],
+  );
 
   const exportConfirmed = useCallback(
     async (
       uploadId,
       profileId,
-      rows,
       acknowledgeWarnings = false,
-      conversionContextToken = null,
+      session = null,
+      requireSession = true,
+      profileBinding = null,
+      runId = null,
+      idempotencyKey = null,
+      targetTemplateId = null,
     ) => {
-      const payload = {
-        upload_id: uploadId,
-        profile_id: profileId,
-        acknowledge_warnings: acknowledgeWarnings,
-        conversion_context_token: conversionContextToken,
-      };
-      if (Array.isArray(rows) && rows.length > 0) {
-        payload.rows = rows;
-      }
-      const response = await fetch(`${pythonBaseURL}/api/v1/conversions/export`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
+      const payload = buildSessionExportPayload({
+        runId,
+        uploadId,
+        profileId,
+        profileVersion: profileBinding?.version,
+        profileStateHash: profileBinding?.stateHash,
+        acknowledgeWarnings,
+        session,
+        requireSession,
+        idempotencyKey,
       });
-
-      if (!response.ok) {
-        const errData = await response.json().catch(() => ({}));
-        const error = new Error(formatApiError(errData, "Không thể tải file MISA."));
-        error.payload = errData;
-        throw error;
+      try {
+        const response = await exportWithFreshRunContext({
+          apiClient: api,
+          runId,
+          uploadId,
+          targetTemplateId,
+          operationSessionId: session?.sessionId,
+          payload,
+          idempotencyKey,
+        });
+        const disposition = response.headers?.["content-disposition"] || "";
+        const match = disposition.match(/filename="?([^";\n]+)"?/i);
+        return { blob: response.data, filename: match ? match[1] : "Import misa.xls" };
+      } catch (error) {
+        throw gatewayRequestError(error, "Không thể tải file MISA.");
       }
-
-      const blob = await response.blob();
-      const disposition = response.headers.get("Content-Disposition") || "";
-      const match = disposition.match(/filename="?([^";\n]+)"?/i);
-      return { blob, filename: match ? match[1] : "Import misa.xls" };
     },
+    [],
+  );
+
+  const detectAnomalies = useCallback(
+    (sessionId, payload, conversionContextToken) =>
+      requestSessionJson(
+        sessionId,
+        "/anomalies/detect",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        },
+        "Không thể kiểm tra bất thường dữ liệu.",
+        conversionContextToken,
+      ),
+    [],
+  );
+
+  const reviewAnomaly = useCallback(
+    (sessionId, anomalyId, payload, conversionContextToken) =>
+      requestSessionJson(
+        sessionId,
+        `/anomalies/${encodeURIComponent(anomalyId)}/review`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        },
+        "Không thể lưu trạng thái rà soát.",
+        conversionContextToken,
+      ),
+    [],
+  );
+
+  const proposeCorrections = useCallback(
+    (sessionId, payload, conversionContextToken) =>
+      requestSessionJson(
+        sessionId,
+        "/corrections/propose",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        },
+        "Không thể tạo đề xuất sửa hàng loạt.",
+        conversionContextToken,
+      ),
+    [],
+  );
+
+  const simulateCorrections = useCallback(
+    (sessionId, payload, conversionContextToken) =>
+      requestSessionJson(
+        sessionId,
+        "/corrections/simulate",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        },
+        "Không thể xem trước thay đổi.",
+        conversionContextToken,
+      ),
+    [],
+  );
+
+  const applyCorrections = useCallback(
+    (sessionId, payload, conversionContextToken, idempotencyKey) =>
+      requestSessionJson(
+        sessionId,
+        "/corrections/apply",
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Idempotency-Key": idempotencyKey,
+          },
+          body: JSON.stringify(payload),
+        },
+        "Không thể áp dụng thay đổi.",
+        conversionContextToken,
+      ),
+    [],
+  );
+
+  const undoCorrections = useCallback(
+    (sessionId, payload, conversionContextToken, idempotencyKey) =>
+      requestSessionJson(
+        sessionId,
+        "/corrections/undo",
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Idempotency-Key": idempotencyKey,
+          },
+          body: JSON.stringify(payload),
+        },
+        "Không thể hoàn tác correction.",
+        conversionContextToken,
+      ),
+    [],
+  );
+
+  const activateRevision = useCallback(
+    (sessionId, revision, payload, conversionContextToken) =>
+      requestSessionJson(
+        sessionId,
+        `/revisions/${encodeURIComponent(revision)}/activate`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        },
+        "Không thể hoàn tác phiên bản dữ liệu.",
+        conversionContextToken,
+      ),
+    [],
+  );
+
+  const getSessionRevisions = useCallback(
+    (sessionId, conversionContextToken) =>
+      fetchSessionRevisions(sessionId, conversionContextToken),
+    [],
+  );
+
+  const addComparisonFile = useCallback(
+    (sessionId, file, role, mutationContext, conversionContextToken) => {
+      const formData = new FormData();
+      formData.append("file", file);
+      formData.append("role", role);
+      formData.append("revision", String(mutationContext?.revision ?? ""));
+      formData.append("state_hash", mutationContext?.state_hash || "");
+      return requestSessionJson(
+        sessionId,
+        "/comparison-files",
+        { method: "POST", body: formData },
+        "Không thể tải file đối chiếu.",
+        conversionContextToken,
+      );
+    },
+    [],
+  );
+
+  const removeComparisonFile = useCallback(
+    (sessionId, fileId, payload, conversionContextToken) => {
+      const query = new URLSearchParams({
+        revision: String(payload?.revision ?? ""),
+        state_hash: String(payload?.state_hash || ""),
+      });
+      return requestSessionJson(
+        sessionId,
+        `/comparison-files/${encodeURIComponent(fileId)}?${query.toString()}`,
+        {
+          method: "DELETE",
+        },
+        "Không thể bỏ file đối chiếu.",
+        conversionContextToken,
+      );
+    },
+    [],
+  );
+
+  const runReconciliation = useCallback(
+    (sessionId, payload, conversionContextToken) =>
+      requestSessionJson(
+        sessionId,
+        "/reconciliation/run",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        },
+        "Không thể chạy đối chiếu.",
+        conversionContextToken,
+      ),
+    [],
+  );
+
+  const confirmReconciliationMatch = useCallback(
+    (sessionId, reportId, matchId, payload, conversionContextToken) =>
+      requestSessionJson(
+        sessionId,
+        `/reconciliation/${encodeURIComponent(reportId)}/matches/${encodeURIComponent(matchId)}/confirm`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        },
+        "Không thể xác nhận chứng từ đối chiếu.",
+        conversionContextToken,
+      ),
+    [],
+  );
+
+  const askAccountingQuestion = useCallback(
+    (sessionId, payload, conversionContextToken) =>
+      requestSessionJson(
+        sessionId,
+        "/questions",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        },
+        "Không thể trả lời câu hỏi về file này.",
+        conversionContextToken,
+      ),
     [],
   );
 
@@ -206,10 +686,27 @@ export function useConverterApi() {
     templates,
     serviceOnline,
     aiOnline,
+    aiStatus,
+    capabilities,
+    capabilitiesOnline,
     analyzeFile,
     previewMapping,
+    syncMappingSession,
     confirmMapping,
     checkReadiness,
     exportConfirmed,
+    detectAnomalies,
+    reviewAnomaly,
+    proposeCorrections,
+    simulateCorrections,
+    applyCorrections,
+    undoCorrections,
+    activateRevision,
+    getSessionRevisions,
+    addComparisonFile,
+    removeComparisonFile,
+    runReconciliation,
+    confirmReconciliationMatch,
+    askAccountingQuestion,
   };
 }

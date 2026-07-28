@@ -27,6 +27,8 @@ test("conversion run model stores metadata only and defaults to MISA processing"
   assert.equal(run.fileName, "raw.xlsx");
   assert.equal(run.fileSizeBytes, 1234567);
   assert.equal(run.uploadBlob, undefined);
+  assert.equal(run.analysisArtifactKey, "");
+  assert.equal(run.analysisSha256, "");
   assert.equal(run.workspaceNameSnapshot, "BAE Foods");
   assert.equal(run.validateSync(), undefined);
 });

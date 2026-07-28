@@ -81,6 +81,29 @@ ACCOUNTING_MAPPING = {
 }
 
 
+def test_analyze_corrupt_xlsx_returns_structured_client_error_with_cors():
+    response = client.post(
+        "/api/v1/uploads/analyze",
+        headers={"Origin": "http://127.0.0.1:5173"},
+        files={
+            "file": (
+                "invalid.xlsx",
+                b"this is not an Excel workbook",
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+        },
+    )
+
+    assert response.status_code == 422
+    assert response.json() == {
+        "detail": {
+            "code": "corrupt_xlsx",
+            "message": "Không thể đọc file Excel. File có thể bị hỏng hoặc không đúng định dạng .xlsx.",
+        }
+    }
+    assert response.headers["access-control-allow-origin"] == "http://127.0.0.1:5173"
+
+
 def _write_warning_workbook(path: Path) -> Path:
     workbook = openpyxl.Workbook()
     sheet = workbook.active
@@ -96,6 +119,16 @@ def _write_duplicate_warning_workbook(path: Path) -> Path:
     sheet.append(["Mã hóa đơn", "Thời gian", "Tên khách hàng", "Mã hàng", "Số lượng", "Đơn giá"])
     sheet.append(["HD-DUP-001", "2026-01-02", "Khách A", "SP-DUP", 1, 100000])
     sheet.append(["HD-DUP-001", "2026-01-02", "Khách A", "SP-DUP", 1, 100000])
+    workbook.save(path)
+    return path
+
+
+def _write_repeated_item_workbook(path: Path) -> Path:
+    workbook = openpyxl.Workbook()
+    sheet = workbook.active
+    sheet.append(["Mã hóa đơn", "Thời gian", "Tên khách hàng", "Mã hàng", "Số lượng", "Đơn giá"])
+    sheet.append(["HD-MULTI-001", "2026-01-02", "Khách A", "SP-001", 1, 100000])
+    sheet.append(["HD-MULTI-001", "2026-01-02", "Khách A", "SP-001", 2, 90000])
     workbook.save(path)
     return path
 
@@ -159,8 +192,10 @@ def test_healthz():
     response = client.get("/healthz")
 
     assert response.status_code == 200
-    assert response.json()["status"] == "ok"
-    assert response.json()["ai"] in {"disabled", "offline", "online"}
+    assert response.json() == {
+        "status": "ok",
+        "capabilities": {"converter": True, "operations": True},
+    }
 
 
 def test_conversion_types_endpoint():
@@ -204,7 +239,10 @@ def test_convert_endpoint_returns_xls_file_and_cleans_temp_storage():
     with (SAMPLES / "raw_sales_sample.xlsx").open("rb") as handle:
         response = client.post(
             "/api/v1/conversions",
-            data={"conversion_type": "bsn_sales"},
+            data={
+                "conversion_type": "bsn_sales",
+                "options": json.dumps({"allow_calculation_warnings": True}),
+            },
             files={
                 "file": (
                     "raw_sales_sample.xlsx",
@@ -278,6 +316,29 @@ def test_validate_endpoint_returns_calculation_warnings(tmp_path):
     assert warning["expected"] == 100
     assert warning["actual"] == 90
     assert warning["tolerance"] == 1
+
+
+def test_validate_endpoint_allows_same_item_on_distinct_invoice_lines(tmp_path):
+    input_path = _write_repeated_item_workbook(tmp_path / "repeated-item.xlsx")
+
+    with input_path.open("rb") as handle:
+        response = client.post(
+            "/api/v1/conversions/validate",
+            data={"conversion_type": "bsn_sales"},
+            files={
+                "file": (
+                    "repeated-item.xlsx",
+                    handle,
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                )
+            },
+        )
+
+    assert response.status_code == 200
+    assert not any(
+        warning["code"] == "duplicate_invoice_item"
+        for warning in response.json()["warnings"]
+    )
 
 
 def test_convert_endpoint_blocks_calculation_warnings_until_override(tmp_path):
@@ -433,6 +494,32 @@ def test_ai_mapping_suggestions_disabled_provider(tmp_path, monkeypatch):
     assert payload["ok"] is False
     assert payload["provider"] == "disabled"
     assert payload["errors"]
+
+
+def test_legacy_ollama_mode_does_not_bypass_local_ai_gateway(tmp_path, monkeypatch):
+    monkeypatch.setenv("AI_MODE", "ollama")
+    monkeypatch.setattr(
+        "app.ai_assistant.urllib.request.urlopen",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("Direct Ollama forbidden")),
+    )
+    input_path = _write_messy_sales_workbook(tmp_path / "messy.xlsx")
+
+    with input_path.open("rb") as handle:
+        response = client.post(
+            "/api/v1/ai/mapping-suggestions",
+            data={"conversion_type": "bsn_sales"},
+            files={
+                "file": (
+                    "messy.xlsx",
+                    handle,
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                )
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json()["ok"] is False
+    assert "Gateway" in response.json()["errors"][0]
 
 
 def test_ai_mapping_suggestions_do_not_map_purchase_discount_as_unit_price(tmp_path, monkeypatch):
@@ -688,7 +775,8 @@ def test_preview_endpoint_returns_json_rows(tmp_path):
     assert payload["rows"][0]["Số chứng từ (*)"] == "HD-MESS-001"
 
 
-def test_export_rows_endpoint_returns_xls(tmp_path):
+def test_export_rows_endpoint_returns_xls(tmp_path, monkeypatch):
+    monkeypatch.setenv("ALLOW_LEGACY_ROW_EXPORT", "true")
     input_path = _write_messy_sales_workbook(tmp_path / "messy.xlsx")
     options = json.dumps({"column_mapping": MESSY_SALES_MAPPING})
 
@@ -717,3 +805,19 @@ def test_export_rows_endpoint_returns_xls(tmp_path):
     assert response.status_code == 200
     assert response.headers["content-type"].startswith("application/vnd.ms-excel")
     assert "bsn_sales_import.xls" in response.headers["content-disposition"]
+
+
+def test_legacy_client_row_export_is_disabled_without_explicit_opt_in(monkeypatch):
+    monkeypatch.delenv("ALLOW_LEGACY_ROW_EXPORT", raising=False)
+    monkeypatch.delenv("NODE_ENV", raising=False)
+
+    response = client.post(
+        "/api/v1/conversions/export",
+        json={
+            "conversion_type": "bsn_sales",
+            "rows": [{"Số chứng từ (*)": "FORGED"}],
+        },
+    )
+
+    assert response.status_code == 403
+    assert "legacy" in response.json()["detail"].lower()

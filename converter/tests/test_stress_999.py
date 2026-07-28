@@ -41,6 +41,11 @@ def matrix_report_path() -> Path:
     return ARTIFACT_DIR / "stress-999-matrix-report.json"
 
 
+@pytest.fixture(autouse=True)
+def enable_legacy_export_for_legacy_api_tests(monkeypatch):
+    monkeypatch.setenv("ALLOW_LEGACY_ROW_EXPORT", "true")
+
+
 @pytest.mark.parametrize("case_id,profile,conversion_type", matrix_cases())
 def test_matrix_auto_detect_validate_preview_export_convert(
     tmp_path, case_id: str, profile, conversion_type: str

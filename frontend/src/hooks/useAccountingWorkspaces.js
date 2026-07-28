@@ -164,6 +164,11 @@ export function useAccountingWorkspaces() {
     return data;
   }, []);
 
+  const createPersonalConversionContext = useCallback(async () => {
+    const { data } = await api.post("/converter/context");
+    return data;
+  }, []);
+
   return {
     enabled: WORKSPACES_ENABLED,
     workspaces,
@@ -180,6 +185,7 @@ export function useAccountingWorkspaces() {
     activateSnapshot,
     saveAlias,
     createConversionContext,
+    createPersonalConversionContext,
     reload: loadWorkspaces,
   };
 }

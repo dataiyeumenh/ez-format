@@ -87,7 +87,13 @@ def suggest_mapping_for_file(
         return _mock_mapping_response(table.headers, definition.required_source_fields, detected_columns)
 
     if mode == "ollama":
-        return _ollama_mapping_response(table.headers, definition.required_source_fields, detected_columns)
+        return MappingSuggestionResponse(
+            ok=False,
+            provider="ollama",
+            detected_columns=detected_columns,
+            missing_fields=missing_fields,
+            errors=["Direct Ollama đã tắt; hãy gọi AI Local Gateway bằng AI_PROVIDER=remote_http."],
+        )
 
     return MappingSuggestionResponse(
         ok=False,
@@ -115,7 +121,12 @@ def explain_validation_report(
         return _mock_explanation_response(report, provider=mode)
 
     if mode == "ollama":
-        return _ollama_explanation_response(report)
+        return ValidationExplanationResponse(
+            ok=False,
+            provider="ollama",
+            summary="Direct Ollama đã tắt; hãy dùng AI Local Gateway.",
+            errors=["Direct Ollama đã tắt; hãy dùng AI Local Gateway."],
+        )
 
     return ValidationExplanationResponse(
         ok=False,

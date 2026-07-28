@@ -1,3 +1,5 @@
+from datetime import datetime
+
 import xlrd
 
 from app.excel_io import write_xls_from_template
@@ -93,7 +95,7 @@ def test_bsn_sales_export_copies_real_59_column_template_formatting(tmp_path):
     assert output_sheet.ncols == 59
     assert "Số lô" in output_sheet.row_values(template.workbook.header_row_index)
     assert "Hạn sử dụng" in output_sheet.row_values(template.workbook.header_row_index)
-    assert output_sheet.merged_cells == source_sheet.merged_cells
+    assert set(output_sheet.merged_cells) == set(source_sheet.merged_cells)
     assert _col_widths(output_sheet, 59) == _col_widths(source_sheet, 59)
     assert _row_heights(output_sheet, 12) == _row_heights(source_sheet, 12)
     assert _style_signatures(
@@ -101,6 +103,79 @@ def test_bsn_sales_export_copies_real_59_column_template_formatting(tmp_path):
     ) == _style_signatures(
         source_book, source_sheet, template.workbook.header_row_index, 12
     )
+    for row_index in range(template.workbook.header_row_index + 1):
+        assert _style_signatures(output_book, output_sheet, row_index, 59) == (
+            _style_signatures(source_book, source_sheet, row_index, 59)
+        )
+
+
+def test_bsn_sales_export_preserves_each_template_data_row_style(tmp_path):
+    template = next(item for item in list_misa_templates() if item.id == "bsn_sales")
+    output_path = tmp_path / "bsn_sales_row_styles.xls"
+    rows = []
+    for document_number in ("HD-STYLE-1", "HD-STYLE-2"):
+        row = {header: "" for header in template.headers}
+        row["Số chứng từ (*)"] = document_number
+        rows.append(row)
+
+    write_xls_from_template(template.workbook, rows, output_path)
+
+    source_book = xlrd.open_workbook(str(template.workbook.path), formatting_info=True)
+    source_sheet = source_book.sheet_by_index(0)
+    output_book = xlrd.open_workbook(str(output_path), formatting_info=True)
+    output_sheet = output_book.sheet_by_index(0)
+    data_start = template.workbook.header_row_index + 1
+
+    for row_index in range(data_start, data_start + len(rows)):
+        assert _style_signatures(output_book, output_sheet, row_index, 59) == (
+            _style_signatures(source_book, source_sheet, row_index, 59)
+        )
+
+
+def test_export_writes_iso_date_strings_as_excel_date_cells(tmp_path):
+    template = next(item for item in list_misa_templates() if item.id == "bsn_sales")
+    output_path = tmp_path / "bsn_sales_dates.xls"
+    row = {header: "" for header in template.headers}
+    row["Số chứng từ (*)"] = "HD-DATE-001"
+    row["Ngày hạch toán (*)"] = "2025-12-25T17:23:44.267000"
+    row["Ngày chứng từ (*)"] = "2025-12-25T17:23:44.267000"
+    row["Hạn sử dụng"] = "2029-07-01T00:00:00"
+
+    write_xls_from_template(template.workbook, [row], output_path)
+
+    book = xlrd.open_workbook(str(output_path), formatting_info=True)
+    sheet = book.sheet_by_index(0)
+    headers = sheet.row_values(template.workbook.header_row_index)
+    data_row = template.workbook.header_row_index + 1
+
+    for header, expected in (
+        ("Ngày hạch toán (*)", datetime(2025, 12, 25, 17, 23, 44, 267000)),
+        ("Ngày chứng từ (*)", datetime(2025, 12, 25, 17, 23, 44, 267000)),
+        ("Hạn sử dụng", datetime(2029, 7, 1)),
+    ):
+        cell = sheet.cell(data_row, headers.index(header))
+        assert cell.ctype == xlrd.XL_CELL_DATE
+        assert xlrd.xldate_as_datetime(cell.value, book.datemode) == expected
+
+
+def test_export_preserves_template_defined_names(tmp_path):
+    for template_id in ("bsn_purchase", "purchase_service"):
+        template = next(item for item in list_misa_templates() if item.id == template_id)
+        output_path = tmp_path / f"{template_id}_names.xls"
+
+        write_xls_from_template(template.workbook, [], output_path)
+
+        source_book = xlrd.open_workbook(str(template.workbook.path), formatting_info=True)
+        output_book = xlrd.open_workbook(str(output_path), formatting_info=True)
+        source_names = [
+            (name.name, name.scope, name.raw_formula) for name in source_book.name_obj_list
+        ]
+        output_names = [
+            (name.name, name.scope, name.raw_formula) for name in output_book.name_obj_list
+        ]
+
+        assert any(name == "SAVoucher" for name, _, _ in source_names)
+        assert output_names == source_names
 
 
 def test_export_clears_stale_template_data_rows(tmp_path):

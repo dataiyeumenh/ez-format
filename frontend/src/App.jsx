@@ -16,6 +16,7 @@ import ContactPage from "./pages/ContactPage";
 import PaymentPage from "./pages/PaymentPage";
 import PaymentResultPage from "./pages/PaymentResultPage";
 import AccountingWorkspacePage from "./pages/AccountingWorkspacePage";
+import { studentAssistantEnabled } from "./hooks/useStudentAssistantApi";
 
 const AdminDashboard = lazy(() => import("./pages/admin/DashboardPage"));
 const UsersPage = lazy(() => import("./pages/admin/UsersPage"));
@@ -23,6 +24,7 @@ const FilesPage = lazy(() => import("./pages/admin/FilesPage"));
 const PlansPage = lazy(() => import("./pages/admin/PlansPage"));
 const RevenuePage = lazy(() => import("./pages/admin/RevenuePage"));
 const LogsPage = lazy(() => import("./pages/admin/LogsPage"));
+const StudentAssistantPage = lazy(() => import("./pages/StudentAssistantPage"));
 
 function PageLoader() {
   return (
@@ -52,6 +54,20 @@ function App() {
               <ProtectedRoute>
                 <AccountingWorkspacePage />
               </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/student"
+            element={
+              studentAssistantEnabled ? (
+                <ProtectedRoute>
+                  <Suspense fallback={<PageLoader />}>
+                    <StudentAssistantPage />
+                  </Suspense>
+                </ProtectedRoute>
+              ) : (
+                <Navigate to="/" replace />
+              )
             }
           />
           <Route path="/login" element={<LoginPage />} />

@@ -1,11 +1,16 @@
 from __future__ import annotations
 
+from datetime import date, datetime
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from typing import Any
 
+from openpyxl.utils.datetime import from_excel
+
+from app.document_totals import aggregate_document_totals
 from app.excel_io import InputTable
 from app.misa_mapping import (
     apply_mapping,
+    multiply_formula_operands,
     sanitize_defaults_for_template,
     sanitize_mapping_for_template,
 )
@@ -16,14 +21,17 @@ from app.models import (
     MisaReadinessSummary,
 )
 from app.master_data_resolver import MasterDataResolution
+from app.mapping_semantics import validate_mapping_semantics
 from app.normalization import is_blank, normalize_header
 from app.parsing import parse_date, parse_number
+from app.vat_basis import SUPPORTED_BASES, resolve_vat_taxable_base
 
 
 MISA_IMPORT_SOURCE_URL = "https://helpact.misa.vn/kb/html_10050000/"
 MISA_IMPORT_ERROR_SOURCE_URL = (
     "https://helpact.misa.vn/kb/lam-the-nao-khi-nhap-khau-danh-muc-so-du-chung-tu-tu-excel-vao-phan-mem-bao-loi/"
 )
+VAT_POLICY_SOURCE_URL = "https://vanban.chinhphu.vn/?docid=214310&pageid=27160"
 DISCLAIMER = (
     "EzFormat kiểm tra lỗi kỹ thuật/import có thể xác định; kế toán vẫn cần rà soát "
     "nghiệp vụ và quy định áp dụng."
@@ -57,9 +65,23 @@ DOCUMENT_FINGERPRINT_HEADERS = (
     "ten_khach_hang",
     "ma_nha_cung_cap",
     "ten_nha_cung_cap",
-    "thanh_tien",
-    "tien_thue_gtgt",
+    "loai_tien",
+    "ty_gia",
+    "tong_tien_hang",
+    "tong_tien_thanh_toan",
 )
+VAT_RATE_HEADER_HINTS = ("percent_thue_gtgt", "thue_suat")
+ZERO_VAT_MARKERS = {
+    "kct",
+    "kkknt",
+    "khong chiu thue",
+    "không chịu thuế",
+    "khong ke khai nop thue",
+    "không kê khai nộp thuế",
+}
+SUPPORTED_VAT_RATES = {Decimal("0"), Decimal("0.05"), Decimal("0.08"), Decimal("0.10")}
+VAT_8_EFFECTIVE_FROM = date(2025, 7, 1)
+VAT_8_EFFECTIVE_TO = date(2026, 12, 31)
 
 
 def build_readiness_report(
@@ -69,6 +91,7 @@ def build_readiness_report(
     defaults: dict[str, Any] | None = None,
     formulas: dict[str, str] | None = None,
     edited_rows: list[dict[str, Any]] | None = None,
+    vat_basis: str | None = None,
 ) -> MisaReadinessReport:
     template = get_misa_template(target_template_id)
     clean_defaults = sanitize_defaults_for_template(target_template_id, defaults, template.headers)
@@ -93,10 +116,26 @@ def build_readiness_report(
             formulas=formulas,
         )
         _check_source_parseable_values(issues, table, clean_mapping)
+        _check_formula_operands(issues, rows, formulas)
+    semantic_issues = validate_mapping_semantics(
+        target_template_id=target_template_id,
+        template_headers=template.headers,
+        source_headers=table.headers,
+        mapping=clean_mapping,
+        defaults=clean_defaults,
+        formulas=formulas,
+        sample_rows=table.rows[:20],
+    )
+    issues.extend(
+        issue
+        for issue in semantic_issues
+        if issue.code != "required_mapping_missing"
+    )
     _check_required_values(issues, rows, required_headers)
     _check_parseable_values(issues, rows)
     _check_amount_math(issues, rows)
-    _check_vat_math(issues, rows)
+    _check_vat_rate_policy(issues, rows)
+    _check_vat_math(issues, rows, vat_basis=vat_basis)
     _check_duplicate_documents(issues, rows)
     _add_review_warnings(issues, rows, table, clean_mapping)
 
@@ -211,7 +250,11 @@ def _check_parseable_values(
                         source_url=MISA_IMPORT_ERROR_SOURCE_URL,
                     )
                 )
-            if _is_number_header(normalized) and parse_number(value) is None:
+            if (
+                _is_number_header(normalized)
+                and parse_number(value) is None
+                and not _valid_vat_marker(normalized, value)
+            ):
                 issues.append(
                     _issue(
                         severity="blocker",
@@ -259,7 +302,11 @@ def _check_source_parseable_values(
                             source_url=MISA_IMPORT_ERROR_SOURCE_URL,
                         )
                     )
-                if _is_number_header(normalized) and parse_number(value) is None:
+                if (
+                    _is_number_header(normalized)
+                    and parse_number(value) is None
+                    and not _valid_vat_marker(normalized, value)
+                ):
                     issues.append(
                         _issue(
                             severity="blocker",
@@ -276,6 +323,43 @@ def _check_source_parseable_values(
                     )
 
 
+def _check_formula_operands(
+    issues: list[MisaReadinessIssue],
+    rows: list[dict[str, Any]],
+    formulas: dict[str, str],
+) -> None:
+    for row_number, row in enumerate(rows, start=1):
+        for target, expression in formulas.items():
+            if target not in row:
+                continue
+            operands = multiply_formula_operands(expression)
+            if operands is None:
+                continue
+            invalid_operands = [
+                operand for operand in operands if parse_number(row.get(operand)) is None
+            ]
+            if not invalid_operands:
+                continue
+            issues.append(
+                _issue(
+                    severity="blocker",
+                    category="calculation",
+                    code="formula_operand_invalid",
+                    row=row_number,
+                    field=target,
+                    invoice=_invoice(row),
+                    message=(
+                        f"Không thể tính công thức cho {target} vì toán hạng trống "
+                        "hoặc không phải số."
+                    ),
+                    expected="Các toán hạng là số hợp lệ",
+                    actual=", ".join(invalid_operands),
+                    fix_hint="Bổ sung hoặc sửa giá trị nguồn dùng trong công thức.",
+                    source_url=MISA_IMPORT_ERROR_SOURCE_URL,
+                )
+            )
+
+
 def _check_amount_math(issues: list[MisaReadinessIssue], rows: list[dict[str, Any]]) -> None:
     for row_number, row in enumerate(rows, start=1):
         quantity = _decimal(_field(row, "so_luong"))
@@ -287,12 +371,13 @@ def _check_amount_math(issues: list[MisaReadinessIssue], rows: list[dict[str, An
             continue
 
         gross = _money(quantity * unit_price)
+        tolerance = _line_amount_tolerance(quantity, _field(row, "don_gia"))
         accepted = {gross}
         discount = _decimal(_field(row, "tien_chiet_khau"))
         if discount is not None:
             accepted.add(_money(gross - discount))
         actual = _money(amount)
-        if all(abs(actual - expected) > MONEY_TOLERANCE for expected in accepted):
+        if all(abs(actual - expected) > tolerance for expected in accepted):
             closest = min(accepted, key=lambda expected: abs(actual - expected))
             issues.append(
                 _issue(
@@ -312,18 +397,73 @@ def _check_amount_math(issues: list[MisaReadinessIssue], rows: list[dict[str, An
             )
 
 
-def _check_vat_math(issues: list[MisaReadinessIssue], rows: list[dict[str, Any]]) -> None:
+def _check_vat_math(
+    issues: list[MisaReadinessIssue],
+    rows: list[dict[str, Any]],
+    *,
+    vat_basis: str | None = None,
+) -> None:
+    selected_basis = str(vat_basis or "").strip().lower()
+    if selected_basis and selected_basis not in SUPPORTED_BASES:
+        issues.append(
+            _issue(
+                severity="warning",
+                category="tax",
+                code="vat_basis_unknown",
+                field="Tiền thuế GTGT",
+                message="Cơ sở tính thuế GTGT được chọn chưa được hỗ trợ xác định.",
+                expected=", ".join(sorted(SUPPORTED_BASES)),
+                actual=selected_basis,
+                fix_hint="Chọn line_after_discount, line_before_discount hoặc invoice_taxable_base.",
+                source_url=VAT_POLICY_SOURCE_URL,
+            )
+        )
+        selected_basis = ""
+
     for row_number, row in enumerate(rows, start=1):
         amount = _decimal(_field(row, "thanh_tien"))
         vat_amount = _decimal(_field(row, "tien_thue_gtgt"))
-        vat_rate = _vat_rate(_field(row, "percent_thue_gtgt") or _field(row, "thue_suat"))
+        raw_vat_rate = _field(row, "percent_thue_gtgt")
+        if is_blank(raw_vat_rate):
+            raw_vat_rate = _field(row, "thue_suat")
+        vat_rate = _vat_rate(raw_vat_rate)
         if amount is None or vat_amount is None or vat_rate is None:
             continue
 
-        bases = {amount}
         discount = _decimal(_field(row, "tien_chiet_khau"))
-        if discount is not None:
-            bases.add(amount - discount)
+        bases, basis_status = _vat_tax_bases(
+            row,
+            amount,
+            discount,
+            vat_rate,
+            vat_amount,
+            selected_basis,
+        )
+        ambiguous = (
+            basis_status != "resolved"
+            and discount is not None
+            and discount != 0
+            and vat_rate != 0
+            and _money(vat_amount) != 0
+        )
+        if ambiguous:
+            issues.append(
+                _issue(
+                    severity="warning",
+                    category="tax",
+                    code="vat_basis_ambiguous",
+                    row=row_number,
+                    field=_real_field_name(row, "tien_thue_gtgt"),
+                    invoice=_invoice(row),
+                    message="Có chiết khấu nhưng chưa xác định cơ sở tính thuế GTGT trước hay sau chiết khấu.",
+                    expected="Chọn line_after_discount hoặc line_before_discount",
+                    actual=str(discount),
+                    fix_hint="Xác nhận cơ sở tính thuế theo hóa đơn/chứng từ trước khi import.",
+                    source_url=VAT_POLICY_SOURCE_URL,
+                )
+            )
+        if not bases:
+            continue
         accepted = {_money(base * vat_rate) for base in bases}
         actual = _money(vat_amount)
         if all(abs(actual - expected) > MONEY_TOLERANCE for expected in accepted):
@@ -346,11 +486,126 @@ def _check_vat_math(issues: list[MisaReadinessIssue], rows: list[dict[str, Any]]
             )
 
 
+def _vat_tax_bases(
+    row: dict[str, Any],
+    amount: Decimal,
+    discount: Decimal | None,
+    vat_rate: Decimal,
+    vat_amount: Decimal,
+    selected_basis: str,
+) -> tuple[set[Decimal], str]:
+    invoice_base = None
+    if selected_basis == "invoice_taxable_base":
+        invoice_base = _field(row, "tien_hang_chiu_thue")
+        if is_blank(invoice_base):
+            invoice_base = _field(row, "gia_tinh_thue")
+    resolution = resolve_vat_taxable_base(
+        amount=amount,
+        discount=discount,
+        vat_rate=vat_rate,
+        vat_amount=vat_amount,
+        basis=selected_basis,
+        invoice_taxable_base=invoice_base,
+    )
+    if resolution.status == "unknown" and vat_rate == 0:
+        return {amount}, resolution.status
+    if resolution.status == "unknown" and (discount is None or discount == 0):
+        return {amount}, resolution.status
+    if resolution.status != "resolved" or resolution.taxable_base is None:
+        return set(), resolution.status
+    return {resolution.taxable_base}, resolution.status
+
+
+def _check_vat_rate_policy(
+    issues: list[MisaReadinessIssue], rows: list[dict[str, Any]]
+) -> None:
+    for row_number, row in enumerate(rows, start=1):
+        raw_rate = _field(row, "percent_thue_gtgt")
+        if is_blank(raw_rate):
+            raw_rate = _field(row, "thue_suat")
+        if is_blank(raw_rate) or str(raw_rate).strip().lower() in ZERO_VAT_MARKERS:
+            continue
+        rate = _vat_rate(raw_rate)
+        if rate is None or rate in SUPPORTED_VAT_RATES:
+            continue
+        issues.append(
+            _issue(
+                severity="blocker",
+                category="tax",
+                code="vat_rate_unsupported",
+                row=row_number,
+                field=_real_field_name(row, "percent_thue_gtgt")
+                or _real_field_name(row, "thue_suat"),
+                invoice=_invoice(row),
+                message="Thuế suất GTGT không thuộc các mức được cấu hình hỗ trợ.",
+                expected="0%, 5%, 8% hoặc 10%",
+                actual=str(raw_rate),
+                fix_hint="Kiểm tra lại thuế suất và cấu hình chính sách thuế trước khi import.",
+                source_url=VAT_POLICY_SOURCE_URL,
+            )
+        )
+
+    for row_number, row in enumerate(rows, start=1):
+        raw_rate = _field(row, "percent_thue_gtgt")
+        if is_blank(raw_rate):
+            raw_rate = _field(row, "thue_suat")
+        if _vat_rate(raw_rate) != Decimal("0.08"):
+            continue
+        transaction_date = _vat_transaction_date(row)
+        if transaction_date is None:
+            severity = "warning"
+            code = "vat_8_eligibility_uncertain"
+            message = "Thuế suất 8% cần kế toán kiểm tra điều kiện áp dụng theo mặt hàng/nghiệp vụ."
+        elif not (VAT_8_EFFECTIVE_FROM <= transaction_date <= VAT_8_EFFECTIVE_TO):
+            severity = "blocker"
+            code = "vat_8_outside_policy"
+            message = "Ngày giao dịch nằm ngoài khoảng thời gian chính sách 8% đang cấu hình."
+        else:
+            severity = "warning"
+            code = "vat_8_eligibility_uncertain"
+            message = "Thuế suất 8% nằm trong khoảng thời gian chính sách nhưng điều kiện mặt hàng/nghiệp vụ cần được kiểm tra."
+        issues.append(
+            _issue(
+                severity=severity,
+                category="tax",
+                code=code,
+                row=row_number,
+                field=_real_field_name(row, "percent_thue_gtgt")
+                or _real_field_name(row, "thue_suat"),
+                invoice=_invoice(row),
+                message=message,
+                expected="Kế toán xác nhận điều kiện áp dụng",
+                actual=str(raw_rate),
+                fix_hint="Đối chiếu nhóm hàng/dịch vụ và văn bản chính sách trước khi xác nhận cảnh báo.",
+                source_url=VAT_POLICY_SOURCE_URL,
+            )
+        )
+
+
+def _vat_transaction_date(row: dict[str, Any]) -> date | None:
+    for field in ("ngay_hoa_don", "ngay_chung_tu", "ngay_hach_toan"):
+        parsed = parse_date(_field(row, field))
+        if isinstance(parsed, datetime):
+            return parsed.date()
+        if isinstance(parsed, date):
+            return parsed
+        if isinstance(parsed, (int, float)) and not isinstance(parsed, bool):
+            try:
+                excel_date = from_excel(parsed)
+            except (TypeError, ValueError, OverflowError):
+                continue
+            if isinstance(excel_date, datetime):
+                return excel_date.date()
+            if isinstance(excel_date, date):
+                return excel_date
+    return None
+
+
 def _check_duplicate_documents(
     issues: list[MisaReadinessIssue],
     rows: list[dict[str, Any]],
 ) -> None:
-    seen: dict[str, tuple[int, tuple[Any, ...]]] = {}
+    seen: dict[str, tuple[int, dict[str, Any]]] = {}
     for row_number, row in enumerate(rows, start=1):
         key = _document_key(row)
         if not key:
@@ -361,7 +616,12 @@ def _check_duplicate_documents(
             seen[key] = (row_number, fingerprint)
             continue
         previous_row, previous_fingerprint = previous
-        if fingerprint != previous_fingerprint:
+        conflicting_fields = [
+            header
+            for header, value in fingerprint.items()
+            if header in previous_fingerprint and previous_fingerprint[header] != value
+        ]
+        if conflicting_fields:
             issues.append(
                 _issue(
                     severity="blocker",
@@ -377,6 +637,8 @@ def _check_duplicate_documents(
                     source_url=MISA_IMPORT_ERROR_SOURCE_URL,
                 )
             )
+            continue
+        seen[key] = (previous_row, {**previous_fingerprint, **fingerprint})
 
 
 def _add_review_warnings(
@@ -428,12 +690,32 @@ def _reconciliation(
     rows: list[dict[str, Any]],
     mapping: dict[str, Any],
 ) -> dict[str, Any]:
-    invoice_keys = {_document_key(row) for row in rows if _document_key(row)}
+    document_key_header = _output_header(
+        rows,
+        {"so_chung_tu", "so_phieu_nhap", "so_hoa_don", "soct"},
+    )
+    document_total_header = _output_header(rows, {"tong_tien_thanh_toan"})
+    invoice_keys = {
+        str(row.get(document_key_header)).strip()
+        for row in rows
+        if document_key_header and not is_blank(row.get(document_key_header))
+    }
     sum_amount = _sum_decimal(rows, "thanh_tien")
     sum_vat = _sum_decimal(rows, "tien_thue_gtgt")
-    sum_total = _sum_decimal(rows, "tong_tien_thanh_toan") or (
-        (sum_amount or Decimal("0")) + (sum_vat or Decimal("0"))
-    )
+    if document_total_header:
+        total_report = aggregate_document_totals(
+            rows,
+            document_key_fields=[document_key_header] if document_key_header else [],
+            line_amount_field=None,
+            document_total_field=document_total_header,
+        )
+        sum_total = (
+            Decimal(total_report.sum_total)
+            if total_report.status == "complete" and total_report.sum_total is not None
+            else None
+        )
+    else:
+        sum_total = (sum_amount or Decimal("0")) + (sum_vat or Decimal("0"))
     return {
         "input_rows": len(table.rows),
         "output_rows": len(rows),
@@ -445,6 +727,14 @@ def _reconciliation(
             header for header in table.headers if header and header not in set(mapping)
         ],
     }
+
+
+def _output_header(rows: list[dict[str, Any]], normalized_names: set[str]) -> str | None:
+    for row in rows:
+        for header in row:
+            if normalize_header(header) in normalized_names:
+                return header
+    return None
 
 
 def _sum_decimal(rows: list[dict[str, Any]], normalized_field: str) -> Decimal | None:
@@ -471,6 +761,12 @@ def _is_date_header(normalized_header: str) -> bool:
 
 def _is_number_header(normalized_header: str) -> bool:
     return any(hint in normalized_header for hint in NUMBER_HEADER_HINTS)
+
+
+def _valid_vat_marker(normalized_header: str, value: Any) -> bool:
+    return any(hint in normalized_header for hint in VAT_RATE_HEADER_HINTS) and (
+        str(value).strip().lower() in ZERO_VAT_MARKERS
+    )
 
 
 def _field(row: dict[str, Any], normalized_name: str) -> Any:
@@ -501,11 +797,20 @@ def _money(value: Decimal) -> Decimal:
     return value.quantize(Decimal("1"), rounding=ROUND_HALF_UP)
 
 
+def _line_amount_tolerance(quantity: Decimal, raw_unit_price: Any) -> Decimal:
+    parsed_unit_price = parse_number(raw_unit_price)
+    if parsed_unit_price is None:
+        return MONEY_TOLERANCE
+    decimal_price = Decimal(str(parsed_unit_price))
+    quantum = Decimal("1").scaleb(decimal_price.as_tuple().exponent)
+    return max(MONEY_TOLERANCE, abs(quantity) * quantum / 2)
+
+
 def _vat_rate(value: Any) -> Decimal | None:
     if is_blank(value):
         return None
     text = str(value).strip().lower()
-    if text in {"kct", "không chịu thuế", "khong chiu thue"}:
+    if text in ZERO_VAT_MARKERS:
         return Decimal("0")
     parsed = _decimal(value)
     if parsed is None:
@@ -542,8 +847,12 @@ def _document_key(row: dict[str, Any]) -> str | None:
     return "|".join([*qualifiers, invoice_number])
 
 
-def _document_fingerprint(row: dict[str, Any]) -> tuple[Any, ...]:
-    return tuple(_normalize_fingerprint_value(_field(row, header)) for header in DOCUMENT_FINGERPRINT_HEADERS)
+def _document_fingerprint(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        header: _normalize_fingerprint_value(value)
+        for header in DOCUMENT_FINGERPRINT_HEADERS
+        if not is_blank(value := _field(row, header))
+    }
 
 
 def _normalize_fingerprint_value(value: Any) -> Any:

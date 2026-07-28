@@ -331,6 +331,7 @@ const UsersPage = () => {
             <div className="flex items-center gap-2">
               <span className="text-sm text-gray-500 font-medium">Bộ lọc:</span>
               <select
+                aria-label="Lọc người dùng theo gói dịch vụ"
                 value={filterPlan}
                 onChange={(e) => {
                   setFilterPlan(e.target.value);
@@ -346,6 +347,7 @@ const UsersPage = () => {
                 ))}
               </select>
               <select
+                aria-label="Lọc người dùng theo trạng thái"
                 value={filterStatus}
                 onChange={(e) => {
                   setFilterStatus(e.target.value);
@@ -635,6 +637,7 @@ const UsersPage = () => {
                 </label>
                 <input
                   type="text"
+                  aria-label="Họ và tên"
                   value={editForm.name}
                   onChange={(e) =>
                     setEditForm((prev) => ({ ...prev, name: e.target.value }))
@@ -649,6 +652,7 @@ const UsersPage = () => {
                 </label>
                 <input
                   type="email"
+                  aria-label="Email"
                   value={editForm.email}
                   onChange={(e) =>
                     setEditForm((prev) => ({ ...prev, email: e.target.value }))
@@ -662,6 +666,7 @@ const UsersPage = () => {
                   Gói dịch vụ
                 </label>
                 <select
+                  aria-label="Gói dịch vụ"
                   value={editForm.plan || freePlanId}
                   onChange={(e) =>
                     setEditForm((prev) => ({ ...prev, plan: e.target.value }))
@@ -683,6 +688,7 @@ const UsersPage = () => {
                   </label>
                   <input
                     type="number"
+                    aria-label="Số lượt chuyển đổi"
                     min="0"
                     step="1"
                     value={editForm.fileCredits}
@@ -706,6 +712,7 @@ const UsersPage = () => {
                   Trạng thái
                 </label>
                 <select
+                  aria-label="Trạng thái"
                   value={editForm.isActive ? "active" : "banned"}
                   onChange={(e) =>
                     setEditForm((prev) => ({
@@ -781,6 +788,7 @@ const UsersPage = () => {
                   </label>
                   <input
                     type={f.type}
+                    aria-label={f.label}
                     placeholder={f.placeholder}
                     value={addForm[f.key]}
                     onChange={(e) =>
@@ -799,6 +807,7 @@ const UsersPage = () => {
                   Gói dịch vụ
                 </label>
                 <select
+                  aria-label="Gói dịch vụ"
                   value={addForm.plan || freePlanId}
                   onChange={(e) =>
                     setAddForm((prev) => ({ ...prev, plan: e.target.value }))

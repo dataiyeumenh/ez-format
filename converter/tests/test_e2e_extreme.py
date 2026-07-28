@@ -10,6 +10,7 @@ from io import BytesIO
 from pathlib import Path
 
 import openpyxl
+import pytest
 import xlrd
 from fastapi.testclient import TestClient
 
@@ -20,6 +21,11 @@ from app.main import app
 ROOT = Path(__file__).resolve().parents[1]
 SAMPLES = ROOT / "fixtures" / "samples"
 client = TestClient(app)
+
+
+@pytest.fixture(autouse=True)
+def enable_legacy_export_for_legacy_api_tests(monkeypatch):
+    monkeypatch.setenv("ALLOW_LEGACY_ROW_EXPORT", "true")
 
 SALES_HEADERS = [
     "Mã hóa đơn",
@@ -72,8 +78,10 @@ def _kind_path(conversion_type: str, tmp_path: Path) -> Path:
 
 def test_health_and_conversion_types_catalog():
     health = client.get("/healthz").json()
-    assert health["status"] == "ok"
-    assert health["ai"] in {"disabled", "offline", "online"}
+    assert health == {
+        "status": "ok",
+        "capabilities": {"converter": True, "operations": True},
+    }
     payload = client.get("/api/v1/conversion-types").json()
     ids = {item["id"] for item in payload["items"]}
     assert ids == set(CONVERSION_TYPES.keys())

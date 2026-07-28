@@ -48,6 +48,83 @@ def test_verify_conversion_context_token(monkeypatch):
     assert claims["snapshot_set_hash"] == "hash-1"
 
 
+def test_verify_context_rejects_jwt_secret_fallback_in_production(monkeypatch):
+    monkeypatch.setenv("NODE_ENV", "production")
+    monkeypatch.delenv("CONVERSION_CONTEXT_SECRET", raising=False)
+    monkeypatch.setenv("JWT_SECRET", "general-auth-secret")
+    monkeypatch.setenv("CONVERSION_CONTEXT_ALLOW_JWT_SECRET_FALLBACK", "true")
+    token = _token(
+        {
+            "purpose": "misa_conversion",
+            "user_id": "user-1",
+            "owner_scope": "user:user-1",
+            "workspace_id": None,
+            "exp": int(time.time()) + 60,
+        },
+        secret="general-auth-secret",
+    )
+
+    with pytest.raises(ConversionContextError, match="CONVERSION_CONTEXT_SECRET"):
+        verify_conversion_context_token(token)
+
+
+def test_verify_context_allows_explicit_jwt_fallback_only_in_development(monkeypatch):
+    monkeypatch.setenv("NODE_ENV", "development")
+    monkeypatch.delenv("CONVERSION_CONTEXT_SECRET", raising=False)
+    monkeypatch.setenv("JWT_SECRET", "general-auth-secret")
+    monkeypatch.setenv("CONVERSION_CONTEXT_ALLOW_JWT_SECRET_FALLBACK", "true")
+    token = _token(
+        {
+            "purpose": "misa_conversion",
+            "user_id": "user-1",
+            "owner_scope": "user:user-1",
+            "workspace_id": None,
+            "exp": int(time.time()) + 60,
+        },
+        secret="general-auth-secret",
+    )
+
+    claims = verify_conversion_context_token(token)
+
+    assert claims["owner_scope"] == "user:user-1"
+
+
+def test_verify_personal_conversion_context_token(monkeypatch):
+    monkeypatch.setenv("CONVERSION_CONTEXT_SECRET", "test-secret")
+    token = _token(
+        {
+            "purpose": "misa_conversion",
+            "user_id": "user-1",
+            "owner_scope": "user:user-1",
+            "workspace_id": None,
+            "snapshot_set_hash": None,
+            "exp": int(time.time()) + 60,
+        }
+    )
+
+    claims = verify_conversion_context_token(token)
+
+    assert claims["owner_scope"] == "user:user-1"
+    assert claims["workspace_id"] is None
+
+
+def test_verify_rejects_personal_context_with_mismatched_owner(monkeypatch):
+    monkeypatch.setenv("CONVERSION_CONTEXT_SECRET", "test-secret")
+    token = _token(
+        {
+            "purpose": "misa_conversion",
+            "user_id": "user-1",
+            "owner_scope": "user:user-2",
+            "workspace_id": None,
+            "snapshot_set_hash": None,
+            "exp": int(time.time()) + 60,
+        }
+    )
+
+    with pytest.raises(ConversionContextError, match="owner scope"):
+        verify_conversion_context_token(token)
+
+
 def test_verify_rejects_tampered_token(monkeypatch):
     monkeypatch.setenv("CONVERSION_CONTEXT_SECRET", "test-secret")
     token = _token(

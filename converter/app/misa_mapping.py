@@ -5,6 +5,7 @@ import json
 import re
 from dataclasses import dataclass
 from datetime import date, datetime
+from decimal import Decimal
 from typing import Any
 
 from app.conversion_types import CONVERSION_TYPES
@@ -26,6 +27,12 @@ NUMERIC_TARGET_HINTS = (
     "đơn giá vốn",
     "tiền vốn",
 )
+HIGH_RISK_AUTO_DEFAULT_HEADERS = {
+    "ma_khach_hang",
+    "ma_kho",
+    "ma_nha_cung_cap",
+    "dvt",
+}
 
 
 BSN_SALES_DIRECT_MAPPING: dict[str, MappingValue] = {
@@ -52,12 +59,10 @@ BSN_SALES_FORMULAS = {
     "Thành tiền": "${Số lượng} * ${Đơn giá}",
 }
 
-BSN_SALES_DEFAULTS = {
-    "Mã khách hàng": "KH_LE",
-}
+BSN_SALES_DEFAULTS: dict[str, Any] = {}
 
 MISA_PURCHASE_DOMESTIC_DIRECT_MAPPING: dict[str, MappingValue] = {
-    "Phân loại": ["Hình thức mua hàng", "TK kho/TK chi phí (*)"],
+    "Phân loại": "Hình thức mua hàng",
     "HTTT": "Phương thức thanh toán",
     "NGAYCT": ["Ngày hạch toán (*)", "Ngày chứng từ (*)"],
     "SOCT": "Số phiếu nhập (*)",
@@ -176,7 +181,7 @@ def heuristic_suggestion(
         warnings.extend(
             [
                 "Mã hàng đang dùng tên mặt hàng vì file nguồn không có mã riêng; cần kiểm tra danh mục MISA.",
-                "TK kho/TK chi phí được gợi ý theo phân loại Hàng hóa/Dịch vụ; kế toán cần rà soát tài khoản thực tế.",
+                "TK kho/TK chi phí chưa được tự chọn theo phân loại Hàng hóa/Dịch vụ; cần ánh xạ thủ công hoặc dùng cấu hình doanh nghiệp đã phê duyệt.",
                 "Phương thức thanh toán lấy nguyên văn từ file nguồn; cần rà soát giá trị được MISA chấp nhận.",
             ]
         )
@@ -190,6 +195,7 @@ def heuristic_suggestion(
         if key in target_headers
     }
     defaults = sanitize_defaults_for_template(target_template_id, defaults, target_headers)
+    defaults = _safe_auto_defaults(defaults)
     formulas = {
         key: value
         for key, value in (BSN_SALES_FORMULAS if target_template_id == "bsn_sales" else {}).items()
@@ -197,7 +203,7 @@ def heuristic_suggestion(
     }
     required_hits = _required_hits(target_template_id, mapping)
     confidence = min(0.95, 0.45 + required_hits * 0.08 + len(mapping) * 0.02)
-    missing_required = _missing_required(target_template_id, mapping)
+    missing_required = _missing_required(target_template_id, mapping, defaults)
     if missing_required:
         warnings.append(
             "Thiếu mapping cho cột bắt buộc: " + ", ".join(missing_required)
@@ -263,6 +269,7 @@ def normalize_ai_suggestion(
         {**fallback.defaults, **ai_defaults},
         target_headers,
     )
+    defaults = _safe_auto_defaults(defaults)
     formulas = _clean_target_dict(payload.get("formulas"), target_headers) or fallback.formulas
     confidence = payload.get("confidence", fallback.confidence)
     try:
@@ -274,7 +281,7 @@ def normalize_ai_suggestion(
         for warning in fallback.warnings
         if not warning.startswith("Thiếu mapping cho cột bắt buộc:")
     ]
-    remaining_missing = _missing_required(target_template_id, mapping)
+    remaining_missing = _missing_required(target_template_id, mapping, defaults)
     if remaining_missing:
         warnings.append(
             "Thiếu mapping cho cột bắt buộc: " + ", ".join(remaining_missing)
@@ -303,6 +310,23 @@ def _merge_mapping(base: dict[str, Any], override: dict[str, Any]) -> dict[str, 
 def sanitize_mapping_for_template(
     target_template_id: str, mapping: dict[str, MappingValue]
 ) -> dict[str, MappingValue]:
+    if target_template_id == "misa_purchase_domestic":
+        output: dict[str, MappingValue] = {}
+        for raw_header, target_spec in mapping.items():
+            targets = target_spec if isinstance(target_spec, list) else [target_spec]
+            normalized_source = normalize_header(raw_header)
+            explicit_account_source = normalized_source.startswith("tk") or (
+                "tai_khoan" in normalized_source
+            )
+            retained = [
+                target
+                for target in targets
+                if target not in {"TK kho/TK chi phí (*)", "TK công nợ/TK tiền (*)"}
+                or explicit_account_source
+            ]
+            if retained:
+                output[raw_header] = retained[0] if len(retained) == 1 else retained
+        return output
     if target_template_id != "bsn_sales":
         return mapping
     return {
@@ -373,17 +397,12 @@ def transform_value(value: Any, target_header: str) -> Any:
             return "Mua hàng trong nước nhập kho"
         return _clean_text(value)
     if normalized_target == "tk_kho_tk_chi_phi":
-        classification = normalize_header(_clean_text(value))
-        if classification == "dich_vu":
-            return "6428"
-        if classification in {"hang_hoa", "vat_tu"}:
-            return "1561"
-        return ""
+        return _clean_text(value)
     if normalized_target == "percent_thue_gtgt":
         parsed_number = parse_number(value)
         if parsed_number is None:
             return _clean_text(value)
-        return int(parsed_number) if float(parsed_number).is_integer() else parsed_number
+        return _normalized_numeric_value(parsed_number)
     if normalized_target == "han_su_dung" and isinstance(value, (datetime, date)):
         return value
     if normalized_target == "so_chung_tu":
@@ -397,17 +416,26 @@ def transform_value(value: Any, target_header: str) -> Any:
         parsed_number = parse_number(value)
         if parsed_number is None:
             return ""
-        return int(parsed_number) if float(parsed_number).is_integer() else parsed_number
+        return _normalized_numeric_value(parsed_number)
     return _clean_text(value)
 
 
-def evaluate_formula(expression: str, record: dict[str, Any]) -> Any:
+def multiply_formula_operands(expression: str) -> tuple[str, str] | None:
     multiply_match = re.fullmatch(r"\$\{(.+?)\}\s*\*\s*\$\{(.+?)\}", expression.strip())
-    if multiply_match:
-        left = parse_number(record.get(multiply_match.group(1))) or 0
-        right = parse_number(record.get(multiply_match.group(2))) or 0
+    if multiply_match is None:
+        return None
+    return multiply_match.group(1), multiply_match.group(2)
+
+
+def evaluate_formula(expression: str, record: dict[str, Any]) -> Any:
+    operands = multiply_formula_operands(expression)
+    if operands is not None:
+        left = parse_number(record.get(operands[0]))
+        right = parse_number(record.get(operands[1]))
+        if left is None or right is None:
+            return ""
         result = left * right
-        return int(result) if float(result).is_integer() else result
+        return _normalized_numeric_value(result)
 
     def replace(match: re.Match[str]) -> str:
         value = record.get(match.group(1), "")
@@ -417,7 +445,11 @@ def evaluate_formula(expression: str, record: dict[str, Any]) -> Any:
 
 
 def validate_mapping(
-    target_template_id: str, mapping: dict[str, Any], target_headers: list[str]
+    target_template_id: str,
+    mapping: dict[str, Any],
+    target_headers: list[str],
+    defaults: dict[str, Any] | None = None,
+    formulas: dict[str, str] | None = None,
 ) -> list[dict[str, str]]:
     issues: list[dict[str, str]] = []
     for raw_header, target_spec in mapping.items():
@@ -431,7 +463,11 @@ def validate_mapping(
                         "message": f"Target header '{target}' is not in template {target_template_id}.",
                     }
                 )
-    for missing in _missing_required(target_template_id, mapping):
+    resolved_defaults = {
+        **(defaults or {}),
+        **{key: value for key, value in (formulas or {}).items() if value},
+    }
+    for missing in _missing_required(target_template_id, mapping, resolved_defaults):
         issues.append(
             {
                 "field": missing,
@@ -487,18 +523,31 @@ def _required_hits(target_template_id: str, mapping: dict[str, Any]) -> int:
     return sum(
         1
         for header in CONVERSION_TYPES[target_template_id].required_output_headers
-        if header in mapped_targets or header in CONVERSION_TYPES[target_template_id].defaults
+        if header in mapped_targets
     )
 
 
-def _missing_required(target_template_id: str, mapping: dict[str, Any]) -> list[str]:
+def _missing_required(
+    target_template_id: str,
+    mapping: dict[str, Any],
+    defaults: dict[str, Any] | None = None,
+) -> list[str]:
     mapped_targets = _mapped_targets(mapping)
-    defaults = CONVERSION_TYPES[target_template_id].defaults
+    supplied_defaults = defaults or {}
     return [
         header
         for header in CONVERSION_TYPES[target_template_id].required_output_headers
-        if header not in mapped_targets and header not in defaults
+        if header not in mapped_targets and header not in supplied_defaults
     ]
+
+
+def _safe_auto_defaults(defaults: dict[str, Any]) -> dict[str, Any]:
+    return {
+        header: value
+        for header, value in defaults.items()
+        if not normalize_header(header).startswith("tk_")
+        and normalize_header(header) not in HIGH_RISK_AUTO_DEFAULT_HEADERS
+    }
 
 
 def _mapped_targets(mapping: dict[str, Any]) -> set[str]:
@@ -539,9 +588,18 @@ def _clean_text(value: Any) -> str:
     return str(value).strip()
 
 
+def _normalized_numeric_value(value: int | float | Decimal) -> int | float | Decimal:
+    if isinstance(value, Decimal):
+        return int(value) if value == value.to_integral_value() else value
+    return int(value) if float(value).is_integer() else value
+
+
 def _clean_invoice_number(value: Any) -> str:
     text = _clean_text(value)
-    return re.sub(r"_\d+$", "", text)
+    text = re.sub(r"__EZ_FORMAT_ROW_\d+$", "", text, flags=re.IGNORECASE)
+    # KiotViet-style exported invoice IDs may carry a generated row suffix;
+    # keep generic invoice suffixes such as INV_001 untouched.
+    return re.sub(r"^(HDO\d{10,})_\d+$", r"\1", text, flags=re.IGNORECASE)
 
 
 def _normalize_unit(value: Any) -> str:
