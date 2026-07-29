@@ -1,4 +1,5 @@
 const assert = require("node:assert/strict");
+const express = require("express");
 const test = require("node:test");
 
 process.env.JWT_SECRET ||= "main-contract-test-secret";
@@ -8,36 +9,11 @@ const User = require("../models/User");
 const googleAuth = require("../services/googleAuth");
 const originalFindOne = User.findOne;
 const originalVerifyGoogleCredential = googleAuth.verifyGoogleCredential;
+const requireDbPath = require.resolve("../middleware/requireDb");
+const originalRequireDb = require.cache[requireDbPath];
 
-googleAuth.verifyGoogleCredential = async () => ({
-  googleId: "google-user-id",
-  email: "google@example.com",
-  name: "Google User",
-  avatar: "",
-});
-delete require.cache[require.resolve("../controllers/authController")];
-const { login, googleLogin } = require("../controllers/authController");
-
-test.after(() => {
-  User.findOne = originalFindOne;
-  googleAuth.verifyGoogleCredential = originalVerifyGoogleCredential;
-  delete require.cache[require.resolve("../controllers/authController")];
-});
-
-function createResponse() {
-  return {
-    statusCode: 200,
-    body: null,
-    status(statusCode) {
-      this.statusCode = statusCode;
-      return this;
-    },
-    json(body) {
-      this.body = body;
-      return this;
-    },
-  };
-}
+let server;
+let baseUrl;
 
 function createUser({ isActive = true, googleId = null } = {}) {
   return {
@@ -72,63 +48,115 @@ function createUser({ isActive = true, googleId = null } = {}) {
   };
 }
 
-test("email/password login returns a token for an active account", async () => {
+async function post(path, body) {
+  const response = await fetch(`${baseUrl}${path}`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  return { status: response.status, body: await response.json() };
+}
+
+test.before(async () => {
+  googleAuth.verifyGoogleCredential = async () => ({
+    googleId: "google-user-id",
+    email: "google@example.com",
+    name: "Google User",
+    avatar: "",
+  });
+  require.cache[requireDbPath] = {
+    id: requireDbPath,
+    filename: requireDbPath,
+    loaded: true,
+    exports: (_req, _res, next) => next(),
+  };
+  delete require.cache[require.resolve("../controllers/authController")];
+  delete require.cache[require.resolve("../routes/auth")];
+
+  const app = express();
+  app.use(express.json());
+  app.use("/api/auth", require("../routes/auth"));
+  server = await new Promise((resolve) => {
+    const listeningServer = app.listen(0, "127.0.0.1", () => resolve(listeningServer));
+  });
+  baseUrl = `http://127.0.0.1:${server.address().port}`;
+});
+
+test.after(async () => {
+  if (server) {
+    await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  }
+  User.findOne = originalFindOne;
+  googleAuth.verifyGoogleCredential = originalVerifyGoogleCredential;
+  if (originalRequireDb) require.cache[requireDbPath] = originalRequireDb;
+  else delete require.cache[requireDbPath];
+  delete require.cache[require.resolve("../controllers/authController")];
+  delete require.cache[require.resolve("../routes/auth")];
+});
+
+test("POST /api/auth/login runs route validation before the controller", async () => {
+  const response = await post("/api/auth/login", { email: "not-an-email" });
+
+  assert.equal(response.status, 400);
+  assert.equal(response.body.success, false);
+  assert.ok(Array.isArray(response.body.errors));
+});
+
+test("POST /api/auth/login returns a token for an active account", async () => {
   const user = createUser();
   User.findOne = () => ({
     select() {
-      return {
-        populate: async () => user,
-      };
+      return { populate: async () => user };
     },
   });
-  const res = createResponse();
 
-  await login({ body: { email: user.email, password: "correct-password" } }, res);
+  const response = await post("/api/auth/login", {
+    email: user.email,
+    password: "correct-password",
+  });
 
-  assert.equal(res.statusCode, 200);
-  assert.equal(res.body.success, true);
-  assert.equal(typeof res.body.token, "string");
-  assert.equal(res.body.user.email, user.email);
+  assert.equal(response.status, 200);
+  assert.equal(response.body.success, true);
+  assert.equal(typeof response.body.token, "string");
+  assert.equal(response.body.user.email, user.email);
 });
 
-test("email/password login blocks an inactive account", async () => {
+test("POST /api/auth/login blocks an inactive account", async () => {
   const user = createUser({ isActive: false });
   User.findOne = () => ({
     select() {
-      return {
-        populate: async () => user,
-      };
+      return { populate: async () => user };
     },
   });
-  const res = createResponse();
 
-  await login({ body: { email: user.email, password: "correct-password" } }, res);
+  const response = await post("/api/auth/login", {
+    email: user.email,
+    password: "correct-password",
+  });
 
-  assert.equal(res.statusCode, 403);
-  assert.equal(res.body.success, false);
+  assert.equal(response.status, 403);
+  assert.equal(response.body.success, false);
 });
 
-test("Google login returns a token but blocks an inactive linked account", async () => {
+test("POST /api/auth/google returns a token but blocks an inactive linked account", async () => {
   const activeUser = createUser({ googleId: "google-user-id" });
-  User.findOne = () => ({
-    select: async () => activeUser,
+  User.findOne = () => ({ select: async () => activeUser });
+
+  const activeResponse = await post("/api/auth/google", {
+    credential: "verified-credential",
   });
-  const activeResponse = createResponse();
 
-  await googleLogin({ body: { credential: "verified-credential" } }, activeResponse);
-
-  assert.equal(activeResponse.statusCode, 200);
+  assert.equal(activeResponse.status, 200);
   assert.equal(activeResponse.body.success, true);
   assert.equal(typeof activeResponse.body.token, "string");
 
   const inactiveUser = createUser({ isActive: false, googleId: "google-user-id" });
-  User.findOne = () => ({
-    select: async () => inactiveUser,
+  User.findOne = () => ({ select: async () => inactiveUser });
+
+  const inactiveResponse = await post("/api/auth/google", {
+    credential: "verified-credential",
   });
-  const inactiveResponse = createResponse();
 
-  await googleLogin({ body: { credential: "verified-credential" } }, inactiveResponse);
-
-  assert.equal(inactiveResponse.statusCode, 403);
+  assert.equal(inactiveResponse.status, 403);
   assert.equal(inactiveResponse.body.success, false);
 });

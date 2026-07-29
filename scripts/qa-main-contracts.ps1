@@ -19,6 +19,6 @@ try {
 
 Push-Location (Join-Path $Root "frontend")
 try {
-    node --test "src/pages/PaymentPage.contract.test.mjs"
+    npm exec -- vitest run "src/pages/PaymentPage.contract.test.mjs"
     if ($LASTEXITCODE -ne 0) { throw "Main frontend contract tests failed with exit code $LASTEXITCODE" }
 } finally { Pop-Location }

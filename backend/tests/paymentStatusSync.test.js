@@ -48,8 +48,10 @@ test("PayOS sync applies a paid per-file plan exactly once", async () => {
   };
 
   const result = await syncPaymentStatusFromPayOS(payment);
+  const repeatedResult = await syncPaymentStatusFromPayOS(payment);
 
   assert.equal(result.status, "paid");
+  assert.equal(repeatedResult.status, "paid");
   assert.equal(user.plan, "perfile-plan");
   assert.equal(user.fileCredits, 3);
   assert.equal(saves, 1);

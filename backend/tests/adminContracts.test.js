@@ -4,7 +4,6 @@ const test = require("node:test");
 const User = require("../models/User");
 const originalFindById = User.findById;
 const { updateUser, deleteUser } = require("../controllers/adminController");
-const adminRouter = require("../routes/admin");
 
 test.after(() => {
   User.findById = originalFindById;
@@ -45,19 +44,7 @@ test("admin cannot edit or ban their own account", async () => {
   assert.equal(admin.isActive, true);
 });
 
-test("admin router keeps users, plans, revenue, files, and coupon routes", () => {
-  const routes = adminRouter.stack
-    .filter((layer) => layer.route)
-    .map((layer) => `${Object.keys(layer.route.methods).join(",")}:${layer.route.path}`);
-
-  assert.ok(routes.includes("get,post:/users"));
-  assert.ok(routes.includes("get,post:/plans"));
-  assert.ok(routes.includes("get:/revenue"));
-  assert.ok(routes.includes("get:/conversion-runs"));
-  assert.ok(routes.includes("get,post:/coupons"));
-});
-
-test("server mounts auth, admin, payment, and revenue contracts", () => {
+test("server exposes main admin, payment, and revenue routes through HTTP", async () => {
   const originalLog = console.log;
   let app;
   try {
@@ -67,16 +54,27 @@ test("server mounts auth, admin, payment, and revenue contracts", () => {
     console.log = originalLog;
   }
 
-  const mounts = app._router.stack
-    .filter((layer) => layer.regexp)
-    .map((layer) => String(layer.regexp));
-  const directPaths = app._router.stack
-    .filter((layer) => layer.route)
-    .map((layer) => layer.route.path);
+  const server = await new Promise((resolve) => {
+    const listeningServer = app.listen(0, "127.0.0.1", () => resolve(listeningServer));
+  });
+  const baseUrl = `http://127.0.0.1:${server.address().port}`;
 
-  assert.ok(mounts.some((mount) => mount.includes("api\\/auth")));
-  assert.ok(mounts.some((mount) => mount.includes("api\\/admin")));
-  assert.ok(mounts.some((mount) => mount.includes("api\\/payments")));
-  assert.ok(directPaths.includes("/api/revenue"));
-  assert.ok(directPaths.includes("/admin/revenue"));
+  try {
+    for (const path of [
+      "/api/admin/users",
+      "/api/admin/plans",
+      "/api/admin/revenue",
+      "/api/admin/conversion-runs",
+      "/api/admin/coupons",
+      "/api/payments/contract-test",
+      "/api/revenue",
+      "/admin/revenue",
+    ]) {
+      const response = await fetch(`${baseUrl}${path}`);
+      assert.notEqual(response.status, 404, `${path} must remain mounted`);
+      assert.ok([401, 503].includes(response.status), `${path} must hit an auth or DB guard`);
+    }
+  } finally {
+    await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  }
 });
