@@ -1,0 +1,100 @@
+base_sha: 8d1a9343dc98a8abb715fe7efc8df9adf65a10fa
+source_sha: 1a1d0e6971ccf5bd1140e676c63a5210a1111cbe
+rollback_ref: rollback/main-pre-experimental-integration-20260730-055323
+rules:
+  - path: docs/qa/main-first-integration-baseline.md
+    owner: regenerate
+    reason: integration QA baseline receipt
+  - path: package.json
+    owner: main
+    reason: main workspace command contract
+  - path: scripts/qa-main-integration.ps1
+    owner: main
+    reason: main integration release gate
+  - path: docs/integration/main-experimental-transplant.yml
+    owner: main
+    reason: deterministic integration ownership policy
+  - path: scripts/verify-transplant-manifest.ps1
+    owner: main
+    reason: deterministic integration ownership gate
+  - path: backend/controllers/authController.js
+    owner: main
+    reason: production auth contract
+  - path: backend/.env.example
+    owner: compose
+    reason: shared deployment environment boundary
+  - path: backend/server.js
+    owner: compose
+    reason: shared route and startup boundary
+  - path: backend/controllers/accountingWorkspaceController.js
+    owner: compose
+    reason: shared accounting workspace boundary
+  - path: backend/controllers/conversionRunController.js
+    owner: compose
+    reason: shared conversion run boundary
+  - path: backend/routes/internal.js
+    owner: compose
+    reason: shared internal route boundary
+  - path: backend/services/conversionContextService.js
+    owner: compose
+    reason: shared conversion context boundary
+  - path: backend/services/conversionCreditService.js
+    owner: compose
+    reason: shared conversion credit boundary
+  - path: backend/services/mappingProfileService.js
+    owner: compose
+    reason: shared mapping profile boundary
+  - path: converter/.env.example
+    owner: compose
+    reason: shared converter environment boundary
+  - path: converter/app/ai_gateway.py
+    owner: compose
+    reason: shared AI gateway boundary
+  - path: converter/app/excel_io.py
+    owner: compose
+    reason: shared spreadsheet I/O boundary
+  - path: converter/app/import_result_parser.py
+    owner: source
+    reason: final-reviewed MISA repair parser
+  - path: converter/app/main.py
+    owner: compose
+    reason: shared FastAPI registration boundary
+  - path: converter/app/mapping_profile_client.py
+    owner: compose
+    reason: shared mapping profile client boundary
+  - path: converter/app/master_data_client.py
+    owner: compose
+    reason: shared master data client boundary
+  - path: converter/app/misa_profiles.py
+    owner: compose
+    reason: shared MISA profiles boundary
+  - path: converter/app/misa_readiness.py
+    owner: compose
+    reason: shared MISA readiness boundary
+  - path: converter/app/misa_workflow.py
+    owner: compose
+    reason: shared MISA workflow boundary
+  - path: frontend/.env.example
+    owner: compose
+    reason: shared frontend environment boundary
+  - path: frontend/package.json
+    owner: compose
+    reason: shared frontend dependency boundary
+  - path: frontend/src/App.jsx
+    owner: compose
+    reason: main coupon routes plus feature-gated student routes
+  - path: frontend/src/components/admin/AdminLayout.jsx
+    owner: compose
+    reason: shared admin layout boundary
+  - path: frontend/src/pages/ConvertPage.jsx
+    owner: compose
+    reason: shared conversion page boundary
+  - path: frontend/src/services/api.js
+    owner: compose
+    reason: shared browser API boundary
+excluded:
+  - .superpowers/sdd/**
+  - frontend/test-results/**
+  - docs/qa-last-run.json
+  - docs/qa-log.md
+  - frontend/.env.local
