@@ -98,3 +98,4 @@ excluded:
   - docs/qa-last-run.json
   - docs/qa-log.md
   - frontend/.env.local
+  - docs/superpowers/plans/2026-07-30-main-experimental-production-integration.md

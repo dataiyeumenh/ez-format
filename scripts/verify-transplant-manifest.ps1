@@ -205,6 +205,7 @@ try {
         Invoke-Git -WorkingDirectory $RepoRoot -Arguments ($diffArguments + @("$($manifest.base_sha)...$HeadRef", "--"))
         Invoke-Git -WorkingDirectory $RepoRoot -Arguments ($diffArguments + @("--"))
         Invoke-Git -WorkingDirectory $RepoRoot -Arguments ($diffArguments + @("--cached", "--"))
+        Invoke-Git -WorkingDirectory $RepoRoot -Arguments @("ls-files", "--others", "--exclude-standard", "--")
     )
 
     $pathSet = [System.Collections.Generic.SortedSet[string]]::new([System.StringComparer]::Ordinal)
