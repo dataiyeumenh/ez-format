@@ -172,8 +172,12 @@ function Read-TransplantManifest {
         }
         $rule | Add-Member -NotePropertyName regex -NotePropertyValue (ConvertTo-ManifestGlobRegex -Pattern $rule.path)
     }
+    $excludedPaths = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
     foreach ($index in 0..($manifest.excluded.Count - 1)) {
         $manifest.excluded[$index] = Normalize-ManifestPath -Value $manifest.excluded[$index] -Label "Excluded path"
+        if (-not $excludedPaths.Add($manifest.excluded[$index])) {
+            throw "Duplicate excluded path '$($manifest.excluded[$index])'."
+        }
     }
 
     return [pscustomobject]$manifest
@@ -219,24 +223,26 @@ try {
     $failures = @()
     foreach ($path in $pathSet) {
         $excludedMatches = @($manifest.excluded | Where-Object { $path -match (ConvertTo-ManifestGlobRegex -Pattern $_) })
-        if ($excludedMatches.Count -gt 0) {
-            $results += [pscustomobject]@{ path = $path; status = "excluded"; owner = "exclude"; matches = $excludedMatches }
+        $ownerMatches = @($manifest.rules | Where-Object { $_.regex.IsMatch($path) })
+        $applicableMatches = @(
+            $excludedMatches
+            $ownerMatches | ForEach-Object { $_.path }
+        )
+        if ($applicableMatches.Count -eq 1 -and (
+                $excludedMatches.Count -eq 1 -or
+                ($ownerMatches.Count -eq 1 -and $ownerMatches[0].owner -eq "exclude")
+            )) {
+            $results += [pscustomobject]@{ path = $path; status = "excluded"; owner = "exclude"; matches = $applicableMatches }
             continue
         }
-
-        $matches = @($manifest.rules | Where-Object { $_.regex.IsMatch($path) })
-        if ($matches.Count -eq 1 -and $matches[0].owner -eq "exclude") {
-            $results += [pscustomobject]@{ path = $path; status = "excluded"; owner = "exclude"; matches = @($matches[0].path) }
-            continue
-        }
-        if ($matches.Count -ne 1) {
-            $failure = [pscustomobject]@{ path = $path; matches = @($matches | ForEach-Object { $_.path }); count = $matches.Count }
+        if ($applicableMatches.Count -ne 1) {
+            $failure = [pscustomobject]@{ path = $path; matches = $applicableMatches; count = $applicableMatches.Count }
             $failures += $failure
             $results += [pscustomobject]@{ path = $path; status = "invalid"; owner = $null; matches = $failure.matches }
             continue
         }
 
-        $results += [pscustomobject]@{ path = $path; status = "owned"; owner = $matches[0].owner; matches = @($matches[0].path) }
+        $results += [pscustomobject]@{ path = $path; status = "owned"; owner = $ownerMatches[0].owner; matches = $applicableMatches }
     }
 
     $summary = [ordered]@{
