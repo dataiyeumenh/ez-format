@@ -13,6 +13,7 @@
     "frontend": "npm --prefix frontend run dev",
     "setup:fixtures": "pwsh -File scripts/setup-fixtures.ps1",
     "qa": "pwsh -File scripts/qa-qc.ps1",
+    "qa:main-integration": "pwsh -File scripts/qa-main-integration.ps1",
     "qa:fast": "pwsh -File scripts/qa-qc.ps1 -SkipSlowTests",
     "qa:ci": "pwsh -File scripts/qa-qc.ps1 -SkipSlowTests",
     "qa:autopilot": "pwsh -File scripts/qa-autopilot.ps1 -Fast",
