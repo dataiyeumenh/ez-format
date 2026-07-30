@@ -1,12 +1,17 @@
 const assert = require("node:assert/strict");
 const test = require("node:test");
+const jwt = require("jsonwebtoken");
 
 const {
   createSessionProxyHandler,
   mergeGatewayCapabilities,
   resolveSessionProxyRoute,
 } = require("../routes/converterGateway");
-const { internalHeaders } = require("../services/converterGatewayService");
+const { createConversionContextToken } = require("../services/conversionContextService");
+const {
+  bindConversionContextToUser,
+  internalHeaders,
+} = require("../services/converterGatewayService");
 
 function responseRecorder() {
   return {
@@ -30,6 +35,106 @@ function responseRecorder() {
     },
   };
 }
+
+async function withContextSecret(callback) {
+  const previous = process.env.CONVERSION_CONTEXT_SECRET;
+  process.env.CONVERSION_CONTEXT_SECRET = "Test_Ctx_8mQ2vN7xK4pR9sT1wY6zA3dF";
+  try {
+    return await callback();
+  } finally {
+    if (previous === undefined) delete process.env.CONVERSION_CONTEXT_SECRET;
+    else process.env.CONVERSION_CONTEXT_SECRET = previous;
+  }
+}
+
+function contextToken({ userId = "user-1", workspaceId = null, expiresIn = "10m" } = {}) {
+  return createConversionContextToken({ userId, workspaceId, expiresIn });
+}
+
+test("gateway verifies and binds conversion user/workspace/owner claims before forwarding", async () => {
+  await withContextSecret(async () => {
+    const calls = [];
+    const token = contextToken({ userId: "user-1", workspaceId: "workspace-1" });
+    const handler = createSessionProxyHandler({
+      forward: async (input) => {
+        calls.push(input);
+        return { status: 200, data: { ok: true } };
+      },
+    });
+
+    await handler(
+      {
+        method: "GET",
+        params: { id: "session-1", 0: "revisions" },
+        headers: { "x-conversion-context": token },
+        user: { _id: "user-1" },
+        body: {},
+        query: {},
+        requestId: "request-1",
+      },
+      responseRecorder(),
+    );
+
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].contextToken, token);
+  });
+});
+
+test("gateway rejects cross-user conversion-context replay before forwarding", async () => {
+  await withContextSecret(async () => {
+    let forwardCalls = 0;
+    const handler = createSessionProxyHandler({
+      forward: async () => {
+        forwardCalls += 1;
+        return { status: 200, data: { ok: true } };
+      },
+    });
+
+    await assert.rejects(
+      handler(
+        {
+          method: "GET",
+          params: { id: "session-1", 0: "revisions" },
+          headers: { "x-conversion-context": contextToken({ userId: "owner-user" }) },
+          user: { _id: "foreign-user" },
+          body: {},
+          query: {},
+          requestId: "request-1",
+        },
+        responseRecorder(),
+      ),
+      (error) => error.statusCode === 403 && error.code === "CONVERSION_CONTEXT_USER_MISMATCH",
+    );
+    assert.equal(forwardCalls, 0);
+  });
+});
+
+test("gateway rejects malformed and expired conversion contexts", () => withContextSecret(() => {
+  for (const token of ["not-a-jwt", contextToken({ expiresIn: -1 })]) {
+    assert.throws(
+      () => bindConversionContextToUser({ contextToken: token, user: { _id: "user-1" } }),
+      (error) => error.statusCode === 401 && error.code === "INVALID_CONVERSION_CONTEXT",
+    );
+  }
+}));
+
+test("gateway rejects signed contexts whose workspace and owner claims diverge", () => withContextSecret(() => {
+  const token = jwt.sign(
+    {
+      purpose: "misa_conversion",
+      user_id: "user-1",
+      workspace_id: "workspace-1",
+      owner_scope: "user:user-1",
+    },
+    process.env.CONVERSION_CONTEXT_SECRET,
+    { expiresIn: "10m" },
+  );
+
+  assert.throws(
+    () => bindConversionContextToUser({ contextToken: token, user: { _id: "user-1" } }),
+    (error) => error.statusCode === 401 && error.code === "INVALID_CONVERSION_CONTEXT",
+  );
+}));
 
 test("session gateway composes sync and recovery onto canonical FastAPI paths", () => {
   assert.deepEqual(

@@ -11,10 +11,11 @@ evidence. No deployment was performed while these values were unavailable.
   `e8632a023ae33a17c1db58e44a21e53a6f47f99b`.
 - The deployable candidate must be an immutable commit SHA recorded after all
   release documents are committed. Do not deploy a moving branch or `HEAD`.
-- Required emergency rollback ref:
-  `rollback/main-pre-experimental-integration-20260730-055323`.
-- Required rollback SHA:
-  `8d1a9343dc98a8abb715fe7efc8df9adf65a10fa`.
+- Primary emergency rollback ref:
+  `rollback/main-pre-task11-reconcile-20260730-203721`.
+- Primary emergency rollback SHA:
+  `2250102293021a54bcd1cf4fc8a7d6037e980524`.
+- Legacy deep fallback only: `rollback/main-pre-experimental-integration-20260730-055323` at SHA `8d1a9343dc98a8abb715fe7efc8df9adf65a10fa`.
 - Initial staging and production configuration keeps every new integration
   gate disabled. Task 13 enablement is a separate change and requires live
   evidence for each capability.
@@ -99,7 +100,10 @@ Backup boundary:
 
 Set these values explicitly. Do not rely on platform defaults. Replace every
 angle-bracket value with a real private deployment value before saving it in a
-platform dashboard. The values shown here are not credentials.
+platform dashboard. The values shown here are not credentials and production
+startup rejects them. Generate high-entropy secrets of at least 32 characters
+inside the deployment secret manager; never reuse `JWT_SECRET`,
+`CONVERSION_CONTEXT_SECRET`, or `CONVERTER_SERVICE_TOKEN`.
 
 ### Node Render service
 
@@ -129,6 +133,7 @@ release record must identify values for `MONGO_URI`, `JWT_SECRET`,
 ```env
 NODE_ENV=production
 FRONTEND_URL=https://<vercel-domain>
+JWT_SECRET=<private-distinct-high-entropy-bearer-secret>
 CONVERSION_CONTEXT_SECRET=<same-private-value-on-both-services>
 CONVERTER_SERVICE_TOKEN=<different-same-private-value-on-both-services>
 CONVERTER_INTERNAL_URL=https://<converter-service>.onrender.com
@@ -140,6 +145,7 @@ CONVERTER_MONGODB_GRIDFS_BUCKET=conversion_artifacts
 MASTER_DATA_WORKSPACES_ENABLED=false
 MISA_IMPORT_REPAIR_ENABLED=false
 STUDENT_ASSISTANT_ENABLED=false
+STUDENT_PRIVACY_MIGRATION_MODE=off
 VOUCHER_RECONSTRUCTION_ENABLED=false
 FEATURE_MAPPING_PROFILE_V2=false
 FEATURE_ANOMALY_DETECTION=false
@@ -201,6 +207,7 @@ STUDENT_FILE_EXPLAIN_ENABLED=false
 STUDENT_ACCOUNTING_MAP_ENABLED=false
 STUDENT_RECONCILIATION_ENABLED=false
 STUDENT_INTERNSHIP_ENABLED=false
+STUDENT_PRIVACY_MIGRATION_MODE=off
 VOUCHER_RECONSTRUCTION_ENABLED=false
 FEATURE_MAPPING_PROFILE_V2=false
 FEATURE_ANOMALY_DETECTION=false
@@ -250,9 +257,9 @@ second API base URL. All production API values must be HTTPS and non-loopback.
 
 ## Deployment sequence
 
-1. Freeze the release ID and candidate SHA. Confirm the rollback ref resolves
-   to the canonical SHA
-   `8d1a9343dc98a8abb715fe7efc8df9adf65a10fa`.
+1. Freeze the release ID and candidate SHA. Confirm
+   `rollback/main-pre-task11-reconcile-20260730-203721` resolves to the primary
+   emergency SHA `2250102293021a54bcd1cf4fc8a7d6037e980524`.
 2. Complete and privately verify the Mongo backup record.
 3. Deploy the converter Render service. Wait for a successful `/healthz`
    response before deploying Node.
@@ -397,10 +404,15 @@ Keep these production boundaries:
 
 ```env
 MAPPING_PROFILE_V2_MIGRATION_MODE=off
+STUDENT_PRIVACY_MIGRATION_MODE=off
 ```
 
-`MONGO_URI`, `CONVERSION_CONTEXT_SECRET`, `CONVERTER_SERVICE_TOKEN`, and
-`CONVERTER_INTERNAL_URL` must already be present privately. The current backend
+`MONGO_URI`, `JWT_SECRET`, `CONVERSION_CONTEXT_SECRET`,
+`CONVERTER_SERVICE_TOKEN`, and `CONVERTER_INTERNAL_URL` must already be present
+privately. The three authentication secrets must be distinct high-entropy values
+of at least 32 characters. Node and FastAPI production startup must reject every
+documented example, placeholder, default, repeated-character value, or reused
+secret. The current backend
 contract uses `conversion_artifacts`, matching `backend/.env.example`.
 `CONVERTER_OBJECT_STORAGE_REQUIRED` is not consumed by the current code; do not
 add it. No S3 or other object-storage variable is part of this stage.
@@ -412,6 +424,10 @@ Required gates:
 - Isolation: the foreign QA identity cannot read, mutate, preview, or export
   the owner's run, upload, profile, session, or artifact; no owner metadata is
   disclosed.
+- Context replay: cross-user replay of the owner's signed
+  `x-conversion-context` is denied by Node before FastAPI receives the request.
+  Malformed and expired contexts are also denied; no upstream request, write,
+  charge, or idempotency record is created.
 - Stale state: submit the previous operation-session `revision` and
   `state_hash` after creating a newer revision. Node `/api/converter` must
   return the bounded conflict and must not write an export or charge.
@@ -731,9 +747,8 @@ results.
 4. Re-run `/api/health`, login, Google login when configured, ban handling,
    admin, pricing, coupon, PayOS callback status, and normal navigation.
 5. If core product remains unhealthy, redeploy
-   `rollback/main-pre-experimental-integration-20260730-055323` only after
-   verifying it resolves to
-   `8d1a9343dc98a8abb715fe7efc8df9adf65a10fa`.
+   `rollback/main-pre-task11-reconcile-20260730-203721` only after verifying it
+   resolves to `2250102293021a54bcd1cf4fc8a7d6037e980524`.
 6. Restore MongoDB only for confirmed migration/data/index damage, with DBA and
    release-owner approval and a new pre-restore snapshot. Feature or code
    rollback alone never authorizes a database restore.

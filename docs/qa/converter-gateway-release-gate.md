@@ -156,6 +156,19 @@ The gate rejects stale/future reports, hash mismatches, unresolved findings, ope
 
 `frontend/tests/converter-gateway.api.integration.spec.mjs` uses Playwright's API request context only. It stays separate from UI evidence and asserts direct FastAPI denial, missing gateway JWT denial, the real analyze/preview/readiness/confirm contract, and backend export blocking. It can never satisfy the browser/UI gate.
 
+Before live requests, Node and FastAPI startup checks must require high-entropy
+values and reject every documented example, placeholder, default, or
+low-entropy value. `JWT_SECRET`,
+`CONVERSION_CONTEXT_SECRET`, and `CONVERTER_SERVICE_TOKEN` must each contain at
+least 32 characters, have meaningful character diversity, and remain distinct.
+The Node/FastAPI shared values must match only by variable role; never log them.
+
+The live security contract must replay an owner's signed
+`x-conversion-context` under the foreign JWT and prove cross-user replay is
+denied by Node before any FastAPI request, mutation, charge, or artifact write.
+Separate malformed and expired context cases must receive denial while the same
+owner request and `Idempotency-Key` retain the existing idempotent result.
+
 ## Real browser journey
 
 Release mode runs `frontend/tests/converter-gateway.integration.spec.mjs` in Chromium against `FrontendUrl`. It:

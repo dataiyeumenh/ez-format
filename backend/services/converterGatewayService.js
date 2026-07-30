@@ -1,6 +1,16 @@
+const { verifyConversionContextToken } = require("./conversionContextService");
+
 const MAX_UPSTREAM_ERROR_BODY_BYTES = 128 * 1024;
-const SERVICE_TOKEN_PLACEHOLDER = "replace-with-a-long-random-secret";
 const MIN_SERVICE_TOKEN_CHARS = 32;
+const MIN_UNIQUE_SECRET_CHARS = 12;
+const UNSAFE_PRODUCTION_SECRETS = new Set([
+  "change-me",
+  "changeme",
+  "default",
+  "dev_change_me_in_production",
+  "password",
+  "secret",
+]);
 const SAFE_RESPONSE_HEADERS = new Set(["content-disposition", "content-type", "retry-after"]);
 const PROTECTED_HEADERS = new Set(["content-type", "x-conversion-context", "x-converter-service-token", "x-request-id"]);
 const TRUSTED_EXTRA_HEADERS = new Set([
@@ -28,6 +38,41 @@ function isLoopbackHostname(hostname) {
   return parts.length === 4 && parts.every((part) => /^\d{1,3}$/.test(part) && Number(part) <= 255) && Number(parts[0]) === 127;
 }
 
+function isHighEntropyProductionSecret(value) {
+  const secret = String(value || "").trim();
+  const normalized = secret.toLowerCase();
+  if (secret.length < MIN_SERVICE_TOKEN_CHARS) return false;
+  if (new Set(secret).size < MIN_UNIQUE_SECRET_CHARS) return false;
+  if (UNSAFE_PRODUCTION_SECRETS.has(normalized)) return false;
+  if (normalized.startsWith("replace-with-") || normalized.startsWith("your-")) return false;
+  if (normalized.includes("change_me_in_production") || normalized.includes("change-me-in-production")) return false;
+  return !(secret.startsWith("<") && secret.endsWith(">"));
+}
+
+function assertHighEntropyProductionSecret(name, value) {
+  if (!isHighEntropyProductionSecret(value)) {
+    throw gatewayError(
+      503,
+      `${name} must be a high-entropy secret of at least 32 characters, not an example or placeholder`,
+      "WEAK_PRODUCTION_SECRET",
+    );
+  }
+}
+
+function assertDistinctProductionSecrets(entries) {
+  for (let left = 0; left < entries.length; left += 1) {
+    for (let right = left + 1; right < entries.length; right += 1) {
+      if (entries[left][1] === entries[right][1]) {
+        throw gatewayError(
+          503,
+          `${entries[left][0]} and ${entries[right][0]} must be distinct`,
+          "DUPLICATE_PRODUCTION_SECRET",
+        );
+      }
+    }
+  }
+}
+
 function validateInterServiceUrl(value, env = process.env) {
   let parsed;
   try { parsed = new URL(String(value || "").trim()); } catch (cause) {
@@ -46,16 +91,69 @@ function validateInterServiceUrl(value, env = process.env) {
 function assertConverterGatewayStartupConfig(env = process.env) {
   if (!isConverterGatewayUsageReady(env)) return true;
   const contextSecret = String(env.CONVERSION_CONTEXT_SECRET || "").trim();
-  if (contextSecret.length < 32) throw gatewayError(503, "CONVERSION_CONTEXT_SECRET must be at least 32 characters", "MISSING_CONVERSION_CONTEXT_SECRET");
   const serviceToken = String(env.CONVERTER_SERVICE_TOKEN || "").trim();
-  if (!serviceToken) throw gatewayError(503, "CONVERTER_SERVICE_TOKEN is required", "MISSING_CONVERTER_SERVICE_TOKEN");
-  if (serviceToken.length < MIN_SERVICE_TOKEN_CHARS || serviceToken === SERVICE_TOKEN_PLACEHOLDER || serviceToken.toLowerCase().startsWith("replace-with-")) throw gatewayError(503, "CONVERTER_SERVICE_TOKEN must be at least 32 characters and not a placeholder", "WEAK_CONVERTER_SERVICE_TOKEN");
+  if (String(env.NODE_ENV || "").trim().toLowerCase() === "production") {
+    const jwtSecret = String(env.JWT_SECRET || "").trim();
+    const secrets = [
+      ["JWT_SECRET", jwtSecret],
+      ["CONVERSION_CONTEXT_SECRET", contextSecret],
+      ["CONVERTER_SERVICE_TOKEN", serviceToken],
+    ];
+    for (const [name, value] of secrets) assertHighEntropyProductionSecret(name, value);
+    assertDistinctProductionSecrets(secrets);
+  } else {
+    if (contextSecret.length < MIN_SERVICE_TOKEN_CHARS) throw gatewayError(503, "CONVERSION_CONTEXT_SECRET must be at least 32 characters", "MISSING_CONVERSION_CONTEXT_SECRET");
+    if (serviceToken.length < MIN_SERVICE_TOKEN_CHARS) throw gatewayError(503, "CONVERTER_SERVICE_TOKEN must be at least 32 characters", "MISSING_CONVERTER_SERVICE_TOKEN");
+  }
   const internalUrl = String(env.CONVERTER_INTERNAL_URL || "").trim();
   if (!internalUrl) throw gatewayError(503, "CONVERTER_INTERNAL_URL is required", "MISSING_CONVERTER_INTERNAL_URL");
   validateInterServiceUrl(internalUrl, env);
   if (String(env.CONVERTER_ARTIFACT_STORAGE_DRIVER || "").trim().toLowerCase() !== "mongodb") throw gatewayError(503, "MongoDB/GridFS artifact storage is required", "GRIDFS_CONFIG_MISSING");
   if (!String(env.CONVERTER_MONGODB_GRIDFS_BUCKET || "").trim() || !String(env.MONGO_URI || "").trim()) throw gatewayError(503, "MongoDB/GridFS artifact storage is not configured", "GRIDFS_CONFIG_MISSING");
   return true;
+}
+
+function bindConversionContextToUser({ contextToken, user, required = true } = {}) {
+  const token = String(contextToken || "").trim();
+  if (!token) {
+    if (!required) return "";
+    throw gatewayError(401, "Conversion context is required", "MISSING_CONVERSION_CONTEXT");
+  }
+
+  let claims;
+  try {
+    claims = verifyConversionContextToken(token);
+  } catch (cause) {
+    throw gatewayError(401, "Conversion context is invalid or expired", "INVALID_CONVERSION_CONTEXT");
+  }
+
+  const authenticatedUserId = String(user?._id || user?.id || "").trim();
+  if (!authenticatedUserId) {
+    throw gatewayError(401, "Authenticated user is required", "MISSING_AUTHENTICATED_USER");
+  }
+  if (typeof claims.user_id !== "string" || !claims.user_id.trim()) {
+    throw gatewayError(401, "Conversion context user claim is invalid", "INVALID_CONVERSION_CONTEXT");
+  }
+  if (claims.user_id.trim() !== authenticatedUserId) {
+    throw gatewayError(403, "Conversion context belongs to another user", "CONVERSION_CONTEXT_USER_MISMATCH");
+  }
+
+  const rawWorkspaceId = claims.workspace_id;
+  if (rawWorkspaceId != null && typeof rawWorkspaceId !== "string") {
+    throw gatewayError(401, "Conversion context workspace claim is invalid", "INVALID_CONVERSION_CONTEXT");
+  }
+  const workspaceId = String(rawWorkspaceId || "").trim();
+  if (typeof rawWorkspaceId === "string" && rawWorkspaceId !== workspaceId) {
+    throw gatewayError(401, "Conversion context workspace claim is invalid", "INVALID_CONVERSION_CONTEXT");
+  }
+  const expectedOwnerScope = workspaceId
+    ? `workspace:${workspaceId}`
+    : `user:${authenticatedUserId}`;
+  if (typeof claims.owner_scope !== "string" || claims.owner_scope !== expectedOwnerScope) {
+    throw gatewayError(401, "Conversion context owner claim is invalid", "INVALID_CONVERSION_CONTEXT");
+  }
+
+  return token;
 }
 
 function converterBaseUrl(env = process.env) {
@@ -147,4 +245,4 @@ function isConverterTimeoutError(error) {
     error?.code === "UND_ERR_CONNECT_TIMEOUT";
 }
 
-module.exports = { assertConverterGatewayStartupConfig, converterBaseUrl, forwardBinary, forwardJson, forwardMultipart, internalHeaders, isConverterGatewayUsageReady, isConverterTimeoutError, validateInterServiceUrl };
+module.exports = { assertConverterGatewayStartupConfig, bindConversionContextToUser, converterBaseUrl, forwardBinary, forwardJson, forwardMultipart, internalHeaders, isConverterGatewayUsageReady, isConverterTimeoutError, validateInterServiceUrl };

@@ -9,8 +9,16 @@ from fastapi import Header, HTTPException, Request
 
 _TRUE_VALUES = {"1", "true", "yes"}
 _LOCAL_MODE = ContextVar("converter_local_mode", default=False)
-_CONVERTER_SERVICE_TOKEN_PLACEHOLDER = "replace-with-a-long-random-secret"
-_MIN_PRODUCTION_SERVICE_TOKEN_CHARS = 32
+_MIN_PRODUCTION_SECRET_CHARS = 32
+_MIN_UNIQUE_SECRET_CHARS = 12
+_UNSAFE_PRODUCTION_SECRETS = {
+    "change-me",
+    "changeme",
+    "default",
+    "dev_change_me_in_production",
+    "password",
+    "secret",
+}
 
 
 def production_environment() -> bool:
@@ -59,16 +67,17 @@ def assert_secure_production_config() -> None:
     if _env_enabled("ALLOW_UNAUTHENTICATED_LOCAL_OPERATIONS"):
         unsafe.append("ALLOW_UNAUTHENTICATED_LOCAL_OPERATIONS must be false")
     service_token = os.getenv("CONVERTER_SERVICE_TOKEN", "").strip()
-    if not service_token:
-        unsafe.append("CONVERTER_SERVICE_TOKEN must be configured")
-    elif len(service_token) < _MIN_PRODUCTION_SERVICE_TOKEN_CHARS:
-        unsafe.append("CONVERTER_SERVICE_TOKEN must be at least 32 characters")
-    elif service_token == _CONVERTER_SERVICE_TOKEN_PLACEHOLDER:
-        unsafe.append("CONVERTER_SERVICE_TOKEN must not use the documented placeholder")
-    if not os.getenv("CONVERSION_CONTEXT_SECRET", "").strip():
-        unsafe.append("CONVERSION_CONTEXT_SECRET must be configured")
-    elif len(os.getenv("CONVERSION_CONTEXT_SECRET", "").strip()) < 32:
-        unsafe.append("CONVERSION_CONTEXT_SECRET must be at least 32 characters")
+    context_secret = os.getenv("CONVERSION_CONTEXT_SECRET", "").strip()
+    _append_production_secret_error(unsafe, "CONVERTER_SERVICE_TOKEN", service_token)
+    _append_production_secret_error(
+        unsafe, "CONVERSION_CONTEXT_SECRET", context_secret
+    )
+    if service_token and context_secret and hmac.compare_digest(
+        service_token, context_secret
+    ):
+        unsafe.append(
+            "CONVERTER_SERVICE_TOKEN and CONVERSION_CONTEXT_SECRET must be distinct"
+        )
     if _env_enabled("STUDENT_ASSISTANT_ENABLED"):
         anonymization_secret = os.getenv("STUDENT_ANONYMIZATION_SECRET", "").strip()
         if not anonymization_secret:
@@ -83,6 +92,37 @@ def assert_secure_production_config() -> None:
 
 def _env_enabled(name: str) -> bool:
     return os.getenv(name, "false").strip().lower() in _TRUE_VALUES
+
+
+def _append_production_secret_error(
+    unsafe: list[str], name: str, value: str
+) -> None:
+    if not value:
+        unsafe.append(f"{name} must be configured")
+        return
+    if not _is_high_entropy_production_secret(value):
+        unsafe.append(
+            f"{name} must be a high-entropy secret of at least 32 characters, "
+            "not an example or placeholder"
+        )
+
+
+def _is_high_entropy_production_secret(value: str) -> bool:
+    normalized = value.lower()
+    if len(value) < _MIN_PRODUCTION_SECRET_CHARS:
+        return False
+    if len(set(value)) < _MIN_UNIQUE_SECRET_CHARS:
+        return False
+    if normalized in _UNSAFE_PRODUCTION_SECRETS:
+        return False
+    if normalized.startswith(("replace-with-", "your-")):
+        return False
+    if (
+        "change_me_in_production" in normalized
+        or "change-me-in-production" in normalized
+    ):
+        return False
+    return not (value.startswith("<") and value.endswith(">"))
 
 
 def _unauthorized() -> HTTPException:

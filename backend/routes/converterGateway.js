@@ -3,7 +3,12 @@ const express = require("express");
 const multer = require("multer");
 const { protect } = require("../middleware/auth");
 const requireDb = require("../middleware/requireDb");
-const { forwardJson, forwardMultipart, forwardBinary } = require("../services/converterGatewayService");
+const {
+  bindConversionContextToUser,
+  forwardJson,
+  forwardMultipart,
+  forwardBinary,
+} = require("../services/converterGatewayService");
 const {
   applyMisaImportRepairBulk,
   confirmMisaImportRepairMatch,
@@ -58,8 +63,12 @@ function asyncRoute(handler) {
   return (req, res, next) => Promise.resolve(handler(req, res, next)).catch(next);
 }
 
-function gatewayContext(req) {
-  return String(req.headers["x-conversion-context"] || "").trim();
+function gatewayContext(req, required = true) {
+  return bindConversionContextToUser({
+    contextToken: req.headers["x-conversion-context"],
+    user: req.user,
+    required,
+  });
 }
 
 function sendUpstream(response, res) {
@@ -273,7 +282,7 @@ router.get("/capabilities", requireDb, protect, asyncRoute(async (req, res) => {
     mergeGatewayCapabilities(health.data, process.env, operations.data),
   );
 }));
-router.get("/templates", requireDb, protect, asyncRoute(async (req, res) => sendUpstream(await forwardJson({ path: "/api/v1/templates", method: "GET", contextToken: gatewayContext(req), requestId: req.requestId, requireContext: false }), res)));
+router.get("/templates", requireDb, protect, asyncRoute(async (req, res) => sendUpstream(await forwardJson({ path: "/api/v1/templates", method: "GET", contextToken: gatewayContext(req, false), requestId: req.requestId, requireContext: false }), res)));
 router.post("/uploads/analyze", requireDb, protect, upload.single("file"), asyncRoute(async (req, res) => sendUpstream(await forwardMultipart({ path: "/api/v1/uploads/analyze", file: req.file, fields: req.body, contextToken: gatewayContext(req), requestId: req.requestId }), res)));
 router.post("/mappings/preview", requireDb, protect, asyncRoute(async (req, res) => sendUpstream(await forwardJson({ path: "/api/v1/mappings/preview", body: req.body, contextToken: gatewayContext(req), requestId: req.requestId }), res)));
 router.post("/mappings/readiness", requireDb, protect, asyncRoute(async (req, res) => sendUpstream(await forwardJson({ path: "/api/v1/mappings/readiness", body: req.body, contextToken: gatewayContext(req), requestId: req.requestId }), res)));

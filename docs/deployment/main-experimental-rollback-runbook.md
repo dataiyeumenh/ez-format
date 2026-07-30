@@ -7,19 +7,20 @@ from this worktree.
 
 ## Rollback identity
 
-- Emergency ref:
-  `rollback/main-pre-experimental-integration-20260730-055323`.
-- Emergency SHA:
-  `8d1a9343dc98a8abb715fe7efc8df9adf65a10fa`.
+- Primary emergency ref:
+  `rollback/main-pre-task11-reconcile-20260730-203721`.
+- Primary emergency SHA:
+  `2250102293021a54bcd1cf4fc8a7d6037e980524`.
+- Legacy deep fallback only: `rollback/main-pre-experimental-integration-20260730-055323` at SHA `8d1a9343dc98a8abb715fe7efc8df9adf65a10fa`.
 - Verify the ref before selecting it in Render or Vercel. The expected full
-  SHA is `8d1a9343dc98a8abb715fe7efc8df9adf65a10fa`.
+  SHA is `2250102293021a54bcd1cf4fc8a7d6037e980524`.
 - Never select `latest`, a moving branch, or an unverified deployment.
 
 Verify from a trusted checkout:
 
 ```powershell
-$rollbackSha = git rev-parse rollback/main-pre-experimental-integration-20260730-055323
-if ($rollbackSha -ne "8d1a9343dc98a8abb715fe7efc8df9adf65a10fa") {
+$rollbackSha = git rev-parse rollback/main-pre-task11-reconcile-20260730-203721
+if ($rollbackSha -ne "2250102293021a54bcd1cf4fc8a7d6037e980524") {
   throw "rollback ref does not match the approved SHA"
 }
 ```
