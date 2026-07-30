@@ -2,6 +2,18 @@ const MappingProfile = require("../models/MappingProfile");
 
 const OBSOLETE_WORKSPACE_UNIQUE_INDEX =
   "workspace_1_targetTemplateId_1_sourceSignatureHash_1";
+const OWNER_SCOPE_UNIQUE_INDEX =
+  "ownerScope_1_targetTemplateId_1_sourceSignatureHash_1";
+const OWNER_SCOPE_UNIQUE_INDEX_KEYS = Object.freeze({
+  ownerScope: 1,
+  targetTemplateId: 1,
+  sourceSignatureHash: 1,
+});
+const OWNER_SCOPE_UNIQUE_INDEX_SPEC = Object.freeze({
+  name: OWNER_SCOPE_UNIQUE_INDEX,
+  keys: OWNER_SCOPE_UNIQUE_INDEX_KEYS,
+  options: Object.freeze({ name: OWNER_SCOPE_UNIQUE_INDEX, unique: true }),
+});
 const OWNER_SCOPE_MIGRATION_MODES = new Set(["off", "dry-run", "apply"]);
 const LEGACY_OWNER_SCOPE_FILTER = {
   $or: [
@@ -41,10 +53,26 @@ function buildLegacyOwnerScopeUpdate(profile = {}) {
 }
 
 function planMappingProfileIndexMigration(indexes = []) {
+  const sameKeys = (index) => JSON.stringify(index?.key || {})
+    === JSON.stringify(OWNER_SCOPE_UNIQUE_INDEX_KEYS);
+  const compatibleIndex = indexes.some(
+    (index) => sameKeys(index) && index?.unique === true,
+  );
+  const incompatibleIndexNames = indexes
+    .filter((index) => (
+      index?.name === OWNER_SCOPE_UNIQUE_INDEX || sameKeys(index)
+    ) && !(sameKeys(index) && index?.unique === true))
+    .map((index) => index.name)
+    .filter(Boolean);
+
   return {
     dropIndexNames: indexes
       .filter((index) => index?.name === OBSOLETE_WORKSPACE_UNIQUE_INDEX)
       .map((index) => index.name),
+    createIndexes: compatibleIndex || incompatibleIndexNames.length
+      ? []
+      : [OWNER_SCOPE_UNIQUE_INDEX_SPEC],
+    incompatibleIndexNames,
   };
 }
 
@@ -78,8 +106,13 @@ async function migrateMappingProfileOwnerScope({
     skipped: normalizedMode === "off",
     plannedBackfills: 0,
     backfilled: 0,
-    indexPlan: { dropIndexNames: [] },
+    indexPlan: {
+      dropIndexNames: [],
+      createIndexes: [],
+      incompatibleIndexNames: [],
+    },
     droppedIndexes: [],
+    createdIndexes: [],
   };
   if (normalizedMode === "off") return report;
   if (model.db?.readyState !== 1) {
@@ -96,6 +129,11 @@ async function migrateMappingProfileOwnerScope({
   report.plannedBackfills = operations.length;
   report.indexPlan = plan;
   if (normalizedMode === "dry-run") return report;
+  if (plan.incompatibleIndexNames.length) {
+    throw new Error(
+      `MappingProfile index compatibility check failed: ${plan.incompatibleIndexNames.join(", ")}`,
+    );
+  }
 
   if (operations.length) {
     await model.bulkWrite(operations, { ordered: true });
@@ -108,15 +146,20 @@ async function migrateMappingProfileOwnerScope({
       if (!isIndexNotFound(error)) throw error;
     }
   }
-  await model.syncIndexes();
+  for (const index of plan.createIndexes) {
+    await model.collection.createIndex(index.keys, index.options);
+  }
 
   report.backfilled = operations.length;
   report.droppedIndexes = plan.dropIndexNames;
+  report.createdIndexes = plan.createIndexes.map((index) => index.name);
   return report;
 }
 
 module.exports = {
   LEGACY_OWNER_SCOPE_FILTER,
+  OWNER_SCOPE_UNIQUE_INDEX,
+  OWNER_SCOPE_UNIQUE_INDEX_KEYS,
   OBSOLETE_WORKSPACE_UNIQUE_INDEX,
   buildLegacyOwnerScopeUpdate,
   migrateMappingProfileOwnerScope,

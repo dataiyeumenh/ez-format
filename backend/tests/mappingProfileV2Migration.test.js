@@ -9,6 +9,15 @@ const {
   rollbackMappingProfilesV1ToV2,
 } = require("../services/mappingProfileV2MigrationService");
 
+const TEST_V2_INDEX_SPEC = Object.freeze({
+  name: "ownerScope_1_profileFamilyId_1",
+  keys: Object.freeze({ ownerScope: 1, profileFamilyId: 1 }),
+  options: Object.freeze({
+    name: "ownerScope_1_profileFamilyId_1",
+    unique: true,
+  }),
+});
+
 function id() {
   return new mongoose.Types.ObjectId().toString();
 }
@@ -347,23 +356,18 @@ test("migration stays disabled unless explicitly selected", async () => {
 test("V2 index migration defaults to off and reports the pending index plan", async () => {
   let createIndexesCalls = 0;
   const model = {
-    schema: {
-      indexes() {
-        return [[{ ownerScope: 1, profileFamilyId: 1 }, { unique: true }]];
-      },
-    },
     collection: {
       async indexes() {
         return [{ name: "_id_", key: { _id: 1 } }];
       },
     },
-    async createIndexes() {
-      createIndexesCalls += 1;
-      return ["ownerScope_1_profileFamilyId_1"];
-    },
   };
 
-  const result = await ensureMappingProfileV2Indexes({ model });
+  const result = await ensureMappingProfileV2Indexes({
+    model,
+    modelIndexSpecs: [TEST_V2_INDEX_SPEC],
+    auditIndexSpecs: [],
+  });
 
   assert.equal(result.mode, "off");
   assert.equal(result.skipped, true);
@@ -376,14 +380,20 @@ test("V2 index migration defaults to off and reports the pending index plan", as
 test("V2 index dry-run performs zero index writes", async () => {
   let createIndexesCalls = 0;
   const model = {
-    schema: { indexes: () => [] },
-    collection: { indexes: async () => [] },
-    async createIndexes() {
-      createIndexesCalls += 1;
+    collection: {
+      indexes: async () => [],
+      async createIndex() {
+        createIndexesCalls += 1;
+      },
     },
   };
 
-  const result = await ensureMappingProfileV2Indexes({ model, mode: "dry-run" });
+  const result = await ensureMappingProfileV2Indexes({
+    model,
+    mode: "dry-run",
+    modelIndexSpecs: [TEST_V2_INDEX_SPEC],
+    auditIndexSpecs: [],
+  });
 
   assert.equal(result.mode, "dry-run");
   assert.equal(result.skipped, false);
@@ -392,36 +402,137 @@ test("V2 index dry-run performs zero index writes", async () => {
 
 test("V2 indexes mutate only in exact apply mode and remain idempotent", async () => {
   let createIndexesCalls = 0;
+  const existingIndexes = [];
   const model = {
-    schema: { indexes: () => [] },
-    collection: { indexes: async () => [] },
-    async createIndexes() {
-      createIndexesCalls += 1;
-      return ["ownerScope_1_profileFamilyId_1"];
+    collection: {
+      indexes: async () => existingIndexes,
+      async createIndex(keys, options) {
+        createIndexesCalls += 1;
+        assert.deepEqual(keys, TEST_V2_INDEX_SPEC.keys);
+        assert.deepEqual(options, TEST_V2_INDEX_SPEC.options);
+        existingIndexes.push({
+          name: options.name,
+          key: keys,
+          unique: options.unique,
+        });
+        return options.name;
+      },
     },
   };
 
-  const first = await ensureMappingProfileV2Indexes({ model, mode: "apply" });
-  const second = await ensureMappingProfileV2Indexes({ model, mode: "apply" });
+  const first = await ensureMappingProfileV2Indexes({
+    model,
+    mode: "apply",
+    modelIndexSpecs: [TEST_V2_INDEX_SPEC],
+    auditIndexSpecs: [],
+  });
+  const second = await ensureMappingProfileV2Indexes({
+    model,
+    mode: "apply",
+    modelIndexSpecs: [TEST_V2_INDEX_SPEC],
+    auditIndexSpecs: [],
+  });
 
-  assert.equal(createIndexesCalls, 2);
+  assert.equal(createIndexesCalls, 1);
   assert.deepEqual(first.indexes, ["ownerScope_1_profileFamilyId_1"]);
-  assert.deepEqual(second.indexes, ["ownerScope_1_profileFamilyId_1"]);
+  assert.deepEqual(second.indexes, []);
 });
 
 test("V2 index apply fails closed on non-IndexNotFound errors", async () => {
   const model = {
-    schema: { indexes: () => [] },
-    collection: { indexes: async () => [] },
-    async createIndexes() {
-      const error = new Error("index create denied");
-      error.code = 13;
-      throw error;
+    collection: {
+      indexes: async () => [],
+      async createIndex() {
+        const error = new Error("index create denied");
+        error.code = 13;
+        throw error;
+      },
     },
   };
 
   await assert.rejects(
-    ensureMappingProfileV2Indexes({ model, mode: "apply" }),
+    ensureMappingProfileV2Indexes({
+      model,
+      mode: "apply",
+      modelIndexSpecs: [TEST_V2_INDEX_SPEC],
+      auditIndexSpecs: [],
+    }),
     /index create denied/,
   );
+});
+
+test("V2 index preflight reports conflicting key specs without scheduling a create", async () => {
+  const model = {
+    collection: {
+      async indexes() {
+        return [{
+          name: "legacy_owner_family_lookup",
+          key: TEST_V2_INDEX_SPEC.keys,
+          unique: false,
+        }];
+      },
+    },
+  };
+
+  const report = await ensureMappingProfileV2Indexes({
+    model,
+    mode: "dry-run",
+    modelIndexSpecs: [TEST_V2_INDEX_SPEC],
+    auditIndexSpecs: [],
+  });
+
+  assert.deepEqual(
+    report.indexPlan.model.incompatibleIndexNames,
+    ["legacy_owner_family_lookup"],
+  );
+  assert.deepEqual(report.indexPlan.model.createIndexes, []);
+});
+
+test("V2 index apply leaves unmanaged and unrelated schema indexes untouched", async () => {
+  const writes = [];
+  const model = {
+    schema: {
+      indexes() {
+        return [
+          [TEST_V2_INDEX_SPEC.keys, TEST_V2_INDEX_SPEC.options],
+          [{ experimentalLookup: 1 }, {}],
+        ];
+      },
+    },
+    collection: {
+      async indexes() {
+        return [
+          { name: "_id_", key: { _id: 1 } },
+          { name: "ops_manual_lookup", key: { updatedAt: -1 } },
+        ];
+      },
+      async createIndex(keys, options) {
+        writes.push(["createIndex", keys, options]);
+        return options.name;
+      },
+      async dropIndex(name) {
+        writes.push(["dropIndex", name]);
+      },
+    },
+    async createIndexes() {
+      writes.push(["createIndexes"]);
+    },
+    async syncIndexes() {
+      writes.push(["syncIndexes"]);
+    },
+  };
+
+  const report = await ensureMappingProfileV2Indexes({
+    model,
+    mode: "apply",
+    modelIndexSpecs: [TEST_V2_INDEX_SPEC],
+    auditIndexSpecs: [],
+  });
+
+  assert.deepEqual(report.indexPlan.model.createIndexes, [TEST_V2_INDEX_SPEC]);
+  assert.deepEqual(writes, [[
+    "createIndex",
+    TEST_V2_INDEX_SPEC.keys,
+    TEST_V2_INDEX_SPEC.options,
+  ]]);
 });

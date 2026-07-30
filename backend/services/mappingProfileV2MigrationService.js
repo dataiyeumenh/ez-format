@@ -446,6 +446,46 @@ function derivedIndexName(keys = {}, options = {}) {
     .join("_");
 }
 
+function explicitIndexSpec(keys, options = {}) {
+  const name = derivedIndexName(keys, options);
+  return Object.freeze({
+    name,
+    keys: Object.freeze({ ...keys }),
+    options: Object.freeze({ ...options, name }),
+  });
+}
+
+const MAPPING_PROFILE_V2_INDEX_SPECS = Object.freeze([
+  explicitIndexSpec({ ownerScope: 1 }),
+  explicitIndexSpec({ workspace: 1 }),
+  explicitIndexSpec({ user: 1 }),
+  explicitIndexSpec({ status: 1 }),
+  explicitIndexSpec(
+    { ownerScope: 1, profileFamilyId: 1, version: 1 },
+    { unique: true },
+  ),
+  explicitIndexSpec(
+    { ownerScope: 1, profileFamilyId: 1 },
+    { unique: true, partialFilterExpression: { status: "active" } },
+  ),
+  explicitIndexSpec(
+    { legacyProfileId: 1 },
+    {
+      unique: true,
+      partialFilterExpression: { legacyProfileId: { $type: "objectId" } },
+    },
+  ),
+  explicitIndexSpec({ ownerScope: 1, status: 1, updatedAt: -1 }),
+  explicitIndexSpec({
+    "mappingProfileV2Migration.migrationId": 1,
+    "mappingProfileV2Migration.appliedRunId": 1,
+  }),
+]);
+const MAPPING_PROFILE_V2_AUDIT_INDEX_SPECS = Object.freeze([
+  explicitIndexSpec({ runId: 1 }, { unique: true }),
+  explicitIndexSpec({ migrationId: 1, createdAt: -1 }),
+]);
+
 async function existingIndexes(model) {
   if (typeof model?.collection?.indexes !== "function") return [];
   try {
@@ -456,33 +496,34 @@ async function existingIndexes(model) {
   }
 }
 
-async function planModelIndexes(model) {
-  const desired = typeof model?.schema?.indexes === "function"
-    ? model.schema.indexes().map(([keys, options = {}]) => ({
-      name: derivedIndexName(keys, options),
-      keys,
-      options,
-    }))
-    : [];
+async function planModelIndexes(model, desired = []) {
   const existing = await existingIndexes(model);
-  const existingByName = new Map(existing.map((index) => [index.name, index]));
-  const incompatibleIndexNames = desired
-    .filter(({ name, keys, options }) => {
-      const current = existingByName.get(name);
-      if (!current) return false;
-      return JSON.stringify(current.key || {}) !== JSON.stringify(keys)
-        || Boolean(current.unique) !== Boolean(options.unique)
-        || JSON.stringify(current.partialFilterExpression || null)
-          !== JSON.stringify(options.partialFilterExpression || null);
-    })
-    .map(({ name }) => name);
+  const compatible = (current, spec) => (
+    JSON.stringify(current?.key || {}) === JSON.stringify(spec.keys)
+    && Boolean(current?.unique) === Boolean(spec.options.unique)
+    && JSON.stringify(current?.partialFilterExpression || null)
+      === JSON.stringify(spec.options.partialFilterExpression || null)
+  );
+  const conflictsBySpec = new Map(desired.map((spec) => [
+    spec.name,
+    existing.filter((current) => (
+      current.name === spec.name
+      || JSON.stringify(current.key || {}) === JSON.stringify(spec.keys)
+    ) && !compatible(current, spec)),
+  ]));
+  const incompatibleIndexNames = [...conflictsBySpec.values()]
+    .flatMap((conflicts) => conflicts.map((index) => index.name).filter(Boolean))
+    .filter((name, index, names) => names.indexOf(name) === index);
+  const createIndexes = desired.filter((spec) => (
+    !existing.some((current) => compatible(current, spec))
+    && conflictsBySpec.get(spec.name).length === 0
+  ));
 
   return {
     existingIndexNames: existing.map((index) => index.name).filter(Boolean),
-    desiredIndexNames: desired.map((index) => index.name),
-    createIndexNames: desired
-      .filter(({ name }) => !existingByName.has(name))
-      .map(({ name }) => name),
+    desiredIndexNames: desired.map((spec) => spec.name),
+    createIndexNames: createIndexes.map((spec) => spec.name),
+    createIndexes,
     incompatibleIndexNames,
   };
 }
@@ -490,15 +531,18 @@ async function planModelIndexes(model) {
 async function planMappingProfileV2Indexes({
   model = MappingProfileV2,
   auditModel = model === MappingProfileV2 ? MappingProfileV2MigrationAudit : null,
+  modelIndexSpecs = MAPPING_PROFILE_V2_INDEX_SPECS,
+  auditIndexSpecs = MAPPING_PROFILE_V2_AUDIT_INDEX_SPECS,
 } = {}) {
   return {
-    model: await planModelIndexes(model),
+    model: await planModelIndexes(model, modelIndexSpecs),
     audit: auditModel
-      ? await planModelIndexes(auditModel)
+      ? await planModelIndexes(auditModel, auditIndexSpecs)
       : {
         existingIndexNames: [],
         desiredIndexNames: [],
         createIndexNames: [],
+        createIndexes: [],
         incompatibleIndexNames: [],
       },
   };
@@ -508,6 +552,8 @@ async function ensureMappingProfileV2Indexes({
   model = MappingProfileV2,
   auditModel = model === MappingProfileV2 ? MappingProfileV2MigrationAudit : null,
   mode = process.env.MAPPING_PROFILE_V2_MIGRATION_MODE || "off",
+  modelIndexSpecs = MAPPING_PROFILE_V2_INDEX_SPECS,
+  auditIndexSpecs = MAPPING_PROFILE_V2_AUDIT_INDEX_SPECS,
 } = {}) {
   const normalizedMode = String(mode || "off").trim().toLowerCase();
   if (!MIGRATION_MODES.has(normalizedMode)) {
@@ -515,7 +561,12 @@ async function ensureMappingProfileV2Indexes({
       "MAPPING_PROFILE_V2_MIGRATION_MODE phải là off, dry-run, apply hoặc rollback",
     );
   }
-  const indexPlan = await planMappingProfileV2Indexes({ model, auditModel });
+  const indexPlan = await planMappingProfileV2Indexes({
+    model,
+    auditModel,
+    modelIndexSpecs,
+    auditIndexSpecs,
+  });
   const report = {
     mode: normalizedMode,
     skipped: normalizedMode === "off" || normalizedMode === "rollback",
@@ -534,18 +585,33 @@ async function ensureMappingProfileV2Indexes({
       `MappingProfile V2 index compatibility check failed: ${incompatible.join(", ")}`,
     );
   }
-  if (typeof model.createIndexes !== "function") {
-    throw new Error("MappingProfileV2 model không hỗ trợ createIndexes");
+  if (
+    indexPlan.model.createIndexes.length
+    && typeof model?.collection?.createIndex !== "function"
+  ) {
+    throw new Error("MappingProfileV2 collection không hỗ trợ createIndex");
   }
-  const indexes = await model.createIndexes();
-  const auditIndexes = auditModel ? await auditModel.createIndexes() : [];
-  report.indexes = Array.isArray(indexes) ? indexes : [];
-  report.auditIndexes = Array.isArray(auditIndexes) ? auditIndexes : [];
+  if (
+    indexPlan.audit.createIndexes.length
+    && typeof auditModel?.collection?.createIndex !== "function"
+  ) {
+    throw new Error("MappingProfileV2 audit collection không hỗ trợ createIndex");
+  }
+  for (const index of indexPlan.model.createIndexes) {
+    await model.collection.createIndex(index.keys, index.options);
+    report.indexes.push(index.name);
+  }
+  for (const index of indexPlan.audit.createIndexes) {
+    await auditModel.collection.createIndex(index.keys, index.options);
+    report.auditIndexes.push(index.name);
+  }
   return report;
 }
 
 module.exports = {
   MIGRATION_MODES,
+  MAPPING_PROFILE_V2_AUDIT_INDEX_SPECS,
+  MAPPING_PROFILE_V2_INDEX_SPECS,
   buildMigrationCandidate,
   ensureMappingProfileV2Indexes,
   inferLegacyDocumentType,

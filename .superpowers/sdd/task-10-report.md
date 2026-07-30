@@ -51,3 +51,24 @@ this report. Existing Student line-ending changes, QA reports, and
 `.superpowers/sdd/progress.md` remain unstaged.
 
 Blockers: none.
+
+## Important Review Fix
+
+- Removed broad `syncIndexes()` and model-wide `createIndexes()` calls.
+- Added frozen V1/V2/audit index allowlists; preflight reports the exact
+  create/drop specs. Unmanaged and unrelated schema indexes remain untouched.
+- Apply now completes all available read-only checks before mutation.
+- Added machine-readable phase states and rollback-boundary output on success
+  or failure. Failed commands emit JSON, rethrow, and exit non-zero.
+- Added regression coverage for unmanaged indexes, unrelated missing schema
+  indexes, incompatible specs, and failure after owner mutation.
+
+Review-fix verification:
+
+```text
+node --test tests/mappingProfileMigration.test.js tests/mappingProfileV2Migration.test.js tests/serverStartupReadiness.test.js tests/preflightProductionMigrations.test.js
+45 tests, 45 pass, 0 fail (exit 0)
+
+npm run qa:fast
+QA/QC PASSED (9 steps) (exit 0)
+```

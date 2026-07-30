@@ -10,6 +10,7 @@ try {
 
 test("production migration preflight exposes a testable runner", () => {
   assert.equal(typeof preflight.runProductionMigrationPreflight, "function");
+  assert.equal(typeof preflight.executeProductionMigrationCommand, "function");
 });
 
 function migrationDependencies() {
@@ -86,6 +87,7 @@ test("production migration preflight off mode reports plans with zero writes", a
 
   assert.ok(report);
   assert.equal(report.mode, "off");
+  assert.equal(report.status, "completed");
   assert.equal(report.writesAllowed, false);
   assert.equal(report.ownerScope.plannedBackfills, 2);
   assert.deepEqual(report.ownerScope.indexPlan.dropIndexNames, ["legacy_unique"]);
@@ -98,6 +100,11 @@ test("production migration preflight off mode reports plans with zero writes", a
     ["indexes", "off"],
     ["v2", "dry-run"],
   ]);
+  assert.deepEqual(report.phases.map(({ name, status }) => [name, status]), [
+    ["owner-scope-preflight", "completed"],
+    ["v2-index-preflight", "completed"],
+    ["v2-data-preflight", "completed"],
+  ]);
 });
 
 test("production migration preflight dry-run mode performs zero writes", async () => {
@@ -109,6 +116,7 @@ test("production migration preflight dry-run mode performs zero writes", async (
 
   assert.ok(report);
   assert.equal(report.mode, "dry-run");
+  assert.equal(report.status, "completed");
   assert.equal(report.writesAllowed, false);
   assert.equal(fixture.writes, 0);
   assert.deepEqual(fixture.calls, [
@@ -134,9 +142,22 @@ test("production migration preflight apply mode remains idempotent", async () =>
   assert.equal(second.v2.created, 0);
   assert.equal(second.v2.skippedExisting, 1);
   assert.deepEqual(fixture.calls.slice(0, 3), [
+    ["owner", "dry-run"],
+    ["indexes", "dry-run"],
+    ["v2", "dry-run"],
+  ]);
+  assert.deepEqual(fixture.calls.slice(3, 6), [
     ["owner", "apply"],
     ["indexes", "apply"],
     ["v2", "apply"],
+  ]);
+  assert.deepEqual(first.phases.map(({ status }) => status), [
+    "completed",
+    "completed",
+    "completed",
+    "completed",
+    "completed",
+    "completed",
   ]);
 });
 
@@ -160,28 +181,104 @@ test("production migration command keeps rollback explicit and V2-scoped", async
   ]);
 });
 
-test("production migration preflight fails closed before V2 data writes on index errors", async () => {
+test("production migration failure after owner mutation reports phase and rollback boundary", async () => {
   let v2Calls = 0;
+  let ownerWrites = 0;
   const error = new Error("index create denied");
   error.code = 13;
+  let failure;
 
-  await assert.rejects(
-    () => Promise.resolve(preflight.runProductionMigrationPreflight({
+  try {
+    await preflight.runProductionMigrationPreflight({
       mode: "apply",
       sourceModel: {},
       targetModel: {},
       auditModel: {},
       connection: {},
-      migrateOwnerScope: async () => ({
-        plannedBackfills: 0,
-        backfilled: 0,
-        indexPlan: { dropIndexNames: [] },
-        droppedIndexes: [],
-      }),
-      ensureV2Indexes: async () => { throw error; },
+      migrateOwnerScope: async ({ mode }) => {
+        if (mode === "apply") ownerWrites += 1;
+        return {
+          plannedBackfills: 1,
+          backfilled: mode === "apply" ? 1 : 0,
+          indexPlan: { dropIndexNames: [], createIndexes: [] },
+          droppedIndexes: [],
+        };
+      },
+      ensureV2Indexes: async ({ mode }) => {
+        if (mode === "apply") throw error;
+        return {
+          indexPlan: { model: {}, audit: {} },
+          indexes: [],
+          auditIndexes: [],
+        };
+      },
       migrateV2: async () => { v2Calls += 1; },
-    })),
-    /index create denied/,
+    });
+  } catch (caught) {
+    failure = caught;
+  }
+
+  assert.match(failure?.message || "", /index create denied/);
+  assert.equal(ownerWrites, 1);
+  assert.equal(v2Calls, 1);
+  assert.equal(failure.report.status, "failed");
+  assert.deepEqual(
+    failure.report.phases.map(({ name, status }) => [name, status]),
+    [
+      ["owner-scope-preflight", "completed"],
+      ["v2-index-preflight", "completed"],
+      ["v2-data-preflight", "completed"],
+      ["owner-scope-apply", "completed"],
+      ["v2-index-apply", "failed"],
+      ["v2-data-apply", "pending"],
+    ],
   );
-  assert.equal(v2Calls, 0);
+  assert.deepEqual(
+    failure.report.rollbackBoundary.completedMutationPhases,
+    ["owner-scope-apply"],
+  );
+  assert.equal(failure.report.rollbackBoundary.failedPhase, "v2-index-apply");
+  assert.equal(failure.report.rollbackBoundary.manualRecoveryRequired, true);
+});
+
+test("production migration command emits JSON phase report before rethrowing failure", async () => {
+  const lines = [];
+  const failure = new Error("partial migration");
+  failure.report = {
+    mode: "apply",
+    status: "failed",
+    phases: [{ name: "owner-scope-apply", status: "failed" }],
+    rollbackBoundary: { manualRecoveryRequired: true },
+  };
+
+  await assert.rejects(
+    preflight.executeProductionMigrationCommand({
+      runner: async () => { throw failure; },
+      writeLine: (line) => lines.push(line),
+    }),
+    /partial migration/,
+  );
+
+  assert.equal(lines.length, 1);
+  assert.deepEqual(JSON.parse(lines[0]), failure.report);
+});
+
+test("production migration command emits machine-readable invalid-mode failure", async () => {
+  const lines = [];
+
+  await assert.rejects(
+    preflight.executeProductionMigrationCommand({
+      runOptions: { mode: "invalid-mode" },
+      writeLine: (line) => lines.push(line),
+    }),
+    /mode must be/i,
+  );
+
+  const report = JSON.parse(lines[0]);
+  assert.equal(report.mode, "invalid-mode");
+  assert.equal(report.status, "failed");
+  assert.deepEqual(
+    report.phases.map(({ name, status }) => [name, status]),
+    [["command-bootstrap", "failed"]],
+  );
 });
