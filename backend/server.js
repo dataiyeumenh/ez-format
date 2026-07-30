@@ -3,6 +3,7 @@ const cors = require("cors");
 const dotenv = require("dotenv");
 const crypto = require("crypto");
 const connectDB = require("./config/db");
+const { getPaymentSettlementReadiness } = require("./config/db");
 const {
   migrateMappingProfileOwnerScope,
 } = require("./services/mappingProfileMigrationService");
@@ -96,6 +97,7 @@ app.get("/api/health", (req, res) => {
       masterDataWorkspaces: masterDataWorkspacesEnabled,
       voucherReconstruction: voucherReconstructionEnabled,
       studentAssistant: studentAssistantEnabled,
+      paymentSettlement: getPaymentSettlementReadiness().ready,
     },
   });
 });

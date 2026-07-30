@@ -6,9 +6,7 @@ const User = require("../models/User");
 const payosClient = require("../services/payosClient");
 const originalFindById = User.findById;
 const originalFindPaymentById = Payment.findById;
-const originalFindPayment = Payment.findOne;
 const originalStartSession = Payment.db.startSession;
-const originalGetPayOSClient = payosClient.getPayOSClient;
 
 payosClient.getPayOSClient = () => ({
   paymentRequests: {
@@ -16,14 +14,24 @@ payosClient.getPayOSClient = () => ({
   },
 });
 delete require.cache[require.resolve("../services/paymentStatusSync")];
-const { normalizePayOSStatus, syncPaymentStatusFromPayOS } = require("../services/paymentStatusSync");
+const {
+  createPaymentStatusSynchronizer,
+  normalizePayOSStatus,
+} = require("../services/paymentStatusSync");
+
+function syncPaymentStatusFromPayOS(...args) {
+  return createPaymentStatusSynchronizer({
+    PaymentModel: Payment,
+    UserModel: User,
+    getPayOSClient: () => payosClient.getPayOSClient(),
+    assertPaymentSettlementReady: () => {},
+  }).syncPaymentStatusFromPayOS(...args);
+}
 
 test.after(() => {
   User.findById = originalFindById;
   Payment.findById = originalFindPaymentById;
-  Payment.findOne = originalFindPayment;
   Payment.db.startSession = originalStartSession;
-  payosClient.getPayOSClient = originalGetPayOSClient;
   delete require.cache[require.resolve("../services/paymentStatusSync")];
 });
 
@@ -130,6 +138,65 @@ test("PayOS statuses retain their payment-state mapping", () => {
   assert.equal(normalizePayOSStatus("PROCESSING"), "pending");
 });
 
+test("PayOS settlement refuses to start a transaction when deployment readiness fails", async () => {
+  let startSessionCalled = false;
+  const sync = createPaymentStatusSynchronizer({
+    PaymentModel: {
+      db: {
+        async startSession() {
+          startSessionCalled = true;
+        },
+      },
+    },
+    assertPaymentSettlementReady() {
+      const error = new Error("MongoDB transactions unavailable");
+      error.code = "PAYMENT_SETTLEMENT_NOT_READY";
+      throw error;
+    },
+  });
+
+  await assert.rejects(
+    sync.applyPaidPayment({ _id: "payment-id" }, { amount: 10000 }, {}),
+    (error) => error.code === "PAYMENT_SETTLEMENT_NOT_READY",
+  );
+  assert.equal(startSessionCalled, false);
+});
+
+test("PayOS transaction seam exposes each real transaction attempt", async () => {
+  let attempts = 0;
+  const paidPayment = { _id: "payment-id", status: "paid" };
+  const sync = createPaymentStatusSynchronizer({
+    PaymentModel: {
+      db: {
+        async startSession() {
+          return {
+            async endSession() {},
+            async withTransaction(work) {
+              await work();
+            },
+          };
+        },
+      },
+      findById() {
+        return {
+          session() {
+            return {
+              populate: async () => paidPayment,
+            };
+          },
+        };
+      },
+    },
+    assertPaymentSettlementReady() {},
+    async beforeTransactionWork() {
+      attempts += 1;
+    },
+  });
+
+  await sync.applyPaidPayment(paidPayment, { amount: 10000 }, {});
+  assert.equal(attempts, 1);
+});
+
 test("PayOS sync applies a paid per-file plan exactly once", async () => {
   const { createPendingSnapshot, store } = installPaymentStore();
   const payment = createPendingSnapshot();
@@ -168,61 +235,4 @@ test("PayOS sync rolls back credits when payment persistence fails", async () =>
   const retry = await syncPaymentStatusFromPayOS(createPendingSnapshot());
   assert.equal(retry.status, "paid");
   assert.equal(store.user.fileCredits, 3);
-});
-
-test("PayOS sync concurrent pending snapshots grants credits once", async () => {
-  const { createPendingSnapshot, store } = installPaymentStore();
-
-  await Promise.all([
-    syncPaymentStatusFromPayOS(createPendingSnapshot()),
-    syncPaymentStatusFromPayOS(createPendingSnapshot()),
-  ]);
-
-  assert.equal(store.payment.status, "paid");
-  assert.equal(store.user.fileCredits, 3);
-  assert.equal(store.transactions, 2);
-});
-
-test("PayOS webhook delegates stale paid snapshots to the idempotent settlement", async () => {
-  const { createPendingSnapshot, store } = installPaymentStore();
-  const snapshots = [createPendingSnapshot(), createPendingSnapshot()];
-  Payment.findOne = () => ({
-    populate: async () => snapshots.shift(),
-  });
-  payosClient.getPayOSClient = () => ({
-    webhooks: {
-      verify: async () => ({
-        orderCode: 123456,
-        amount: 10000,
-        paymentLinkId: "payment-link-id",
-        code: "00",
-      }),
-    },
-  });
-  delete require.cache[require.resolve("../controllers/paymentController")];
-  const { handlePayOSWebhook } = require("../controllers/paymentController");
-  const createResponse = () => ({
-    statusCode: 200,
-    status(statusCode) {
-      this.statusCode = statusCode;
-      return this;
-    },
-    json(body) {
-      this.body = body;
-      return this;
-    },
-  });
-
-  try {
-    await handlePayOSWebhook({ body: { success: true } }, createResponse());
-    await handlePayOSWebhook({ body: { success: true } }, createResponse());
-
-    assert.equal(store.payment.status, "paid");
-    assert.equal(store.user.fileCredits, 3);
-    assert.equal(store.transactions, 2);
-  } finally {
-    Payment.findOne = originalFindPayment;
-    payosClient.getPayOSClient = originalGetPayOSClient;
-    delete require.cache[require.resolve("../controllers/paymentController")];
-  }
 });

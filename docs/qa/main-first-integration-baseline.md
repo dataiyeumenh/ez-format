@@ -29,3 +29,9 @@ Results from the unchanged main baseline:
 Pre-existing skips: none.
 
 Pre-existing failures: none.
+
+## Task 3 Payment Settlement Follow-up (2026-07-30)
+
+- `node --test tests/paymentStatusSync.test.js tests/paymentSettlementReadiness.test.js tests/serverStartupReadiness.test.js tests/paymentReplicaSet.integration.test.js`: 14 passed, 0 failed; 3 real-Mongo tests skipped because `PAYMENT_REPLICA_SET_TEST_URI` is not set.
+- `npm run qa:main-contracts`: 51 passed, 0 failed, including payment transaction readiness and startup preflight checks.
+- The opt-in Mongo tests require a disposable replica-set URI ending in `-test` or `_test`; they exercise duplicate webhooks, transaction rollback, and a forced concurrent write-conflict retry.

@@ -83,6 +83,15 @@ cp .env.example .env   # nếu có
 npm run dev
 ```
 
+### PayOS settlement deployment
+
+PayOS settlement writes the payment and user entitlement in one MongoDB transaction.
+
+- Set all three `PAYOS_CLIENT_ID`, `PAYOS_API_KEY`, and `PAYOS_CHECKSUM_KEY` values only with a MongoDB Atlas, replica-set, or sharded deployment.
+- The backend runs `hello` against the connected MongoDB instance during startup. A standalone deployment fails startup when PayOS is configured.
+- Confirm `/api/health` reports `capabilities.paymentSettlement: true` after deployment before accepting PayOS callbacks.
+- For opt-in real integration coverage, set `PAYMENT_REPLICA_SET_TEST_URI` to a disposable replica-set database whose name ends in `-test` or `_test`.
+
 ### 2. Python converter
 
 ```powershell
