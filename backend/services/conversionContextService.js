@@ -154,6 +154,7 @@ function createStudentContextToken({
 
   return jwt.sign(
     {
+      iat: nowSeconds,
       purpose: "student_file_session",
       session_id: String(sessionId),
       user_id: String(userId),

@@ -62,8 +62,6 @@ from app.student_store import cleanup_expired_student_uploads
 from app.student_context import StudentContextClaims, verify_student_context
 from app.student_models import (
     StudentAnonymizationRequest,
-    StudentAttemptRequest,
-    StudentHintRequest,
     StudentInternshipReportRequest,
     StudentQuestionRequest,
 )
@@ -78,8 +76,7 @@ from app.student_workflow import (
     get_student_reconciliation,
     get_student_source_row,
     preview_student_anonymization,
-    reveal_student_hint,
-    submit_student_attempt,
+    assert_student_anonymization_config,
 )
 
 
@@ -138,6 +135,7 @@ async def attach_request_id(request: Request, call_next):
 @app.router.on_event("startup")
 def _assert_converter_security_config() -> None:
     assert_secure_production_config()
+    assert_student_anonymization_config()
 
 
 def _sanitize_validation_payload(value):
@@ -233,8 +231,6 @@ def healthz() -> dict[str, object]:
             ).lower()
             == "true",
             "studentFileQa": os.getenv("STUDENT_FILE_QA_ENABLED", "false").lower()
-            == "true",
-            "studentCheckWork": os.getenv("STUDENT_CHECK_WORK_ENABLED", "false").lower()
             == "true",
             "studentAccountingMap": os.getenv(
                 "STUDENT_ACCOUNTING_MAP_ENABLED", "false"
@@ -522,51 +518,6 @@ async def student_session_source_row(
             get_student_source_row,
             session_id=session_id,
             worksheet_row=worksheet_row,
-            context_token=x_student_context or "",
-        )
-        return JSONResponse(jsonable_encoder(payload))
-    except StudentWorkflowError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
-
-
-@app.post("/api/v1/student/sessions/{session_id}/attempts")
-async def student_session_attempt(
-    session_id: str,
-    request: StudentAttemptRequest,
-    x_student_context: Annotated[str | None, Header()] = None,
-) -> JSONResponse:
-    try:
-        payload = await run_in_threadpool(
-            submit_student_attempt,
-            session_id=session_id,
-            context_token=x_student_context or "",
-            kind=request.kind,
-            state_hash=request.state_hash,
-            submitted=request.submitted,
-            rubric_version=request.rubric_version,
-        )
-        return JSONResponse(jsonable_encoder(payload))
-    except StudentWorkflowError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
-
-
-@app.post(
-    "/api/v1/student/sessions/{session_id}/attempts/{attempt_id}/hints/{level}"
-)
-async def student_session_hint(
-    session_id: str,
-    attempt_id: str,
-    level: int,
-    request: StudentHintRequest,
-    x_student_context: Annotated[str | None, Header()] = None,
-) -> JSONResponse:
-    try:
-        payload = await run_in_threadpool(
-            reveal_student_hint,
-            session_id=session_id,
-            attempt_id=attempt_id,
-            issue_id=request.issue_id,
-            level=level,
             context_token=x_student_context or "",
         )
         return JSONResponse(jsonable_encoder(payload))

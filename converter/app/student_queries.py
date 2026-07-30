@@ -3,9 +3,10 @@ from __future__ import annotations
 import hashlib
 import re
 import unicodedata
+from dataclasses import dataclass, field
 from datetime import date, datetime
 from decimal import Decimal
-from typing import Any, Callable
+from typing import Any, Callable, Literal
 
 from app.excel_io import InputTable
 from app.parsing import parse_decimal
@@ -13,8 +14,117 @@ from app.student_field_dictionary import field_definition
 from app.student_models import StudentAnswer, StudentAnswerEvidence
 
 
+@dataclass(frozen=True)
+class _DocumentTotalsReport:
+    document_count: int
+    sum_total: str | None
+    status: Literal["complete", "needs_review", "blocked"]
+    issues: list[str]
+    contributing_rows: list[int] = field(default_factory=list)
+
+
+def aggregate_document_totals(
+    rows: list[dict[str, object]],
+    *,
+    document_key_fields: list[str],
+    line_amount_field: str | None,
+    document_total_field: str | None,
+) -> _DocumentTotalsReport:
+    """Task 5 fallback until Task 6 owns the shared document totals module."""
+    requires_document_key = document_total_field is not None
+    if requires_document_key and not document_key_fields:
+        return _DocumentTotalsReport(0, None, "needs_review", ["missing_document_key"])
+
+    issues: list[str] = []
+    keys: dict[str, int] = {}
+    document_totals: dict[str, Decimal] = {}
+    line_total = Decimal("0")
+    line_seen = False
+    contributing_rows: list[int] = []
+
+    for row_number, row in enumerate(rows, start=1):
+        key: str | None = None
+        if document_key_fields:
+            key_parts = [str(row.get(name) or "").strip() for name in document_key_fields]
+            if any(not part for part in key_parts):
+                if "missing_document_key" not in issues:
+                    issues.append("missing_document_key")
+                if requires_document_key:
+                    continue
+            else:
+                key = "|".join(key_parts).casefold()
+                keys.setdefault(key, len(keys) + 1)
+
+        if line_amount_field:
+            raw_line = row.get(line_amount_field)
+            if raw_line is not None and str(raw_line).strip() != "":
+                amount = parse_decimal(raw_line)
+                if amount is None:
+                    if "invalid_line_amount" not in issues:
+                        issues.append("invalid_line_amount")
+                else:
+                    line_total += amount
+                    line_seen = True
+
+        if document_total_field and key is not None:
+            raw_total = row.get(document_total_field)
+            if raw_total is None or str(raw_total).strip() == "":
+                continue
+            total = parse_decimal(raw_total)
+            if total is None:
+                if "invalid_document_total" not in issues:
+                    issues.append("invalid_document_total")
+                continue
+            previous = document_totals.get(key)
+            if previous is not None and previous != total:
+                if "conflicting_document_total" not in issues:
+                    issues.append("conflicting_document_total")
+                contributing_rows.append(row_number)
+            elif previous is None:
+                document_totals[key] = total
+                contributing_rows.append(row_number)
+
+    if any(issue.startswith("invalid_") for issue in issues) or "conflicting_document_total" in issues:
+        status = "blocked"
+    elif "missing_document_key" in issues:
+        status = "needs_review"
+    else:
+        status = "complete"
+
+    if status != "complete":
+        total_value = None
+    elif line_amount_field and line_seen:
+        total_value = line_total
+    elif document_total_field and document_totals:
+        total_value = sum(document_totals.values(), Decimal("0"))
+    else:
+        total_value = None
+
+    if line_amount_field and line_seen:
+        contributing_rows = [
+            index
+            for index, row in enumerate(rows, start=1)
+            if parse_decimal(row.get(line_amount_field)) is not None
+        ]
+
+    return _DocumentTotalsReport(
+        document_count=len(keys),
+        sum_total=str(total_value) if total_value is not None else None,
+        status=status,
+        issues=issues,
+        contributing_rows=contributing_rows,
+    )
+
+
 MAX_ANSWER_EVIDENCE = 20
-_DOCUMENT_TERMS = ("ma hoa don", "so hoa don", "so chung tu", "so phieu nhap")
+_DOCUMENT_TERMS = (
+    "ma hoa don",
+    "so hoa don",
+    "so chung tu",
+    "so phieu nhap",
+    "soct",
+    "so ct",
+)
 _UNSUPPORTED_PATTERNS = (
     "duoc khau tru",
     "duoc tru khi tinh thue",
@@ -193,7 +303,7 @@ def _classify_intent(question: str) -> str | None:
         term in question for term in ("nhung dong", "tim", "xuat hien", "o dong", "dong nao", "nam o")
     ):
         return "locate_rows"
-    if any(term in question for term in ("tinh tong", "cong cot", "cong tien", "tong thanh tien", "tong thanh toan", "tong so luong", "tong don gia")):
+    if any(term in question for term in ("tinh tong", "cong cot", "cong tien", "tong tien", "tong thanh tien", "tong thanh toan", "tong so luong", "tong don gia")):
         return "aggregate_amount"
     if any(term in question for term in ("y nghia gi", "khai niem", "dung de lam gi")):
         return "concept_explanation"
@@ -320,14 +430,53 @@ def _answer_aggregate_amount(question: str, state: dict[str, Any]) -> StudentAns
     table = _table(state)
     if header is None:
         return _unsupported("aggregate_amount", "Không xác định được cột số cần cộng.", "no_evidence")
-    total = Decimal("0")
-    contributing_rows: list[int] = []
-    for row_number, row in enumerate(table.rows, start=1):
-        parsed = parse_decimal(row.get(header))
-        if parsed is None:
-            continue
-        total += parsed
-        contributing_rows.append(row_number)
+
+    if _is_document_total_header(header, state):
+        document_header = _document_header(state)
+        report = aggregate_document_totals(
+            table.rows,
+            document_key_fields=[document_header] if document_header else [],
+            line_amount_field=None,
+            document_total_field=header,
+        )
+    else:
+        report = aggregate_document_totals(
+            table.rows,
+            document_key_fields=[],
+            line_amount_field=header,
+            document_total_field=None,
+        )
+
+    if report.status == "blocked" and "conflicting_document_total" in report.issues:
+        evidence = [
+            _cell_evidence(state, row_number, header)
+            for row_number in report.contributing_rows
+        ]
+        bounded = evidence[:MAX_ANSWER_EVIDENCE]
+        return StudentAnswer(
+            answer=(
+                f"Không thể kết luận tổng cột '{header}' vì cùng một chứng từ "
+                "đang có nhiều giá trị tổng khác nhau."
+            ),
+            intent="aggregate_amount",
+            answer_type="deterministic_explanation",
+            confidence="verified",
+            evidence=bounded,
+            evidence_count=len(evidence),
+            needs_professional_review=True,
+            outcome="supported",
+        )
+
+    if report.status != "complete" or not report.contributing_rows or report.sum_total is None:
+        reason = report.issues[0] if report.issues else "no_evidence"
+        return _unsupported(
+            "aggregate_amount",
+            "Không thể tính tổng an toàn vì dữ liệu chứng từ cần được rà soát.",
+            reason,
+        )
+
+    total = Decimal(report.sum_total)
+    contributing_rows = report.contributing_rows
     if not contributing_rows:
         return _unsupported("aggregate_amount", "Cột được hỏi không có giá trị số.", "no_evidence")
     evidence = [_cell_evidence(state, row_number, header) for row_number in contributing_rows]
@@ -337,6 +486,30 @@ def _answer_aggregate_amount(question: str, state: dict[str, Any]) -> StudentAns
         evidence,
         evidence_count=len(contributing_rows),
     )
+
+
+def _is_document_total_header(header: str, state: dict[str, Any] | None = None) -> bool:
+    normalized = _normalize(header).replace(" ", "_")
+    if any(
+        token in normalized
+        for token in (
+            "tong_tien",
+            "tong_thanh_toan",
+            "tong_cong",
+            "tong_tien_hang",
+        )
+    ):
+        return True
+    for source, target_spec in (state or {}).get("mapping", {}).items():
+        if source != header:
+            continue
+        targets = target_spec if isinstance(target_spec, list) else [target_spec]
+        return any(
+            token in _normalize(str(target)).replace(" ", "_")
+            for target in targets
+            for token in ("tong_tien", "tong_thanh_toan", "tong_cong")
+        )
+    return False
 
 
 def _answer_count_documents(question: str, state: dict[str, Any]) -> StudentAnswer:
@@ -590,6 +763,16 @@ def _select_header(
 
 def _document_header(state: dict[str, Any]) -> str | None:
     table = _table(state)
+    for source, target_spec in (state.get("mapping") or {}).items():
+        if source not in table.headers:
+            continue
+        targets = target_spec if isinstance(target_spec, list) else [target_spec]
+        if any(
+            term in _normalize(target)
+            for target in targets
+            for term in _DOCUMENT_TERMS
+        ):
+            return source
     for header in table.headers:
         normalized = _normalize(header)
         if any(term == normalized or term in normalized for term in _DOCUMENT_TERMS):

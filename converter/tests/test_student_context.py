@@ -15,6 +15,7 @@ from app.misa_workflow import (
     confirm_mapping,
     export_confirmed_profile,
     preview_mapping,
+    readiness_mapping,
 )
 from app.student_context import verify_student_context
 from app.student_store import (
@@ -375,6 +376,15 @@ def test_student_mapping_operations_require_operation_specific_scopes(
     suggestion = analyzed["mapping_suggestion"]
 
     preview_mapping(
+        upload_id=analyzed["upload_id"],
+        target_template_id="bsn_sales",
+        mapping=suggestion["mapping"],
+        defaults=suggestion["defaults"],
+        formulas=suggestion["formulas"],
+        student_context_token=phase_one,
+    )
+
+    readiness_mapping(
         upload_id=analyzed["upload_id"],
         target_template_id="bsn_sales",
         mapping=suggestion["mapping"],

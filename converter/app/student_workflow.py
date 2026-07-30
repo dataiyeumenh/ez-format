@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hmac
 import os
 from pathlib import Path
 from typing import Any
@@ -21,6 +22,7 @@ from app.normalization import normalize_header
 from app.student_accounting_map import build_accounting_maps
 from app.student_anonymization import (
     AnonymizationExportError,
+    AnonymizationUnsupportedLayerError,
     AnonymizationSession,
     AnonymizedWorkbook,
     anonymize_workbook_bytes,
@@ -34,15 +36,12 @@ from app.student_explanations import (
 from app.student_queries import answer_question
 from app.student_reconciliation import reconcile_session
 from app.student_reports import ReportValidationError, build_internship_markdown_report
-from app.student_scoring import AttemptEvaluation, hint_for, score_attempt
 from app.student_session_client import (
     StudentSessionClientError,
     assert_student_session_active,
     get_verified_activities,
     record_analysis_completed,
     record_activity_event,
-    record_attempt_completed,
-    record_hint_revealed,
     record_question_event,
 )
 from app.student_store import (
@@ -56,7 +55,6 @@ from app.voucher_reconstruction import reconstruct_vouchers
 
 
 OVERVIEW_FILENAME = "student-overview.json"
-ATTEMPTS_FILENAME = "student-attempts.json"
 MAX_STUDENT_PREVIEW_ROWS = 25
 
 _CONFIDENTIAL_HEADER_MARKERS = {
@@ -81,6 +79,11 @@ class StudentWorkflowError(ValueError):
     def __init__(self, status_code: int, message: str) -> None:
         self.status_code = status_code
         super().__init__(message)
+
+
+def _operation_state(metadata: dict[str, Any]) -> dict[str, Any]:
+    # Task 4 gateway does not expose the later shared operation-state contract yet.
+    return {}
 
 
 def analyze_student_file(
@@ -250,6 +253,7 @@ def get_student_reconciliation(
         target_template_id, _, _, mapping, defaults, formulas = _effective_mapping(
             metadata
         )
+        operation_state = _operation_state(metadata)
         preview = preview_mapping(
             upload_id=upload_id,
             target_template_id=target_template_id,
@@ -257,6 +261,7 @@ def get_student_reconciliation(
             defaults=defaults,
             formulas=formulas,
             student_context_token=context_token,
+            **operation_state,
         )
         report = reconcile_session(
             {
@@ -312,6 +317,7 @@ def preview_student_anonymization(
         "filename": exported.filename,
         "full_document_numbers": full_document_numbers,
         "replaced_categories": list(exported.replaced_categories),
+        "replaced_layers": list(exported.replaced_layers),
         "replacement_count": _replacement_count(
             confidential_values,
             exported.replaced_categories,
@@ -495,159 +501,6 @@ def get_student_source_row(
     }
 
 
-def submit_student_attempt(
-    *,
-    session_id: str,
-    context_token: str,
-    kind: str,
-    state_hash: str,
-    submitted: dict[str, Any],
-    rubric_version: str = "student-v1",
-) -> dict[str, Any]:
-    claims, normalized_session_id, active_upload_id = _active_student_phase_session(
-        session_id=session_id,
-        context_token=context_token,
-        required_scope="attempt",
-        feature_flag="STUDENT_CHECK_WORK_ENABLED",
-        disabled_message="Student Check My Work chưa được bật",
-    )
-    overview = get_student_overview(
-        session_id=normalized_session_id,
-        context_token=context_token,
-    )
-    if str(overview["upload_id"]) != active_upload_id:
-        raise StudentWorkflowError(409, "Student upload đã thay đổi trong khi chấm bài")
-    if str(state_hash or "") != str(overview["student_state_hash"]):
-        raise StudentWorkflowError(409, "Bài làm dựa trên trạng thái file đã cũ")
-
-    expected = _build_attempt_expected_state(overview)
-    scoring_submitted = dict(submitted)
-    scoring_submitted.pop("correction_after_hints", None)
-    evaluation = score_attempt(kind, scoring_submitted, expected, rubric_version)
-    hinted_categories = _hinted_issue_categories(
-        active_upload_id,
-        state_hash=overview["student_state_hash"],
-        kind=kind,
-    )
-    if hinted_categories:
-        current_issue_categories = {item.category for item in evaluation.issues}
-        expected["correction_after_hints"] = True
-        scoring_submitted["correction_after_hints"] = hinted_categories.isdisjoint(
-            current_issue_categories
-        )
-        evaluation = score_attempt(
-            kind,
-            scoring_submitted,
-            expected,
-            rubric_version,
-        )
-    summary = {
-        "issueIds": [item.id for item in evaluation.issues],
-        "evidenceCount": sum(item.matched for item in evaluation.breakdown),
-        "breakdown": [
-            {
-                "category": item.category,
-                "earned": _decimal_number(item.earned),
-                "maxScore": _decimal_number(item.max_score),
-            }
-            for item in evaluation.breakdown
-        ],
-    }
-    event = {
-        "event": "attempt_completed",
-        "sessionId": claims.session_id,
-        "kind": kind,
-        "submittedStateHash": evaluation.submitted_state_hash,
-        "sessionStateHash": overview["student_state_hash"],
-        "rubricVersion": rubric_version,
-        "score": _decimal_number(evaluation.score),
-        "completed": True,
-        "deterministic": True,
-        "summary": summary,
-    }
-    try:
-        persisted = record_attempt_completed(context_token, event)
-    except StudentSessionClientError as exc:
-        raise StudentWorkflowError(exc.status_code, str(exc)) from exc
-    attempt = persisted.get("attempt") or {}
-    attempt_id = str(attempt.get("id") or "").strip()
-    if not attempt_id:
-        raise StudentWorkflowError(503, "Backend không trả về attempt id")
-    _save_student_attempt(
-        active_upload_id,
-        {
-            "attempt_id": attempt_id,
-            "session_id": claims.session_id,
-            "state_hash": overview["student_state_hash"],
-            "evaluation": evaluation.model_dump(mode="json"),
-            "revealed_levels": {},
-        },
-    )
-    return {
-        "attempt": attempt,
-        "progress": persisted.get("progress") or {},
-        "evaluation": evaluation.public_payload(),
-    }
-
-
-def reveal_student_hint(
-    *,
-    session_id: str,
-    attempt_id: str,
-    issue_id: str,
-    level: int,
-    context_token: str,
-) -> dict[str, Any]:
-    claims, normalized_session_id, active_upload_id = _active_student_phase_session(
-        session_id=session_id,
-        context_token=context_token,
-        required_scope="attempt",
-        feature_flag="STUDENT_CHECK_WORK_ENABLED",
-        disabled_message="Student Check My Work chưa được bật",
-    )
-    overview = get_student_overview(
-        session_id=normalized_session_id,
-        context_token=context_token,
-    )
-    record = _read_student_attempt(active_upload_id, attempt_id)
-    if record.get("session_id") != claims.session_id:
-        raise StudentWorkflowError(403, "Attempt không thuộc phiên này")
-    if record.get("state_hash") != overview.get("student_state_hash"):
-        raise StudentWorkflowError(409, "Attempt đã cũ so với trạng thái file hiện tại")
-    evaluation = AttemptEvaluation.model_validate(record.get("evaluation") or {})
-    try:
-        hint = hint_for(evaluation, issue_id, int(level))
-    except KeyError as exc:
-        raise StudentWorkflowError(404, "Không tìm thấy lỗi cần gợi ý") from exc
-    except ValueError as exc:
-        raise StudentWorkflowError(400, str(exc)) from exc
-
-    revealed = dict(record.get("revealed_levels") or {})
-    current = int(revealed.get(issue_id, -1))
-    if int(level) > current + 1:
-        raise StudentWorkflowError(409, "Gợi ý phải được mở theo đúng thứ tự")
-    event = {
-        "event": "hint_revealed",
-        "sessionId": claims.session_id,
-        "attemptId": attempt_id,
-        "issueId": issue_id,
-        "level": int(level),
-    }
-    try:
-        record_hint_revealed(context_token, event)
-    except StudentSessionClientError as exc:
-        raise StudentWorkflowError(exc.status_code, str(exc)) from exc
-    if int(level) > current:
-        revealed[issue_id] = int(level)
-        record["revealed_levels"] = revealed
-        _replace_student_attempt(active_upload_id, record)
-    return {
-        "attempt_id": attempt_id,
-        "hint_level_used": max(revealed.values(), default=0),
-        "hint": hint.model_dump(mode="json"),
-    }
-
-
 def _active_question_session(
     *,
     session_id: str,
@@ -767,6 +620,8 @@ def _anonymized_student_workbook(
             confidential_values=confidential_values,
             full_document_numbers=full_document_numbers,
         )
+    except AnonymizationUnsupportedLayerError as exc:
+        raise StudentWorkflowError(422, str(exc)) from exc
     except AnonymizationExportError as exc:
         raise StudentWorkflowError(400, str(exc)) from exc
     except KeyError as exc:
@@ -783,21 +638,60 @@ def _anonymized_student_workbook(
             filename=safe_filename,
             replaced_categories=exported.replaced_categories,
             warnings=exported.warnings,
+            replaced_layers=exported.replaced_layers,
         ),
         confidential_values,
     )
 
 
 def _student_anonymization_secret() -> str:
-    secret = (
-        os.getenv("STUDENT_ANONYMIZATION_SECRET")
-        or os.getenv("CONVERSION_CONTEXT_SECRET")
-        or os.getenv("JWT_SECRET")
-        or ""
-    ).strip()
+    dedicated = os.getenv("STUDENT_ANONYMIZATION_SECRET", "").strip()
+    if dedicated:
+        return dedicated
+
+    environment = os.getenv("NODE_ENV", "").strip().lower()
+    allow_shared_fallback = (
+        environment in {"development", "test"}
+        and os.getenv("STUDENT_ANONYMIZATION_ALLOW_SHARED_SECRET_FALLBACK", "")
+        .strip()
+        .lower()
+        in {"1", "true", "yes"}
+    )
+    secret = ""
+    if allow_shared_fallback:
+        secret = (
+            os.getenv("CONVERSION_CONTEXT_SECRET")
+            or os.getenv("JWT_SECRET")
+            or ""
+        ).strip()
     if not secret:
         raise ValueError("Student anonymization secret chưa được cấu hình")
     return secret
+
+
+def assert_student_anonymization_config() -> None:
+    environment = os.getenv("NODE_ENV", "").strip().lower()
+    enabled = (
+        os.getenv("STUDENT_ASSISTANT_ENABLED", "false").strip().lower()
+        == "true"
+    )
+    if environment != "production" or not enabled:
+        return
+
+    secret = os.getenv("STUDENT_ANONYMIZATION_SECRET", "").strip()
+    if len(secret) < 32:
+        raise ValueError(
+            "STUDENT_ANONYMIZATION_SECRET must contain at least 32 characters"
+        )
+    for forbidden_name in (
+        "CONVERSION_CONTEXT_SECRET",
+        "CONVERTER_SERVICE_TOKEN",
+    ):
+        forbidden = os.getenv(forbidden_name, "").strip()
+        if forbidden and hmac.compare_digest(secret, forbidden):
+            raise ValueError(
+                f"STUDENT_ANONYMIZATION_SECRET must differ from {forbidden_name}"
+            )
 
 
 def _student_confidential_values(table: Any) -> dict[str, list[Any]]:
@@ -861,6 +755,7 @@ def _build_current_overview(
             formulas,
         ) = _effective_mapping(metadata)
         template = get_misa_template(target_template_id)
+        operation_state = _operation_state(metadata)
         preview = preview_mapping(
             upload_id=upload_id,
             target_template_id=target_template_id,
@@ -868,6 +763,7 @@ def _build_current_overview(
             defaults=defaults,
             formulas=formulas,
             student_context_token=token,
+            **operation_state,
         )
         readiness = readiness_mapping(
             upload_id=upload_id,
@@ -876,6 +772,7 @@ def _build_current_overview(
             defaults=defaults,
             formulas=formulas,
             student_context_token=token,
+            **operation_state,
         )
         readiness = _merge_student_structure_warnings(readiness, structure_issues)
     except KeyError as exc:
@@ -1144,7 +1041,6 @@ def _analysis_completed_payload(overview: dict[str, Any]) -> dict[str, Any]:
             "explanationCount": summary["explanation_count"],
             "stateHash": overview["student_state_hash"],
             "readinessStatus": overview["readiness"].get("status"),
-            "readinessScore": overview["readiness"].get("score"),
         },
         "status": "analyzed",
     }
@@ -1218,131 +1114,6 @@ def _write_overview_cache(upload_id: str, payload: dict[str, Any]) -> None:
         encoding="utf-8",
     )
     temporary.replace(path)
-
-
-def _build_attempt_expected_state(overview: dict[str, Any]) -> dict[str, Any]:
-    suggestion = overview.get("mapping_suggestion") or {}
-    mapping = dict(suggestion.get("mapping") or {})
-    defaults = dict(suggestion.get("defaults") or {})
-    formulas = dict(suggestion.get("formulas") or {})
-    resolved_targets: set[str] = set()
-    for target_spec in mapping.values():
-        targets = target_spec if isinstance(target_spec, list) else [target_spec]
-        resolved_targets.update(str(target) for target in targets if target)
-    resolved_targets.update(
-        str(key) for key, value in defaults.items() if value not in (None, "")
-    )
-    resolved_targets.update(str(key) for key, value in formulas.items() if value)
-    required = {
-        str(target): str(target) in resolved_targets
-        for target in overview.get("target_headers") or []
-        if "(*)" in str(target)
-    }
-    date_number: dict[str, Any] = {}
-    vat_amount: dict[str, Any] = {}
-    for row_index, row in enumerate(
-        (overview.get("student_preview") or {}).get("rows") or [],
-        1,
-    ):
-        for field, value in row.items():
-            key = f"{row_index}:{field}"
-            normalized = str(field).casefold()
-            if any(marker in normalized for marker in ("ngày", "số lượng", "đơn giá")):
-                date_number[key] = value
-            if any(
-                marker in normalized
-                for marker in ("thành tiền", "tiền thuế", "thuế suất", "tổng tiền")
-            ):
-                vat_amount[key] = value
-    return {
-        "mapping": mapping,
-        "required_completeness": required,
-        "date_number": date_number,
-        "vat_amount": vat_amount,
-        "classification": overview.get("target_template_id"),
-    }
-
-
-def _attempts_path(upload_id: str) -> Path:
-    return _overview_path(upload_id).parent / ATTEMPTS_FILENAME
-
-
-def _read_student_attempts(upload_id: str) -> list[dict[str, Any]]:
-    path = _attempts_path(upload_id)
-    if not path.is_file():
-        return []
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return []
-    return payload if isinstance(payload, list) else []
-
-
-def _hinted_issue_categories(
-    upload_id: str,
-    *,
-    state_hash: str,
-    kind: str,
-) -> set[str]:
-    categories: set[str] = set()
-    for record in _read_student_attempts(upload_id):
-        if record.get("state_hash") != state_hash:
-            continue
-        revealed = record.get("revealed_levels") or {}
-        if not revealed:
-            continue
-        try:
-            evaluation = AttemptEvaluation.model_validate(record.get("evaluation") or {})
-        except ValueError:
-            continue
-        if evaluation.kind != kind:
-            continue
-        categories.update(
-            issue.category for issue in evaluation.issues if issue.id in revealed
-        )
-    return categories
-
-
-def _write_student_attempts(upload_id: str, attempts: list[dict[str, Any]]) -> None:
-    path = _attempts_path(upload_id)
-    temporary = path.with_suffix(".tmp")
-    temporary.write_text(
-        json.dumps(
-            jsonable_encoder(attempts[-50:]),
-            ensure_ascii=False,
-            separators=(",", ":"),
-        ),
-        encoding="utf-8",
-    )
-    temporary.replace(path)
-
-
-def _save_student_attempt(upload_id: str, record: dict[str, Any]) -> None:
-    attempts = [
-        item
-        for item in _read_student_attempts(upload_id)
-        if item.get("attempt_id") != record.get("attempt_id")
-    ]
-    attempts.append(record)
-    _write_student_attempts(upload_id, attempts)
-
-
-def _read_student_attempt(upload_id: str, attempt_id: str) -> dict[str, Any]:
-    record = next(
-        (
-            item
-            for item in _read_student_attempts(upload_id)
-            if item.get("attempt_id") == str(attempt_id or "").strip()
-        ),
-        None,
-    )
-    if record is None:
-        raise StudentWorkflowError(404, "Không tìm thấy lần làm bài")
-    return record
-
-
-def _replace_student_attempt(upload_id: str, record: dict[str, Any]) -> None:
-    _save_student_attempt(upload_id, record)
 
 
 def _decimal_number(value) -> int | float:

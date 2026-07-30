@@ -9,6 +9,9 @@ const {
 } = require("../controllers/accountingWorkspaceController");
 
 const router = express.Router();
+function studentInternalRoutesEnabled(env = process.env) {
+  return String(env.STUDENT_ASSISTANT_ENABLED || "false").toLowerCase() === "true";
+}
 const {
   checkInternalReconstructionProfile,
   findInternalReconstructionProfile,
@@ -17,10 +20,8 @@ const {
 const {
   checkStudentSessionActive,
   getInternalStudentActivities,
-  recordStudentAttempt,
   recordStudentActivity,
   recordStudentAnalysisCompleted,
-  recordStudentHint,
   recordStudentQuestionEvent,
 } = require("../controllers/studentSessionController");
 router.get("/master-data/context/:snapshotSetHash", (req, res, next) => {
@@ -56,26 +57,23 @@ router.post("/reconstructions/:id/events", (req, res, next) => {
     next,
   );
 });
-router.post("/student/sessions/:id/events", (req, res, next) => {
-  Promise.resolve(recordStudentAnalysisCompleted(req, res, next)).catch(next);
-});
-router.post("/student/sessions/:id/questions", (req, res, next) => {
-  Promise.resolve(recordStudentQuestionEvent(req, res, next)).catch(next);
-});
-router.post("/student/sessions/:id/attempts", (req, res, next) => {
-  Promise.resolve(recordStudentAttempt(req, res, next)).catch(next);
-});
-router.post("/student/sessions/:id/attempts/:attemptId/hints", (req, res, next) => {
-  Promise.resolve(recordStudentHint(req, res, next)).catch(next);
-});
-router.post("/student/sessions/:id/activities", (req, res, next) => {
-  Promise.resolve(recordStudentActivity(req, res, next)).catch(next);
-});
-router.get("/student/sessions/:id/activities", (req, res, next) => {
-  Promise.resolve(getInternalStudentActivities(req, res, next)).catch(next);
-});
-router.get("/student/sessions/:id/active", (req, res, next) => {
-  Promise.resolve(checkStudentSessionActive(req, res, next)).catch(next);
-});
+if (studentInternalRoutesEnabled()) {
+  router.post("/student/sessions/:id/events", (req, res, next) => {
+    Promise.resolve(recordStudentAnalysisCompleted(req, res, next)).catch(next);
+  });
+  router.post("/student/sessions/:id/questions", (req, res, next) => {
+    Promise.resolve(recordStudentQuestionEvent(req, res, next)).catch(next);
+  });
+  router.post("/student/sessions/:id/activities", (req, res, next) => {
+    Promise.resolve(recordStudentActivity(req, res, next)).catch(next);
+  });
+  router.get("/student/sessions/:id/activities", (req, res, next) => {
+    Promise.resolve(getInternalStudentActivities(req, res, next)).catch(next);
+  });
+  router.get("/student/sessions/:id/active", (req, res, next) => {
+    Promise.resolve(checkStudentSessionActive(req, res, next)).catch(next);
+  });
+}
 
 module.exports = router;
+module.exports.studentInternalRoutesEnabled = studentInternalRoutesEnabled;

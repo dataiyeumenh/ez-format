@@ -14,7 +14,9 @@ function InspectorContent({ explanation, compact = false }) {
     return (
       <div className="flex min-h-64 flex-col items-center justify-center p-6 text-center">
         <BookOpenCheck className="text-slate-300" size={34} />
-        <h2 className="mt-3 text-base font-black text-gray-900">Chọn một mục để hiểu</h2>
+        <h2 className="mt-3 text-base font-black text-gray-900">
+          Chọn một mục để hiểu
+        </h2>
         <p className="mt-1 max-w-xs text-sm leading-6 text-gray-500">
           Chọn mapping, ô xem trước hoặc lỗi để mở giải thích cùng bằng chứng.
         </p>
@@ -124,7 +126,11 @@ function InspectorContent({ explanation, compact = false }) {
   );
 }
 
-export default function ExplanationInspector({ explanation, mobileOpen, onMobileOpenChange }) {
+export default function ExplanationInspector({
+  explanation,
+  mobileOpen,
+  onMobileOpenChange,
+}) {
   return (
     <>
       <aside
@@ -134,7 +140,10 @@ export default function ExplanationInspector({ explanation, mobileOpen, onMobile
         <InspectorContent explanation={explanation} />
       </aside>
 
-      <Dialog.Root open={Boolean(explanation) && mobileOpen} onOpenChange={onMobileOpenChange}>
+      <Dialog.Root
+        open={Boolean(explanation) && mobileOpen}
+        onOpenChange={onMobileOpenChange}
+      >
         <Dialog.Portal>
           <Dialog.Overlay className="fixed inset-0 z-[90] bg-slate-950/45 backdrop-blur-[2px] xl:hidden" />
           <Dialog.Content className="fixed inset-x-0 bottom-0 z-[100] max-h-[88vh] rounded-t-[28px] bg-white shadow-2xl xl:hidden">

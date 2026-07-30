@@ -4,6 +4,7 @@ import {
   buildStudentMappingRows,
   findStudentExplanation,
   getNextStudentTabId,
+  getStudentDataTabDomIds,
   setStudentMappingTarget,
 } from "../../utils/studentAssistant";
 
@@ -109,11 +110,13 @@ export default function StudentMappingTable({
         <div
           className="mt-4 flex gap-1 overflow-x-auto"
           role="tablist"
-          aria-label="Dữ liệu phiên học"
+          aria-label="Dữ liệu phiên hỗ trợ"
           aria-orientation="horizontal"
         >
-          {STUDENT_TABS.map(([id, label, Icon]) => (
-            <button
+          {STUDENT_TABS.map(([id, label, Icon]) => {
+            const { tabId, panelId } = getStudentDataTabDomIds(id);
+            return (
+              <button
               key={id}
               ref={(node) => {
                 if (node) tabRefs.current[id] = node;
@@ -121,8 +124,8 @@ export default function StudentMappingTable({
               }}
               type="button"
               role="tab"
-              id={`student-tab-${id}`}
-              aria-controls={`student-panel-${id}`}
+              id={tabId}
+              aria-controls={panelId}
               aria-selected={view === id}
               tabIndex={view === id ? 0 : -1}
               onClick={() => setView(id)}
@@ -132,20 +135,19 @@ export default function StudentMappingTable({
                   ? "border-primary-600 text-primary-700"
                   : "border-transparent text-gray-500 hover:text-gray-800"
               }`}
-            >
-              <Icon size={16} /> {label}
-            </button>
-          ))}
+              >
+                <Icon size={16} /> {label}
+              </button>
+            );
+          })}
         </div>
       </div>
 
       {evidenceNavigation && (
         <div className="border-b border-cyan-100 bg-cyan-50 px-4 py-3 text-xs font-bold text-cyan-900 sm:px-5">
-          Evidence: dòng nguồn {evidenceNavigation.sourceRow || "-"} · trường {" "}
+          Evidence: dòng nguồn {evidenceNavigation.sourceRow || "-"} · trường{" "}
           {evidenceNavigation.sourceField || "-"}
-          {evidenceNavigation.targetField
-            ? ` → ${evidenceNavigation.targetField}`
-            : ""}
+          {evidenceNavigation.targetField ? ` → ${evidenceNavigation.targetField}` : ""}
           {!evidenceNavigation.visibleInPreview && evidenceNavigation.sourceRow
             ? " · dòng chính xác được tải trong bảng Source row bên dưới"
             : ""}
@@ -154,9 +156,9 @@ export default function StudentMappingTable({
 
       {view === "mapping" && (
         <div
-          id="student-panel-mapping"
+          id={getStudentDataTabDomIds("mapping").panelId}
           role="tabpanel"
-          aria-labelledby="student-tab-mapping"
+          aria-labelledby={getStudentDataTabDomIds("mapping").tabId}
           tabIndex={0}
         >
           <div className="border-b border-slate-100 p-4 sm:px-5">
@@ -177,16 +179,12 @@ export default function StudentMappingTable({
           </div>
           <div className="max-h-[610px] divide-y divide-slate-100 overflow-y-auto">
             {visibleMappings.map((item) => {
-              const explanation = findStudentExplanation(
-                explanations,
-                item.target,
-                {
-                  preferredKinds:
-                    item.mode === "formula"
-                      ? ["calculation", "field"]
-                      : ["mapping", "field"],
-                },
-              );
+              const explanation = findStudentExplanation(explanations, item.target, {
+                preferredKinds:
+                  item.mode === "formula"
+                    ? ["calculation", "field"]
+                    : ["mapping", "field"],
+              });
               const selected = explanation?.id === selectedId;
               const detail =
                 item.mode === "formula"
@@ -194,10 +192,12 @@ export default function StudentMappingTable({
                   : item.mode === "default"
                     ? String(item.defaultValue)
                     : item.sources.join(", ") || "Chưa có nguồn";
-              const selectedSource = Object.entries(studentWork?.mapping || {}).find(
-                ([, targetSpec]) =>
-                  (Array.isArray(targetSpec) ? targetSpec : [targetSpec]).includes(item.target),
-              )?.[0] || "";
+              const selectedSource =
+                Object.entries(studentWork?.mapping || {}).find(([, targetSpec]) =>
+                  (Array.isArray(targetSpec) ? targetSpec : [targetSpec]).includes(
+                    item.target,
+                  ),
+                )?.[0] || "";
               return (
                 <div
                   key={item.target}
@@ -226,13 +226,16 @@ export default function StudentMappingTable({
                     >
                       <span className="flex flex-wrap items-center gap-2">
                         <span className="font-bold text-gray-900">{item.target}</span>
-                      {item.required && (
-                        <span className="text-[10px] font-black uppercase text-red-600">
-                          Bắt buộc
-                        </span>
-                      )}
+                        {item.required && (
+                          <span className="text-[10px] font-black uppercase text-red-600">
+                            Bắt buộc
+                          </span>
+                        )}
                       </span>
-                      <span className="mt-1 block truncate text-xs text-gray-500" title={detail}>
+                      <span
+                        className="mt-1 block truncate text-xs text-gray-500"
+                        title={detail}
+                      >
                         {detail}
                       </span>
                     </button>
@@ -241,7 +244,9 @@ export default function StudentMappingTable({
                     Mapping của bạn
                     <select
                       value={selectedSource}
-                      onChange={(event) => updateMapping(item.target, event.target.value)}
+                      onChange={(event) =>
+                        updateMapping(item.target, event.target.value)
+                      }
                       className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-2 py-2 text-xs outline-none focus:border-primary-400"
                     >
                       <option value="">Chưa ghép</option>
@@ -251,7 +256,9 @@ export default function StudentMappingTable({
                         </option>
                       ))}
                     </select>
-                    <span className={`mt-1 inline-block rounded-full px-2 py-0.5 text-[10px] ${MODE_TONES[item.mode]}`}>
+                    <span
+                      className={`mt-1 inline-block rounded-full px-2 py-0.5 text-[10px] ${MODE_TONES[item.mode]}`}
+                    >
                       {MODE_LABELS[item.mode]}
                     </span>
                   </label>
@@ -269,10 +276,10 @@ export default function StudentMappingTable({
 
       {view === "preview" && (
         <div
-          id="student-panel-preview"
+          id={getStudentDataTabDomIds("preview").panelId}
           className="table-scroll max-h-[610px] overflow-auto"
           role="tabpanel"
-          aria-labelledby="student-tab-preview"
+          aria-labelledby={getStudentDataTabDomIds("preview").tabId}
           tabIndex={0}
         >
           <table className="min-w-full border-separate border-spacing-0 text-left text-xs">
@@ -309,22 +316,33 @@ export default function StudentMappingTable({
                       }`}
                     >
                       <label className="block">
-                        <span className="sr-only">Chỉnh dòng {rowIndex + 1}, trường {header}</span>
+                        <span className="sr-only">
+                          Chỉnh dòng {rowIndex + 1}, trường {header}
+                        </span>
                         <input
                           value={row[header] ?? ""}
                           onFocus={() =>
                             selectTarget(header, {
-                              preferredKinds: ["issue", "normalization", "mapping", "field"],
+                              preferredKinds: [
+                                "issue",
+                                "normalization",
+                                "mapping",
+                                "field",
+                              ],
                               previewRow: rowIndex + 1,
                               sourceRow:
-                                Number(analysis?.detected?.header_row || 1) + rowIndex + 1,
+                                Number(analysis?.detected?.header_row || 1) +
+                                rowIndex +
+                                1,
                             })
                           }
                           onChange={(event) =>
                             updateStudentCell(rowIndex, header, event.target.value)
                           }
                           className={`w-full min-w-32 rounded-lg border px-2 py-1.5 text-gray-700 outline-none focus:border-primary-400 focus:bg-white ${
-                            studentWork?.edited_cells?.includes(`${rowIndex + 1}:${header}`)
+                            studentWork?.edited_cells?.includes(
+                              `${rowIndex + 1}:${header}`,
+                            )
                               ? "border-cyan-300 bg-cyan-50"
                               : "border-transparent bg-transparent hover:border-slate-200 hover:bg-white"
                           }`}
@@ -346,10 +364,10 @@ export default function StudentMappingTable({
 
       {view === "issues" && (
         <div
-          id="student-panel-issues"
+          id={getStudentDataTabDomIds("issues").panelId}
           className="max-h-[610px] divide-y divide-slate-100 overflow-y-auto"
           role="tabpanel"
-          aria-labelledby="student-tab-issues"
+          aria-labelledby={getStudentDataTabDomIds("issues").tabId}
           tabIndex={0}
         >
           {(analysis?.readiness?.issues || []).map((issue, index) => {
@@ -382,7 +400,8 @@ export default function StudentMappingTable({
                     {issue.severity}
                   </span>
                   <span className="text-xs font-bold text-gray-500">
-                    {issue.field || issue.category} {issue.row ? `· dòng ${issue.row}` : ""}
+                    {issue.field || issue.category}{" "}
+                    {issue.row ? `· dòng ${issue.row}` : ""}
                   </span>
                 </div>
                 <p className="mt-2 text-sm font-semibold leading-6 text-gray-800">

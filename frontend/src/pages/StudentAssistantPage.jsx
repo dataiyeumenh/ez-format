@@ -13,7 +13,6 @@ import Navbar from "../components/Navbar";
 import Footer from "../components/Footer";
 import ExplanationInspector from "../components/student/ExplanationInspector";
 import FileQuestionPanel from "../components/student/FileQuestionPanel";
-import CheckWorkPanel from "../components/student/CheckWorkPanel";
 import AccountingMapPanel from "../components/student/AccountingMapPanel";
 import InternshipAssistantPanel from "../components/student/InternshipAssistantPanel";
 import ReconciliationPanel from "../components/student/ReconciliationPanel";
@@ -23,7 +22,6 @@ import SourceRowPanel from "../components/student/SourceRowPanel";
 import {
   fetchStudentAssistantStatus,
   studentAccountingMapEnabled,
-  studentCheckWorkEnabled,
   studentFileQaEnabled,
   studentInternshipEnabled,
   studentReconciliationEnabled,
@@ -32,7 +30,6 @@ import {
 } from "../hooks/useStudentAssistantApi";
 import {
   classifyStudentAssistantError,
-  buildStudentAttemptSubmission,
   createStudentWorkDraft,
   clearStudentSessionResume,
   createStudentSourceRowRequestContext,
@@ -94,10 +91,6 @@ export default function StudentAssistantPage() {
     refreshContext,
     askQuestion,
     getSourceRow,
-    submitAttempt,
-    revealHint,
-    getAttemptHistory,
-    getSkillProgress,
     getAccountingMap,
     getReconciliation,
     previewAnonymization,
@@ -112,7 +105,6 @@ export default function StudentAssistantPage() {
     aiStatus: null,
     capabilityEnabled: null,
     questionCapabilityEnabled: null,
-    attemptCapabilityEnabled: null,
     accountingMapCapabilityEnabled: null,
     reconciliationCapabilityEnabled: null,
     internshipCapabilityEnabled: null,
@@ -132,17 +124,23 @@ export default function StudentAssistantPage() {
   const [evidenceNavigation, setEvidenceNavigation] = useState(null);
   const [sourceRowState, setSourceRowState] = useState({ status: "idle" });
   const [activeTab, setActiveTab] = useState("overview");
-  const [attemptResult, setAttemptResult] = useState(null);
   const [studentWork, setStudentWork] = useState(null);
-  const [attemptHistory, setAttemptHistory] = useState([]);
-  const [skillProgress, setSkillProgress] = useState({ skills: {} });
-  const [attemptLoading, setAttemptLoading] = useState(false);
-  const [attemptError, setAttemptError] = useState("");
-  const [revealedLevels, setRevealedLevels] = useState({});
-  const [revealedHints, setRevealedHints] = useState({});
-  const [accountingMapState, setAccountingMapState] = useState({ data: null, loading: false, error: "" });
-  const [reconciliationState, setReconciliationState] = useState({ data: null, loading: false, error: "" });
-  const [activityState, setActivityState] = useState({ activities: [], loaded: false, loading: false, error: "" });
+  const [accountingMapState, setAccountingMapState] = useState({
+    data: null,
+    loading: false,
+    error: "",
+  });
+  const [reconciliationState, setReconciliationState] = useState({
+    data: null,
+    loading: false,
+    error: "",
+  });
+  const [activityState, setActivityState] = useState({
+    activities: [],
+    loaded: false,
+    loading: false,
+    error: "",
+  });
   const tabRefs = useRef({});
   const sourceRowRequestRef = useRef(0);
   const sourceRowAbortRef = useRef(null);
@@ -151,25 +149,6 @@ export default function StudentAssistantPage() {
     session,
     analysis,
     sourceRowRequestRef.current,
-  );
-
-  const refreshAttemptMetadata = useCallback(
-    async (activeSession) => {
-      const sessionId = activeSession?.session?.id;
-      const contextToken = activeSession?.contextToken;
-      if (!sessionId || !contextToken || !studentCheckWorkEnabled) return;
-      const [historyResult, progressResult] = await Promise.allSettled([
-        getAttemptHistory(sessionId, contextToken),
-        getSkillProgress(),
-      ]);
-      if (historyResult.status === "fulfilled") {
-        setAttemptHistory(historyResult.value.attempts || []);
-      }
-      if (progressResult.status === "fulfilled") {
-        setSkillProgress(progressResult.value.progress || { skills: {} });
-      }
-    },
-    [getAttemptHistory, getSkillProgress],
   );
 
   const loadAccountingMap = useCallback(async () => {
@@ -181,7 +160,11 @@ export default function StudentAssistantPage() {
       const data = await getAccountingMap(sessionId, contextToken);
       setAccountingMapState({ data, loading: false, error: "" });
     } catch (requestError) {
-      setAccountingMapState({ data: null, loading: false, error: requestError.message });
+      setAccountingMapState({
+        data: null,
+        loading: false,
+        error: requestError.message,
+      });
     }
   }, [getAccountingMap, session]);
 
@@ -194,7 +177,11 @@ export default function StudentAssistantPage() {
       const data = await getReconciliation(sessionId, contextToken);
       setReconciliationState({ data, loading: false, error: "" });
     } catch (requestError) {
-      setReconciliationState({ data: null, loading: false, error: requestError.message });
+      setReconciliationState({
+        data: null,
+        loading: false,
+        error: requestError.message,
+      });
     }
   }, [getReconciliation, session]);
 
@@ -205,9 +192,19 @@ export default function StudentAssistantPage() {
     setActivityState((current) => ({ ...current, loading: true, error: "" }));
     try {
       const data = await getActivities(sessionId, contextToken);
-      setActivityState({ activities: data.activities || [], loaded: true, loading: false, error: "" });
+      setActivityState({
+        activities: data.activities || [],
+        loaded: true,
+        loading: false,
+        error: "",
+      });
     } catch (requestError) {
-      setActivityState((current) => ({ ...current, loaded: true, loading: false, error: requestError.message }));
+      setActivityState((current) => ({
+        ...current,
+        loaded: true,
+        loading: false,
+        error: requestError.message,
+      }));
     }
   }, [getActivities, session]);
 
@@ -237,7 +234,6 @@ export default function StudentAssistantPage() {
         saveStudentSessionResume(sessionStorage, activeResume);
         setAnalysis(overview);
         setStatus("ready");
-        refreshAttemptMetadata(activeResume);
       })
       .catch((requestError) => {
         if (cancelled) return;
@@ -251,14 +247,11 @@ export default function StudentAssistantPage() {
     return () => {
       cancelled = true;
     };
-  }, [getOverview, refreshAttemptMetadata, refreshContext]);
+  }, [getOverview, refreshContext]);
 
   useEffect(() => {
     if (!analysis) return;
     setStudentWork(createStudentWorkDraft(analysis));
-    setAttemptResult(null);
-    setRevealedLevels({});
-    setRevealedHints({});
     setSelectedExplanationId((currentId) => {
       const current = keepCurrentExplanationSelection(
         currentId,
@@ -276,9 +269,22 @@ export default function StudentAssistantPage() {
   }, [analysis]);
 
   useEffect(() => {
-    if (activeTab === "accounting-map" && !accountingMapState.data && !accountingMapState.loading && !accountingMapState.error) loadAccountingMap();
-    if (activeTab === "reconciliation" && !reconciliationState.data && !reconciliationState.loading && !reconciliationState.error) loadReconciliation();
-    if (activeTab === "internship" && !activityState.loaded && !activityState.loading) loadActivities();
+    if (
+      activeTab === "accounting-map" &&
+      !accountingMapState.data &&
+      !accountingMapState.loading &&
+      !accountingMapState.error
+    )
+      loadAccountingMap();
+    if (
+      activeTab === "reconciliation" &&
+      !reconciliationState.data &&
+      !reconciliationState.loading &&
+      !reconciliationState.error
+    )
+      loadReconciliation();
+    if (activeTab === "internship" && !activityState.loaded && !activityState.loading)
+      loadActivities();
   }, [
     activeTab,
     accountingMapState.data,
@@ -296,8 +302,7 @@ export default function StudentAssistantPage() {
 
   const selectedExplanation = useMemo(
     () =>
-      analysis?.explanations?.find((item) => item.id === selectedExplanationId) ||
-      null,
+      analysis?.explanations?.find((item) => item.id === selectedExplanationId) || null,
     [analysis?.explanations, selectedExplanationId],
   );
 
@@ -325,14 +330,7 @@ export default function StudentAssistantPage() {
     setEvidenceNavigation(null);
     setSourceRowState({ status: "idle" });
     setActiveTab("overview");
-    setAttemptResult(null);
     setStudentWork(null);
-    setAttemptHistory([]);
-    setSkillProgress({ skills: {} });
-    setAttemptLoading(false);
-    setAttemptError("");
-    setRevealedLevels({});
-    setRevealedHints({});
     setAccountingMapState({ data: null, loading: false, error: "" });
     setReconciliationState({ data: null, loading: false, error: "" });
     setActivityState({ activities: [], loaded: false, loading: false, error: "" });
@@ -356,7 +354,10 @@ export default function StudentAssistantPage() {
       inputRef.current?.click();
       return;
     }
-    if (serviceStatus.serviceOnline === false || serviceStatus.capabilityEnabled === false) {
+    if (
+      serviceStatus.serviceOnline === false ||
+      serviceStatus.capabilityEnabled === false
+    ) {
       setError({ kind: "offline", message: "Converter Student chưa sẵn sàng." });
       setStatus("error");
       return;
@@ -379,10 +380,10 @@ export default function StudentAssistantPage() {
         file,
         created.contextToken,
         targetTemplateId,
+        created.session?.id,
       );
       setAnalysis(analyzed);
       setStatus("ready");
-      refreshAttemptMetadata(created);
     } catch (requestError) {
       const kind = classifyStudentAssistantError(requestError);
       if (kind === "expired" || kind === "permission") {
@@ -393,63 +394,6 @@ export default function StudentAssistantPage() {
         message: requestError.message,
       });
       setStatus("error");
-    }
-  };
-
-  const handleSubmitAttempt = async () => {
-    const sessionId = session?.session?.id;
-    const contextToken = session?.contextToken;
-    if (!sessionId || !contextToken || !analysis || !studentWork) return;
-    setAttemptLoading(true);
-    setAttemptError("");
-    try {
-      const result = await submitAttempt(sessionId, contextToken, {
-        kind: "mapping_attempt",
-        state_hash: analysis.student_state_hash,
-        submitted: buildStudentAttemptSubmission(analysis, studentWork),
-      });
-      setAttemptResult(result);
-      setSkillProgress(result.progress || { skills: {} });
-      setAttemptHistory((history) => [result.attempt, ...history]);
-      setRevealedLevels({});
-      setRevealedHints({});
-    } catch (requestError) {
-      setAttemptError(requestError.message);
-    } finally {
-      setAttemptLoading(false);
-    }
-  };
-
-  const handleRevealHint = async (issueId, level) => {
-    const sessionId = session?.session?.id;
-    const contextToken = session?.contextToken;
-    const attemptId = attemptResult?.attempt?.id;
-    if (!sessionId || !contextToken || !attemptId) return;
-    setAttemptLoading(true);
-    setAttemptError("");
-    try {
-      const result = await revealHint(
-        sessionId,
-        contextToken,
-        attemptId,
-        issueId,
-        level,
-      );
-      setRevealedLevels((current) => ({
-        ...current,
-        [issueId]: Math.max(Number(current[issueId] ?? -1), Number(level)),
-      }));
-      setRevealedHints((current) => ({
-        ...current,
-        [issueId]: {
-          ...(current[issueId] || {}),
-          [level]: result.hint,
-        },
-      }));
-    } catch (requestError) {
-      setAttemptError(requestError.message);
-    } finally {
-      setAttemptLoading(false);
     }
   };
 
@@ -524,7 +468,8 @@ export default function StudentAssistantPage() {
           sourceRowContextRef.current,
           requestEpoch,
         )
-      ) return;
+      )
+        return;
       setSourceRowState({
         status: "ready",
         data,
@@ -534,7 +479,8 @@ export default function StudentAssistantPage() {
       if (
         abortController.signal.aborted ||
         sourceRowRequestRef.current !== requestEpoch
-      ) return;
+      )
+        return;
       setSourceRowState({
         status: "error",
         worksheetRow: navigation.sourceRow,
@@ -557,9 +503,6 @@ export default function StudentAssistantPage() {
     if (studentFileQaEnabled && serviceStatus.questionCapabilityEnabled) {
       items.push({ id: "questions", label: "Câu hỏi" });
     }
-    if (studentCheckWorkEnabled && serviceStatus.attemptCapabilityEnabled) {
-      items.push({ id: "attempts", label: "Bài làm" });
-    }
     if (studentAccountingMapEnabled && serviceStatus.accountingMapCapabilityEnabled) {
       items.push({ id: "accounting-map", label: "Accounting Map" });
     }
@@ -572,7 +515,6 @@ export default function StudentAssistantPage() {
     return items;
   }, [
     serviceStatus.accountingMapCapabilityEnabled,
-    serviceStatus.attemptCapabilityEnabled,
     serviceStatus.internshipCapabilityEnabled,
     serviceStatus.questionCapabilityEnabled,
     serviceStatus.reconciliationCapabilityEnabled,
@@ -597,7 +539,7 @@ export default function StudentAssistantPage() {
         <header className="flex flex-col gap-5 border-b border-slate-200 pb-7 lg:flex-row lg:items-end lg:justify-between">
           <div className="max-w-3xl">
             <span className="inline-flex items-center gap-2 rounded-full bg-blue-100 px-3 py-1 text-sm font-bold text-blue-800">
-              <BookOpenCheck size={16} /> Student Assistant · Phases 1–6
+              <BookOpenCheck size={16} /> Trợ lý xử lý file kế toán
             </span>
             <h1 className="mt-4 text-3xl font-black tracking-tight text-gray-950 sm:text-4xl">
               Hiểu file kế toán từ chính dữ liệu nguồn
@@ -617,7 +559,12 @@ export default function StudentAssistantPage() {
                     : "bg-red-100 text-red-800"
               }`}
             >
-              Converter: {serviceStatus.loading ? "đang kiểm tra" : serviceStatus.serviceOnline ? "online" : "offline"}
+              Converter:{" "}
+              {serviceStatus.loading
+                ? "đang kiểm tra"
+                : serviceStatus.serviceOnline
+                  ? "online"
+                  : "offline"}
             </span>
             <span className="rounded-full bg-slate-100 px-3 py-1.5 text-slate-700">
               AI: {serviceStatus.aiStatus || "không bắt buộc"}
@@ -628,7 +575,11 @@ export default function StudentAssistantPage() {
         {status !== "ready" && (
           <div className="mx-auto mt-8 max-w-4xl">
             {status === "error" ? (
-              <StudentErrorState kind={error?.kind} message={error?.message} onRetry={reset} />
+              <StudentErrorState
+                kind={error?.kind}
+                message={error?.message}
+                onRetry={reset}
+              />
             ) : (
               <section className="overflow-hidden rounded-[32px] border border-slate-200 bg-white shadow-card">
                 <div className="grid lg:grid-cols-[1.05fr_0.95fr]">
@@ -697,7 +648,9 @@ export default function StudentAssistantPage() {
                       ) : (
                         <FileSpreadsheet size={18} />
                       )}
-                      {status === "loading" ? "Đang phân tích và dựng bằng chứng…" : "Giải thích file này"}
+                      {status === "loading"
+                        ? "Đang phân tích và dựng bằng chứng…"
+                        : "Giải thích file này"}
                     </button>
                   </div>
 
@@ -723,8 +676,8 @@ export default function StudentAssistantPage() {
                         ))}
                       </div>
                       <p className="mt-7 rounded-2xl border border-white/10 bg-white/5 p-4 text-xs leading-5 text-slate-300">
-                        Không kết luận “đúng luật 100%” hoặc tự chọn tài khoản/thuế suất khi
-                        file không có căn cứ.
+                        Không kết luận “đúng luật 100%” hoặc tự chọn tài khoản/thuế suất
+                        khi file không có căn cứ.
                       </p>
                     </div>
                   </div>
@@ -738,7 +691,7 @@ export default function StudentAssistantPage() {
           <div className="mt-7">
             <div
               role="tablist"
-              aria-label="Không gian làm việc Student Assistant"
+              aria-label="Không gian hỗ trợ xử lý file kế toán"
               onKeyDown={handleTabKeyDown}
               className="flex gap-2 overflow-x-auto rounded-2xl border border-slate-200 bg-white p-2 shadow-sm"
             >
@@ -774,7 +727,11 @@ export default function StudentAssistantPage() {
             >
               {activeTab === "overview" && (
                 <div className="max-w-xl">
-                  <StudentSessionSummary analysis={analysis} session={session} onReset={reset} />
+                  <StudentSessionSummary
+                    analysis={analysis}
+                    session={session}
+                    onReset={reset}
+                  />
                 </div>
               )}
 
@@ -799,7 +756,9 @@ export default function StudentAssistantPage() {
               {activeTab === "explanations" && (
                 <div className="grid items-start gap-5 xl:grid-cols-[minmax(0,1fr)_360px]">
                   <section className="rounded-3xl border border-slate-200 bg-white p-5 shadow-card">
-                    <h2 className="text-xl font-black text-slate-950">Giải thích có bằng chứng</h2>
+                    <h2 className="text-xl font-black text-slate-950">
+                      Giải thích có bằng chứng
+                    </h2>
                     <div className="mt-4 grid gap-2 sm:grid-cols-2">
                       {(analysis.explanations || []).map((item) => (
                         <button
@@ -813,7 +772,9 @@ export default function StudentAssistantPage() {
                           }`}
                         >
                           <span className="block font-black">{item.title}</span>
-                          <span className="mt-1 block text-xs opacity-70">{item.kind}</span>
+                          <span className="mt-1 block text-xs opacity-70">
+                            {item.kind}
+                          </span>
                         </button>
                       ))}
                     </div>
@@ -836,25 +797,6 @@ export default function StudentAssistantPage() {
                   onAsk={handleAskQuestion}
                   onRetry={() => lastQuestion && handleAskQuestion(lastQuestion)}
                   onEvidenceNavigate={handleEvidenceNavigate}
-                />
-              )}
-
-              {activeTab === "attempts" && (
-                <CheckWorkPanel
-                  result={attemptResult}
-                  progress={skillProgress}
-                  history={attemptHistory}
-                  loading={attemptLoading}
-                  error={attemptError}
-                  revealedLevels={revealedLevels}
-                  revealedHints={revealedHints}
-                  classification={studentWork?.classification || ""}
-                  classificationOptions={STUDENT_TEMPLATE_OPTIONS}
-                  onClassificationChange={(classification) =>
-                    setStudentWork((current) => ({ ...current, classification }))
-                  }
-                  onSubmit={handleSubmitAttempt}
-                  onRevealHint={handleRevealHint}
                 />
               )}
 
@@ -885,7 +827,12 @@ export default function StudentAssistantPage() {
                   onRefresh={loadActivities}
                   onDelete={async () => {
                     await deleteActivities(session.session.id, session.contextToken);
-                    setActivityState({ activities: [], loaded: true, loading: false, error: "" });
+                    setActivityState({
+                      activities: [],
+                      loaded: true,
+                      loading: false,
+                      error: "",
+                    });
                   }}
                   onPreview={(fullDocumentNumbers) =>
                     previewAnonymization(

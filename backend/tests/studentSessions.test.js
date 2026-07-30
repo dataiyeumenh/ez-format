@@ -8,6 +8,25 @@ const {
 } = require("../services/conversionContextService");
 const { buildOwnerScope } = require("../services/studentSessionService");
 const StudentFileSession = require("../models/StudentFileSession");
+const previousGatewayFlags = {
+  CONVERTER_PUBLIC_PROXY_ENABLED: process.env.CONVERTER_PUBLIC_PROXY_ENABLED,
+  CONVERTER_GATEWAY_USAGE_READY: process.env.CONVERTER_GATEWAY_USAGE_READY,
+};
+process.env.CONVERTER_PUBLIC_PROXY_ENABLED = "true";
+process.env.CONVERTER_GATEWAY_USAGE_READY = "true";
+const studentRouter = require("../routes/student");
+const previousStudentFlag = process.env.STUDENT_ASSISTANT_ENABLED;
+process.env.STUDENT_ASSISTANT_ENABLED = "true";
+const internalRouter = require("../routes/internal");
+if (previousStudentFlag === undefined) delete process.env.STUDENT_ASSISTANT_ENABLED;
+else process.env.STUDENT_ASSISTANT_ENABLED = previousStudentFlag;
+const {
+  mergeGatewayCapabilities,
+} = require("../routes/converterGateway");
+for (const [name, value] of Object.entries(previousGatewayFlags)) {
+  if (value === undefined) delete process.env[name];
+  else process.env[name] = value;
+}
 const {
   cleanAnalysisCompletedPayload,
   cleanStudentSessionPayload,
@@ -23,6 +42,60 @@ const {
 } = require("../controllers/studentSessionController");
 
 process.env.CONVERSION_CONTEXT_SECRET = "test-student-session-secret";
+
+test("student router exposes support endpoints only", () => {
+  const routePaths = studentRouter.stack
+    .map((layer) => layer.route?.path)
+    .filter(Boolean);
+
+  assert.equal(routePaths.some((path) => path.includes("attempt")), false);
+  assert.equal(routePaths.some((path) => path.includes("score")), false);
+  assert.equal(routePaths.some((path) => path.includes("grade")), false);
+
+  const operations = studentRouter.stack.find(
+    (layer) => layer.route?.path === "/sessions/:id/operations/*",
+  );
+  assert.deepEqual(Object.keys(operations?.route?.methods || {}).sort(), [
+    "get",
+    "post",
+  ]);
+});
+
+test("internal student routes expose no grading or attempt state", () => {
+  const routePaths = internalRouter.stack
+    .map((layer) => layer.route?.path)
+    .filter((routePath) => routePath?.startsWith("/student/"));
+
+  assert.equal(routePaths.some((routePath) => routePath.includes("attempt")), false);
+  assert.equal(routePaths.some((routePath) => routePath.includes("score")), false);
+  assert.ok(routePaths.includes("/student/sessions/:id/events"));
+  assert.equal(
+    internalRouter.studentInternalRoutesEnabled({
+      STUDENT_ASSISTANT_ENABLED: "false",
+    }),
+    false,
+  );
+});
+
+test("converter capability response preserves the student backend gate", () => {
+  assert.deepEqual(
+    mergeGatewayCapabilities({
+      capabilities: { studentAssistant: true, studentFileExplain: true },
+    }, { STUDENT_ASSISTANT_ENABLED: "true" }),
+    {
+      capabilities: { studentAssistant: true, studentFileExplain: true },
+      gateway: true,
+      artifactStorage: "mongodb-gridfs",
+    },
+  );
+  assert.equal(
+    mergeGatewayCapabilities(
+      { capabilities: { studentAssistant: true } },
+      { STUDENT_ASSISTANT_ENABLED: "false" },
+    ).capabilities.studentAssistant,
+    false,
+  );
+});
 
 test("owner scope uses the selected workspace or falls back to the user", () => {
   assert.equal(buildOwnerScope({ userId: " user-1 " }), "user:user-1");
@@ -81,6 +154,27 @@ test("student context derives a safe signed retention boundary and rejects an ex
       }),
     /retention/i,
   );
+});
+
+test("student context pins JWT iat to the retention clock", () => {
+  const realDateNow = Date.now;
+  let calls = 0;
+  Date.now = () => (calls++ === 0 ? 1_000_000 : 1_001_000);
+
+  try {
+    const token = createStudentContextToken({
+      sessionId: "session-clock-boundary",
+      userId: "user-1",
+      ownerScope: "user:user-1",
+      allowedScopes: ["analyze"],
+    });
+    const claims = verifyStudentContextToken(token, "analyze");
+
+    assert.equal(claims.iat, 1000);
+    assert.equal(claims.retention_expires_at, claims.exp);
+  } finally {
+    Date.now = realDateNow;
+  }
 });
 
 test("student context rejects a token with another purpose", () => {
@@ -227,7 +321,7 @@ test("student context rejects non-HS256 tokens", () => {
   );
 });
 
-test("student context scopes are minted only from enabled phase flags", () => {
+test("student context scopes never include grading or attempt capabilities", () => {
   const flags = {
     STUDENT_ASSISTANT_ENABLED: "true",
     STUDENT_FILE_EXPLAIN_ENABLED: "true",
@@ -251,7 +345,7 @@ test("student context scopes are minted only from enabled phase flags", () => {
       STUDENT_ACCOUNTING_MAP_ENABLED: "true",
       STUDENT_RECONCILIATION_ENABLED: "true",
     }),
-    ["analyze", "explain", "ask", "attempt", "accounting_map", "reconcile"],
+    ["analyze", "explain", "ask", "accounting_map", "reconcile"],
   );
   assert.deepEqual(
     studentContextScopesFromFlags({ ...flags, STUDENT_INTERNSHIP_ENABLED: "true" }),
@@ -558,6 +652,7 @@ test("analysis_completed payload keeps only safe converter metadata", () => {
         issueCounts: { blocker: 2, warning: 1, info: 0 },
         masterDataStatus: "not_configured",
         explanationCount: 77,
+        readinessScore: 93,
         stateHash: " state-1 ",
         rawRows: [{ customer: "confidential" }],
         preview: { rows: [{ customer: "confidential" }] },

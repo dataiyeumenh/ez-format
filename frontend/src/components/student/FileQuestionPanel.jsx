@@ -59,8 +59,8 @@ export default function FileQuestionPanel({
             </div>
           </div>
           <p className="mt-4 text-sm leading-6 text-slate-300">
-            Hệ thống chạy truy vấn deterministic trước. Mỗi câu trả lời theo file phải có
-            evidence hợp lệ; nếu thiếu căn cứ, hệ thống nói rõ là chưa hỗ trợ.
+            Hệ thống chạy truy vấn deterministic trước. Mỗi câu trả lời theo file phải
+            có evidence hợp lệ; nếu thiếu căn cứ, hệ thống nói rõ là chưa hỗ trợ.
           </p>
           {!["online", "enabled"].includes(String(aiStatus || "").toLowerCase()) && (
             <div className="mt-4 flex gap-2 rounded-2xl border border-white/10 bg-white/5 p-3 text-xs leading-5 text-slate-300">
@@ -106,7 +106,11 @@ export default function FileQuestionPanel({
               disabled={loading || !question.trim()}
               className="btn-primary justify-center px-5 disabled:cursor-not-allowed disabled:opacity-50"
             >
-              {loading ? <Loader2 className="animate-spin" size={17} /> : <Send size={17} />}
+              {loading ? (
+                <Loader2 className="animate-spin" size={17} />
+              ) : (
+                <Send size={17} />
+              )}
               {loading ? "Đang truy vấn" : "Hỏi file"}
             </button>
           </form>
@@ -126,7 +130,9 @@ export default function FileQuestionPanel({
             {!history.length && !loading && (
               <div className="rounded-2xl border border-dashed border-slate-200 p-7 text-center">
                 <MessageSquareText className="mx-auto text-slate-300" size={30} />
-                <p className="mt-2 text-sm font-bold text-gray-800">Chưa có câu hỏi trong phiên</p>
+                <p className="mt-2 text-sm font-bold text-gray-800">
+                  Chưa có câu hỏi trong phiên
+                </p>
                 <p className="mt-1 text-xs text-gray-500">
                   Chọn gợi ý hoặc nhập câu hỏi có thể kiểm tra từ file.
                 </p>
@@ -142,7 +148,9 @@ export default function FileQuestionPanel({
                   <p className="text-xs font-black uppercase tracking-[0.12em] text-gray-400">
                     Câu hỏi
                   </p>
-                  <p className="mt-1 text-sm font-bold text-gray-900">{entry.question}</p>
+                  <p className="mt-1 text-sm font-bold text-gray-900">
+                    {entry.question}
+                  </p>
                   <div className="mt-3 flex flex-wrap items-center gap-2">
                     <span
                       className={`rounded-full px-2.5 py-1 text-[11px] font-black ${stateTone[answerState.kind]}`}
@@ -151,11 +159,14 @@ export default function FileQuestionPanel({
                     </span>
                     {answerState.kind === "supported" && (
                       <span className="inline-flex items-center gap-1 text-[11px] font-bold text-emerald-700">
-                        <CheckCircle2 size={13} /> {entry.answer.evidence_count} evidence
+                        <CheckCircle2 size={13} /> {entry.answer.evidence_count}{" "}
+                        evidence
                       </span>
                     )}
                   </div>
-                  <p className="mt-3 text-sm leading-6 text-gray-700">{entry.answer.answer}</p>
+                  <p className="mt-3 text-sm leading-6 text-gray-700">
+                    {entry.answer.answer}
+                  </p>
                   {!!entry.answer.evidence?.length && (
                     <div className="mt-3 flex flex-wrap gap-2">
                       {entry.answer.evidence.map((evidence) => (
@@ -168,11 +179,12 @@ export default function FileQuestionPanel({
                           <span className="block">
                             {formatStudentQuestionEvidenceLabel(evidence)}
                           </span>
-                          {evidence.actual !== null && evidence.actual !== undefined && (
-                            <span className="mt-1 block max-w-64 truncate font-mono text-[10px] font-normal text-cyan-700">
-                              {String(evidence.actual)}
-                            </span>
-                          )}
+                          {evidence.actual !== null &&
+                            evidence.actual !== undefined && (
+                              <span className="mt-1 block max-w-64 truncate font-mono text-[10px] font-normal text-cyan-700">
+                                {String(evidence.actual)}
+                              </span>
+                            )}
                         </button>
                       ))}
                     </div>

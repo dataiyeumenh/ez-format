@@ -1,4 +1,4 @@
-import { lazy, Suspense } from "react";
+import { lazy, Suspense, useEffect, useState } from "react";
 import { BrowserRouter as Router, Routes, Route, Navigate } from "react-router-dom";
 import { Loader2 } from "lucide-react";
 import { AuthProvider } from "./context/AuthContext";
@@ -16,7 +16,11 @@ import ContactPage from "./pages/ContactPage";
 import PaymentPage from "./pages/PaymentPage";
 import PaymentResultPage from "./pages/PaymentResultPage";
 import AccountingWorkspacePage from "./pages/AccountingWorkspacePage";
-import { studentAssistantEnabled } from "./hooks/useStudentAssistantApi";
+import {
+  fetchStudentAssistantStatus,
+  studentAssistantEnabled,
+} from "./hooks/useStudentAssistantApi";
+import { isStudentAssistantAvailable } from "./utils/studentAssistant";
 
 const AdminDashboard = lazy(() => import("./pages/admin/DashboardPage"));
 const UsersPage = lazy(() => import("./pages/admin/UsersPage"));
@@ -32,6 +36,36 @@ function PageLoader() {
     <div className="min-h-[40vh] flex items-center justify-center">
       <Loader2 className="animate-spin text-primary-500" size={32} />
     </div>
+  );
+}
+
+function StudentAssistantRoute() {
+  const [status, setStatus] = useState(null);
+
+  useEffect(() => {
+    let active = true;
+    if (!studentAssistantEnabled) {
+      setStatus({ serviceOnline: false, capabilityEnabled: false });
+      return () => {
+        active = false;
+      };
+    }
+    fetchStudentAssistantStatus().then((nextStatus) => {
+      if (active) setStatus(nextStatus);
+    });
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  if (status === null) return <PageLoader />;
+  if (!isStudentAssistantAvailable(studentAssistantEnabled, status)) {
+    return <Navigate to="/" replace />;
+  }
+  return (
+    <Suspense fallback={<PageLoader />}>
+      <StudentAssistantPage />
+    </Suspense>
   );
 }
 
@@ -60,15 +94,9 @@ function App() {
           <Route
             path="/student"
             element={
-              studentAssistantEnabled ? (
-                <ProtectedRoute>
-                  <Suspense fallback={<PageLoader />}>
-                    <StudentAssistantPage />
-                  </Suspense>
-                </ProtectedRoute>
-              ) : (
-                <Navigate to="/" replace />
-              )
+              <ProtectedRoute>
+                <StudentAssistantRoute />
+              </ProtectedRoute>
             }
           />
           <Route path="/login" element={<LoginPage />} />

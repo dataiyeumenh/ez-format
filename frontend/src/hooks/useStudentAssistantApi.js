@@ -1,8 +1,20 @@
 import { useCallback } from "react";
 import api from "../services/api";
-import { gatewayRequestError } from "../utils/converterOperations.js";
 
 const viteEnv = import.meta.env || {};
+
+function gatewayRequestError(error, fallback) {
+  const detail = error?.response?.data?.detail;
+  const message =
+    typeof detail === "string"
+      ? detail
+      : typeof detail?.message === "string"
+        ? detail.message
+        : fallback;
+  const requestError = new Error(message);
+  requestError.status = error?.response?.status || 0;
+  return requestError;
+}
 
 export const studentAssistantEnabled =
   String(viteEnv.VITE_STUDENT_ASSISTANT_ENABLED || "false").toLowerCase() === "true" &&

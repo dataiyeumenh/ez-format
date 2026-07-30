@@ -4,24 +4,23 @@ import {
   createStudentSourceRowRequestContext,
   createStudentWorkDraft,
   buildStudentSourceRowItems,
-  buildStudentAttemptSubmission,
   buildInternshipReportRequest,
   canExportAnonymizedWorkbook,
   filterStudentActivities,
-  formatStudentAttemptRevision,
   formatStudentQuestionEvidenceLabel,
   formatStudentEvidenceLabel,
   findStudentExplanation,
   getStudentQuestionAnswerState,
   getStudentQuestionSuggestions,
-  getStudentHintLevelState,
   getAccountingMapStatusState,
   getAccountingMapPresentationState,
   getAccountingMapTotals,
   getReconciliationStatusState,
+  isReconciliationEvidenceInsufficient,
+  isStudentAssistantAvailable,
   getStudentActivitySkillSummary,
-  getStudentScoreBand,
   getStudentSummaryItems,
+  getStudentDataTabDomIds,
   getNextStudentTabId,
   keepCurrentExplanationSelection,
   resolveStudentEvidenceNavigation,
@@ -31,6 +30,41 @@ import {
   resumeStudentSession,
   saveStudentSessionResume,
 } from "./studentAssistant.js";
+
+test("student route requires both frontend flag and backend capability", () => {
+  assert.equal(
+    isStudentAssistantAvailable(true, {
+      serviceOnline: true,
+      capabilityEnabled: true,
+    }),
+    true,
+  );
+  assert.equal(
+    isStudentAssistantAvailable(false, {
+      serviceOnline: true,
+      capabilityEnabled: true,
+    }),
+    false,
+  );
+  assert.equal(
+    isStudentAssistantAvailable(true, {
+      serviceOnline: true,
+      capabilityEnabled: false,
+    }),
+    false,
+  );
+  assert.equal(isStudentAssistantAvailable(true, null), false);
+});
+
+test("nested student data tabs use DOM ids distinct from page tabs", () => {
+  const ids = getStudentDataTabDomIds("mapping");
+  assert.deepEqual(ids, {
+    tabId: "student-data-tab-mapping",
+    panelId: "student-data-panel-mapping",
+  });
+  assert.notEqual(ids.tabId, "student-tab-mapping");
+  assert.notEqual(ids.panelId, "student-panel-mapping");
+});
 
 test("accounting-map labels and totals keep review states explicit", () => {
   assert.equal(getAccountingMapStatusState("suggested").label, "Gợi ý có căn cứ");
@@ -54,6 +88,23 @@ test("reconciliation never presents insufficient data as success", () => {
   const insufficient = getReconciliationStatusState("insufficient_data");
   assert.equal(insufficient.kind, "insufficient");
   assert.notEqual(insufficient.kind, "success");
+});
+
+test("reconciliation does not label non-numeric matches as insufficient", () => {
+  assert.equal(
+    isReconciliationEvidenceInsufficient({
+      code: "duplicate_document_keys",
+      status: "match",
+    }),
+    false,
+  );
+  assert.equal(
+    isReconciliationEvidenceInsufficient({
+      code: "detail_amount_vs_invoice_subtotal",
+      status: "insufficient_data",
+    }),
+    true,
+  );
 });
 
 test("internship activity filters and summaries use verified metadata only", () => {
@@ -490,100 +541,7 @@ test("question suggestions stay bounded and deterministic", () => {
   assert.ok(suggestions.every((item) => typeof item === "string" && item.length > 0));
 });
 
-test("attempt score bands and revisions use stable student-facing labels", () => {
-  assert.deepEqual(getStudentScoreBand(100), {
-    key: "strong",
-    label: "Vững",
-    tone: "emerald",
-  });
-  assert.equal(getStudentScoreBand(75).key, "progressing");
-  assert.equal(getStudentScoreBand(45).key, "review");
-  assert.equal(formatStudentAttemptRevision({ revision: 3 }), "Lần làm #3");
-  assert.equal(formatStudentAttemptRevision({}), "Lần làm mới");
-});
-
-test("hint levels unlock one at a time and never imply future content is loaded", () => {
-  assert.equal(getStudentHintLevelState({}, "issue-1", 0).state, "available");
-  assert.equal(getStudentHintLevelState({}, "issue-1", 1).state, "locked");
-  assert.equal(
-    getStudentHintLevelState({ "issue-1": 0 }, "issue-1", 0).state,
-    "revealed",
-  );
-  assert.equal(
-    getStudentHintLevelState({ "issue-1": 0 }, "issue-1", 1).state,
-    "available",
-  );
-  assert.equal(
-    getStudentHintLevelState({ "issue-1": 0 }, "issue-1", 2).state,
-    "locked",
-  );
-});
-
-test("attempt submission uses bounded student-owned mapping, classification and edited rows", () => {
-  const analysis = {
-    target_template_id: "bsn_sales",
-    target_headers: ["Số hóa đơn (*)", "Ngày hóa đơn (*)", "Thành tiền"],
-    mapping_suggestion: {
-      mapping: {
-        "Mã hóa đơn": "Số hóa đơn (*)",
-        "Thời gian": "Ngày hóa đơn (*)",
-      },
-      defaults: {},
-      formulas: { "Thành tiền": "Số lượng * Đơn giá" },
-    },
-    student_preview: {
-      rows: [
-        {
-          "Số hóa đơn (*)": "HD001",
-          "Ngày hóa đơn (*)": "01/01/2026",
-          "Số lượng": 2,
-          "Đơn giá": 100000,
-          "Thành tiền": 200000,
-          "Tên khách hàng": "Không gửi trong attempt typed state",
-        },
-      ],
-    },
-  };
-
-  const studentWork = {
-    mapping: { "Mã hóa đơn": "Ngày hóa đơn (*)" },
-    classification: "purchase_goods",
-    rows: [
-      {
-        "Số hóa đơn (*)": "STUDENT-HD-001",
-        "Ngày hóa đơn (*)": "02/01/2026",
-        "Số lượng": "3",
-        "Đơn giá": "100000.0000000001",
-        "Thành tiền": "300000.0000000003",
-        "Tên khách hàng": "Không gửi trong attempt typed state",
-        "Injected field": "drop me",
-      },
-      ...Array.from({ length: 30 }, () => ({ "Thành tiền": "1" })),
-    ],
-  };
-
-  assert.deepEqual(buildStudentAttemptSubmission(analysis, studentWork), {
-    mapping: { "Mã hóa đơn": "Ngày hóa đơn (*)" },
-    required_completeness: {
-      "Số hóa đơn (*)": false,
-      "Ngày hóa đơn (*)": true,
-    },
-    date_number: {
-      "1:Ngày hóa đơn (*)": "02/01/2026",
-      "1:Số lượng": "3",
-      "1:Đơn giá": "100000.0000000001",
-    },
-    vat_amount: {
-      "1:Thành tiền": "300000.0000000003",
-      ...Object.fromEntries(
-        Array.from({ length: 24 }, (_, index) => [`${index + 2}:Thành tiền`, "1"]),
-      ),
-    },
-    classification: "purchase_goods",
-  });
-});
-
-test("new student work draft does not submit the converter answer before student input", () => {
+test("editable support draft starts without grading state", () => {
   const analysis = {
     target_template_id: "bsn_sales",
     target_headers: ["Số hóa đơn (*)", "Thành tiền"],
@@ -602,13 +560,9 @@ test("new student work draft does not submit the converter answer before student
 
   const draft = createStudentWorkDraft(analysis);
 
-  assert.deepEqual(buildStudentAttemptSubmission(analysis, draft), {
-    mapping: {},
-    required_completeness: { "Số hóa đơn (*)": false },
-    date_number: {},
-    vat_amount: {},
-    classification: "",
-  });
+  assert.deepEqual(draft.mapping, {});
+  assert.equal(draft.classification, "");
+  assert.equal(draft.rows[0]["Số hóa đơn (*)"], "HD001");
 });
 
 test("unresolved or empty accounting maps are never presented as balanced success", () => {

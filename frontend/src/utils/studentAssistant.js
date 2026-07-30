@@ -4,6 +4,19 @@ const MASTER_DATA_LABELS = {
   not_configured: "Chưa cấu hình",
 };
 export const STUDENT_RESUME_STORAGE_KEY = "ezformat.student.resume.v1";
+
+export function isStudentAssistantAvailable(frontendEnabled, status) {
+  return Boolean(
+    frontendEnabled && status?.serviceOnline && status?.capabilityEnabled,
+  );
+}
+
+export function getStudentDataTabDomIds(id) {
+  return {
+    tabId: `student-data-tab-${id}`,
+    panelId: `student-data-panel-${id}`,
+  };
+}
 const UNSAFE_RESUME_KEYS = new Set([
   "rawrows",
   "rows",
@@ -76,7 +89,10 @@ export function formatStudentEvidenceLabel(evidence = {}) {
       .join(" · ");
   }
   if (evidence.kind === "source_column") {
-    return [evidence.sheet || "Sheet", evidence.column ? `cột ${evidence.column}` : null]
+    return [
+      evidence.sheet || "Sheet",
+      evidence.column ? `cột ${evidence.column}` : null,
+    ]
       .filter(Boolean)
       .join(" · ");
   }
@@ -116,13 +132,19 @@ export function getStudentQuestionAnswerState(answer = {}) {
   return { kind: "unsupported", label: "Chưa đủ căn cứ deterministic" };
 }
 
+export function isReconciliationEvidenceInsufficient(item = {}) {
+  return item.status === "insufficient_data";
+}
+
 export function getStudentQuestionSuggestions(targetTemplateId = "") {
   const isPurchase = String(targetTemplateId).includes("purchase");
   return [
     isPurchase ? "File mua có bao nhiêu hóa đơn?" : "Có bao nhiêu hóa đơn?",
     "Cần sửa gì trước khi export?",
     "Dòng nào lệch tiền thuế GTGT?",
-    isPurchase ? "Tổng thành tiền mua hàng là bao nhiêu?" : "Tổng thành tiền là bao nhiêu?",
+    isPurchase
+      ? "Tổng thành tiền mua hàng là bao nhiêu?"
+      : "Tổng thành tiền là bao nhiêu?",
     isPurchase ? "Hóa đơn mua nào bị trùng?" : "Có hóa đơn trùng không?",
     isPurchase ? "Mã hàng dùng để làm gì?" : "Thành tiền có ý nghĩa gì?",
   ];
@@ -143,10 +165,10 @@ export function resolveStudentEvidenceNavigation(evidence = {}, analysis = {}) {
   const previewHeaders = analysis.student_preview?.headers || [];
   const visibleInPreview = Boolean(
     previewRow &&
-      previewRow >= 1 &&
-      previewRow <= previewRows.length &&
-      targetField &&
-      previewHeaders.includes(targetField),
+    previewRow >= 1 &&
+    previewRow <= previewRows.length &&
+    targetField &&
+    previewHeaders.includes(targetField),
   );
   return {
     sourceRow,
@@ -187,9 +209,9 @@ export function studentSourceRowResponseMatchesContext(
 ) {
   return Boolean(
     responseEpoch === context.requestEpoch &&
-      response.session_id === context.sessionId &&
-      response.upload_id === context.uploadId &&
-      response.state_hash === context.stateHash,
+    response.session_id === context.sessionId &&
+    response.upload_id === context.uploadId &&
+    response.state_hash === context.stateHash,
   );
 }
 
@@ -223,7 +245,8 @@ export function buildStudentMappingRows(analysis = {}) {
     const sources = targetToSources[target] || [];
     const activeModes = [];
     if (sources.length) activeModes.push("mapping");
-    if (defaults[target] !== undefined && defaults[target] !== "") activeModes.push("default");
+    if (defaults[target] !== undefined && defaults[target] !== "")
+      activeModes.push("default");
     if (formulas[target]) activeModes.push("formula");
     return {
       target,
@@ -242,11 +265,7 @@ export function buildStudentMappingRows(analysis = {}) {
   });
 }
 
-export function findStudentExplanation(
-  explanations = [],
-  targetField,
-  options = {},
-) {
+export function findStudentExplanation(explanations = [], targetField, options = {}) {
   const normalizedOptions = Array.isArray(options)
     ? { preferredKinds: options }
     : options || {};
@@ -297,11 +316,13 @@ export function findStudentExplanation(
 }
 
 export function getAccountingMapStatusState(status) {
-  return {
-    suggested: { kind: "suggested", label: "Gợi ý có căn cứ" },
-    needs_review: { kind: "review", label: "Cần rà soát" },
-    unresolved: { kind: "unresolved", label: "Chưa đủ căn cứ" },
-  }[status] || { kind: "unresolved", label: "Chưa đủ căn cứ" };
+  return (
+    {
+      suggested: { kind: "suggested", label: "Gợi ý có căn cứ" },
+      needs_review: { kind: "review", label: "Cần rà soát" },
+      unresolved: { kind: "unresolved", label: "Chưa đủ căn cứ" },
+    }[status] || { kind: "unresolved", label: "Chưa đủ căn cứ" }
+  );
 }
 
 export function getAccountingMapPresentationState(accountingMap = {}) {
@@ -332,11 +353,13 @@ export function getAccountingMapTotals(accountingMap = {}) {
 }
 
 export function getReconciliationStatusState(status) {
-  return {
-    match: { kind: "success", label: "Khớp" },
-    mismatch: { kind: "blocker", label: "Có chênh lệch" },
-    insufficient_data: { kind: "insufficient", label: "Chưa đủ dữ liệu" },
-  }[status] || { kind: "insufficient", label: "Chưa đủ dữ liệu" };
+  return (
+    {
+      match: { kind: "success", label: "Khớp" },
+      mismatch: { kind: "blocker", label: "Có chênh lệch" },
+      insufficient_data: { kind: "insufficient", label: "Chưa đủ dữ liệu" },
+    }[status] || { kind: "insufficient", label: "Chưa đủ dữ liệu" }
+  );
 }
 
 export function filterStudentActivities(activities = [], eventType = "all") {
@@ -363,8 +386,9 @@ export function canExportAnonymizedWorkbook(acknowledged, preview = {}) {
 }
 
 export function buildInternshipReportRequest(activityIds = [], approvedNote = "") {
-  const activity_ids = [...new Set(activityIds.map((id) => String(id || "").trim()))]
-    .filter(Boolean);
+  const activity_ids = [
+    ...new Set(activityIds.map((id) => String(id || "").trim())),
+  ].filter(Boolean);
   const note = String(approvedNote || "").trim();
   return { activity_ids, approved_notes: note ? [note] : [] };
 }
@@ -389,36 +413,6 @@ export function getNextStudentTabId(tabIds = [], currentId, key) {
   return currentId;
 }
 
-export function getStudentScoreBand(score) {
-  const value = Number(score);
-  if (Number.isFinite(value) && value >= 85) {
-    return { key: "strong", label: "Vững", tone: "emerald" };
-  }
-  if (Number.isFinite(value) && value >= 60) {
-    return { key: "progressing", label: "Đang tiến bộ", tone: "amber" };
-  }
-  return { key: "review", label: "Cần ôn lại", tone: "rose" };
-}
-
-export function formatStudentAttemptRevision(attempt = {}) {
-  const revision = Number(attempt.revision);
-  return Number.isInteger(revision) && revision > 0
-    ? `Lần làm #${revision}`
-    : "Lần làm mới";
-}
-
-export function getStudentHintLevelState(revealedLevels = {}, issueId, level) {
-  const requestedLevel = Number(level);
-  const currentLevel = Number(revealedLevels?.[issueId] ?? -1);
-  if (requestedLevel <= currentLevel) {
-    return { state: "revealed", level: requestedLevel };
-  }
-  if (requestedLevel === currentLevel + 1) {
-    return { state: "available", level: requestedLevel };
-  }
-  return { state: "locked", level: requestedLevel };
-}
-
 export function createStudentWorkDraft(analysis = {}) {
   return {
     mapping: {},
@@ -441,82 +435,21 @@ export function setStudentMappingTarget(mapping = {}, target, source) {
   }
   if (normalizedSource && normalizedTarget) {
     const existing = next[normalizedSource];
-    const targets = [...new Set([...(Array.isArray(existing) ? existing : existing ? [existing] : []), normalizedTarget])];
+    const targets = [
+      ...new Set([
+        ...(Array.isArray(existing) ? existing : existing ? [existing] : []),
+        normalizedTarget,
+      ]),
+    ];
     next[normalizedSource] = targets.length === 1 ? targets[0] : targets;
   }
   return next;
 }
 
-export function buildStudentAttemptSubmission(analysis = {}, studentWork = {}) {
-  const mapping = sanitizeStudentMapping(analysis, studentWork.mapping || {});
-  let rows = sanitizeStudentRows(analysis, studentWork.rows || []);
-  if (Array.isArray(studentWork.edited_cells)) {
-    const editedCells = new Set(studentWork.edited_cells.map(String));
-    rows = rows.map((row, rowIndex) =>
-      Object.fromEntries(
-        Object.entries(row).filter(([field]) => editedCells.has(`${rowIndex + 1}:${field}`)),
-      ),
-    );
-  }
-  const resolvedTargets = new Set();
-  for (const targetSpec of Object.values(mapping)) {
-    for (const target of Array.isArray(targetSpec) ? targetSpec : [targetSpec]) {
-      if (target) resolvedTargets.add(String(target));
-    }
-  }
-  const requiredCompleteness = Object.fromEntries(
-    (analysis.target_headers || [])
-      .filter((target) => String(target).includes("(*)"))
-      .map((target) => [target, resolvedTargets.has(String(target))]),
-  );
-  const dateNumber = {};
-  const vatAmount = {};
-  rows.forEach((row, rowIndex) => {
-    for (const [field, value] of Object.entries(row || {})) {
-      const normalized = field.toLocaleLowerCase("vi");
-      const key = `${rowIndex + 1}:${field}`;
-      if (["ngày", "số lượng", "đơn giá"].some((marker) => normalized.includes(marker))) {
-        dateNumber[key] = value;
-      }
-      if (
-        ["thành tiền", "tiền thuế", "thuế suất", "tổng tiền"].some((marker) =>
-          normalized.includes(marker),
-        )
-      ) {
-        vatAmount[key] = value;
-      }
-    }
-  });
-  return {
-    mapping,
-    required_completeness: requiredCompleteness,
-    date_number: dateNumber,
-    vat_amount: vatAmount,
-    classification: String(studentWork.classification || "").slice(0, 100),
-  };
-}
-
-function sanitizeStudentMapping(analysis, mapping) {
-  const suggestionSources = Object.keys(analysis.mapping_suggestion?.mapping || {});
-  const sourceHeaders = new Set(
-    (analysis.detected?.headers?.length ? analysis.detected.headers : suggestionSources).map(String),
-  );
-  const targetHeaders = new Set((analysis.target_headers || []).map(String));
-  const sanitized = {};
-  for (const [source, targetSpec] of Object.entries(mapping || {})) {
-    if (!sourceHeaders.has(String(source))) continue;
-    const targets = (Array.isArray(targetSpec) ? targetSpec : [targetSpec])
-      .map(String)
-      .filter((target) => targetHeaders.has(target));
-    if (targets.length === 1) sanitized[String(source)] = targets[0];
-    if (targets.length > 1) sanitized[String(source)] = [...new Set(targets)];
-  }
-  return sanitized;
-}
-
 function sanitizeStudentRows(analysis, rows) {
   const previewRows = analysis.student_preview?.rows || [];
-  const previewHeaders = analysis.student_preview?.headers || Object.keys(previewRows[0] || {});
+  const previewHeaders =
+    analysis.student_preview?.headers || Object.keys(previewRows[0] || {});
   const allowedHeaders = new Set(previewHeaders.map(String));
   return (Array.isArray(rows) ? rows : []).slice(0, 25).map((row) =>
     Object.fromEntries(
@@ -572,10 +505,7 @@ export function loadStudentSessionResume(storage) {
   }
 }
 
-export async function resumeStudentSession(
-  resume,
-  { getOverview, refreshContext },
-) {
+export async function resumeStudentSession(resume, { getOverview, refreshContext }) {
   try {
     const overview = await getOverview(resume.session.id, resume.contextToken);
     return { resume, overview };
@@ -589,10 +519,7 @@ export async function resumeStudentSession(
     session: refreshed.session,
     contextToken: String(refreshed.contextToken || ""),
   };
-  const overview = await getOverview(
-    nextResume.session.id,
-    nextResume.contextToken,
-  );
+  const overview = await getOverview(nextResume.session.id, nextResume.contextToken);
   return { resume: nextResume, overview };
 }
 

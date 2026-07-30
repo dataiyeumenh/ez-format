@@ -23,11 +23,19 @@ from app.student_session_client import (
     StudentSessionClientError,
     assert_student_session_active,
     record_analysis_completed,
-    record_attempt_completed,
-    record_hint_revealed,
     record_question_event,
 )
 from app.student_store import find_student_upload_id
+
+
+TEST_SERVICE_TOKEN = "converter-service-token-for-student-tests"
+
+
+def _test_client():
+    return TestClient(
+        app,
+        headers={"X-Converter-Service-Token": TEST_SERVICE_TOKEN},
+    )
 
 
 def _encode_part(payload):
@@ -47,7 +55,6 @@ def _student_token(secret="student-secret", **overrides):
             "analyze",
             "explain",
             "ask",
-            "attempt",
             "accounting_map",
             "reconcile",
             "export",
@@ -180,11 +187,12 @@ def student_api(tmp_path, monkeypatch):
     monkeypatch.setenv("STUDENT_ASSISTANT_ENABLED", "true")
     monkeypatch.setenv("STUDENT_FILE_EXPLAIN_ENABLED", "true")
     monkeypatch.setenv("STUDENT_FILE_QA_ENABLED", "true")
-    monkeypatch.setenv("STUDENT_CHECK_WORK_ENABLED", "true")
     monkeypatch.setenv("STUDENT_ACCOUNTING_MAP_ENABLED", "false")
     monkeypatch.setenv("STUDENT_RECONCILIATION_ENABLED", "false")
     monkeypatch.setenv("STUDENT_INTERNSHIP_ENABLED", "false")
     monkeypatch.setenv("CONVERSION_CONTEXT_SECRET", "student-secret")
+    monkeypatch.setenv("CONVERTER_SERVICE_TOKEN", TEST_SERVICE_TOKEN)
+    monkeypatch.setenv("STUDENT_ANONYMIZATION_SECRET", "student-anonymization-secret")
     monkeypatch.setenv("MAPPING_DB_PATH", str(tmp_path / "profiles.sqlite"))
     monkeypatch.setenv("AI_PROVIDER", "disabled")
     monkeypatch.setattr("app.misa_workflow.UPLOAD_ROOT", upload_root)
@@ -199,7 +207,7 @@ def student_api(tmp_path, monkeypatch):
         "app.student_workflow.assert_student_session_active",
         lambda token, session_id, upload_id, **kwargs: None,
     )
-    return TestClient(app), sync_events
+    return _test_client(), sync_events
 
 
 def _analyze(client, token=None):
@@ -210,8 +218,10 @@ def _analyze_bytes(client, content, token=None, filename="sales.xlsx"):
     data = {"target_template_id": "bsn_sales"}
     if token is not None:
         data["context_token"] = token
+    headers = {"X-Student-Context": token} if token is not None else {}
     return client.post(
         "/api/v1/student/sessions/analyze",
+        headers=headers,
         data=data,
         files={
             "file": (
@@ -238,41 +248,23 @@ def _source_row(client, session_id, token, worksheet_row):
     )
 
 
-def _attempt_submission(analysis):
-    suggestion = analysis["mapping_suggestion"]
-    mapping = suggestion.get("mapping") or {}
-    defaults = suggestion.get("defaults") or {}
-    formulas = suggestion.get("formulas") or {}
-    resolved_targets = {
-        target
-        for target_spec in mapping.values()
-        for target in (target_spec if isinstance(target_spec, list) else [target_spec])
-        if target
-    }
-    resolved_targets.update(key for key, value in defaults.items() if value not in (None, ""))
-    resolved_targets.update(key for key, value in formulas.items() if value)
-    required = {
-        target: target in resolved_targets
-        for target in analysis["target_headers"]
-        if "(*)" in target
-    }
-    date_number = {}
-    vat_amount = {}
-    for row_index, row in enumerate(analysis["student_preview"]["rows"], 1):
-        for field, value in row.items():
-            key = f"{row_index}:{field}"
-            normalized = field.casefold()
-            if any(marker in normalized for marker in ("ngày", "số lượng", "đơn giá")):
-                date_number[key] = value
-            if any(marker in normalized for marker in ("thành tiền", "tiền thuế", "thuế suất", "tổng tiền")):
-                vat_amount[key] = value
-    return {
-        "mapping": mapping,
-        "required_completeness": required,
-        "date_number": date_number,
-        "vat_amount": vat_amount,
-        "classification": analysis["target_template_id"],
-    }
+def test_converter_startup_validates_student_anonymization_config(monkeypatch):
+    checks = []
+    monkeypatch.setattr(
+        main_module,
+        "assert_secure_production_config",
+        lambda: checks.append("gateway"),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "assert_student_anonymization_config",
+        lambda: checks.append("student"),
+        raising=False,
+    )
+
+    main_module._assert_converter_security_config()
+
+    assert checks == ["gateway", "student"]
 
 
 def test_student_analyze_requires_valid_signed_context(student_api):
@@ -503,7 +495,7 @@ def test_concurrent_student_analyze_allows_exactly_one_active_upload(
         controlled_analyze_upload,
     )
 
-    with TestClient(app) as first_client, TestClient(app) as second_client:
+    with _test_client() as first_client, _test_client() as second_client:
         with ThreadPoolExecutor(max_workers=2) as executor:
             first_future = executor.submit(_analyze, first_client, token)
             assert first_entered.wait(timeout=5)
@@ -992,322 +984,6 @@ def test_source_row_endpoint_is_ask_scope_and_session_bounded(student_api):
     assert wrong_session.status_code == 403
 
 
-def test_student_attempt_scores_server_expected_state_and_persists_metadata_only(
-    student_api,
-    monkeypatch,
-):
-    client, _ = student_api
-    token = _student_token()
-    analyzed = _analyze(client, token).json()
-    captured = []
-
-    def persist(context_token, payload):
-        captured.append((context_token, payload))
-        return {
-            "success": True,
-            "attempt": {
-                "id": "507f1f77bcf86cd799439099",
-                "revision": 1,
-                "kind": payload["kind"],
-                "score": payload["score"],
-                "rubricVersion": payload["rubricVersion"],
-                "sessionStateHash": payload["sessionStateHash"],
-                "submittedStateHash": payload["submittedStateHash"],
-                "summary": payload["summary"],
-                "hintLevelUsed": 0,
-                "createdAt": None,
-            },
-            "progress": {
-                "userId": "507f1f77bcf86cd799439012",
-                "skills": {"excel_mapping": {"score": 100, "evidenceCount": 6}},
-                "updatedAt": None,
-            },
-        }
-
-    monkeypatch.setattr("app.student_workflow.record_attempt_completed", persist)
-    response = client.post(
-        "/api/v1/student/sessions/507f1f77bcf86cd799439011/attempts",
-        headers={"X-Student-Context": token},
-        json={
-            "kind": "mapping_attempt",
-            "state_hash": analyzed["student_state_hash"],
-            "submitted": _attempt_submission(analyzed),
-        },
-    )
-
-    assert response.status_code == 200
-    payload = response.json()
-    assert payload["attempt"]["revision"] == 1
-    assert payload["evaluation"]["score"] == 100
-    assert payload["evaluation"]["issues"] == []
-    assert payload["progress"]["skills"]["excel_mapping"]["score"] == 100
-    assert "expected" not in json.dumps(payload).lower()
-    assert "hint_levels" not in json.dumps(payload).lower()
-
-    assert len(captured) == 1
-    context_token, event = captured[0]
-    assert context_token == token
-    assert event["event"] == "attempt_completed"
-    assert event["completed"] is True
-    assert event["deterministic"] is True
-    assert event["score"] == 100
-    serialized = json.dumps(event, ensure_ascii=False).lower()
-    assert "rows" not in serialized
-    assert "expected" not in serialized
-    assert '"submitted":' not in serialized
-
-
-def test_student_attempt_is_flag_scope_session_and_state_bounded(student_api, monkeypatch):
-    client, _ = student_api
-    token = _student_token()
-    analyzed = _analyze(client, token).json()
-    request = {
-        "kind": "mapping_attempt",
-        "state_hash": analyzed["student_state_hash"],
-        "submitted": _attempt_submission(analyzed),
-    }
-
-    monkeypatch.setenv("STUDENT_CHECK_WORK_ENABLED", "false")
-    disabled = client.post(
-        "/api/v1/student/sessions/507f1f77bcf86cd799439011/attempts",
-        headers={"X-Student-Context": token},
-        json=request,
-    )
-    assert disabled.status_code == 404
-
-    monkeypatch.setenv("STUDENT_CHECK_WORK_ENABLED", "true")
-    missing_scope = client.post(
-        "/api/v1/student/sessions/507f1f77bcf86cd799439011/attempts",
-        headers={
-            "X-Student-Context": _student_token(
-                allowed_scopes=["analyze", "explain", "ask"]
-            )
-        },
-        json=request,
-    )
-    wrong_session = client.post(
-        "/api/v1/student/sessions/507f1f77bcf86cd799439099/attempts",
-        headers={"X-Student-Context": token},
-        json=request,
-    )
-    stale = client.post(
-        "/api/v1/student/sessions/507f1f77bcf86cd799439011/attempts",
-        headers={"X-Student-Context": token},
-        json={**request, "state_hash": "stale-state"},
-    )
-
-    assert missing_scope.status_code == 401
-    assert wrong_session.status_code == 403
-    assert stale.status_code == 409
-
-
-def test_student_hints_are_revealed_in_order_without_future_level_leakage(
-    student_api,
-    monkeypatch,
-):
-    client, _ = student_api
-    token = _student_token()
-    analyzed = _analyze(client, token).json()
-    submitted = _attempt_submission(analyzed)
-    submitted["classification"] = "purchase_goods"
-    hint_events = []
-    monkeypatch.setattr(
-        "app.student_workflow.record_attempt_completed",
-        lambda context_token, payload: {
-            "success": True,
-            "attempt": {
-                "id": "507f1f77bcf86cd799439099",
-                "revision": 1,
-                "kind": payload["kind"],
-                "score": payload["score"],
-                "rubricVersion": payload["rubricVersion"],
-                "sessionStateHash": payload["sessionStateHash"],
-                "submittedStateHash": payload["submittedStateHash"],
-                "summary": payload["summary"],
-                "hintLevelUsed": 0,
-                "createdAt": None,
-            },
-            "progress": {"userId": "user", "skills": {}, "updatedAt": None},
-        },
-    )
-    monkeypatch.setattr(
-        "app.student_workflow.record_hint_revealed",
-        lambda context_token, payload: hint_events.append((context_token, payload))
-        or {"success": True, "hintLevelUsed": payload["level"]},
-    )
-    attempt = client.post(
-        "/api/v1/student/sessions/507f1f77bcf86cd799439011/attempts",
-        headers={"X-Student-Context": token},
-        json={
-            "kind": "mapping_attempt",
-            "state_hash": analyzed["student_state_hash"],
-            "submitted": submitted,
-        },
-    ).json()
-    issue_id = attempt["evaluation"]["issues"][0]["id"]
-    assert "target_refs" not in attempt["evaluation"]["issues"][0]
-
-    skipped = client.post(
-        "/api/v1/student/sessions/507f1f77bcf86cd799439011/attempts/507f1f77bcf86cd799439099/hints/2",
-        headers={"X-Student-Context": token},
-        json={"issue_id": issue_id},
-    )
-    assert skipped.status_code == 409
-
-    level_zero = client.post(
-        "/api/v1/student/sessions/507f1f77bcf86cd799439011/attempts/507f1f77bcf86cd799439099/hints/0",
-        headers={"X-Student-Context": token},
-        json={"issue_id": issue_id},
-    )
-    assert level_zero.status_code == 200
-    assert level_zero.json()["hint"]["level"] == 0
-    assert set(level_zero.json()["hint"]) == {"issue_id", "level", "text_vi"}
-    assert "sales_goods" not in level_zero.json()["hint"]["text_vi"]
-    assert hint_events[0][1] == {
-        "event": "hint_revealed",
-        "sessionId": "507f1f77bcf86cd799439011",
-        "attemptId": "507f1f77bcf86cd799439099",
-        "issueId": issue_id,
-        "level": 0,
-    }
-
-
-def test_attempt_and_hint_clients_authenticate_and_send_only_metadata(monkeypatch):
-    captured = []
-
-    class Response:
-        status_code = 201
-
-        @staticmethod
-        def json():
-            return {"success": True, "attempt": {"id": "attempt-1"}}
-
-    def fake_post(url, **kwargs):
-        captured.append((url, kwargs))
-        return Response()
-
-    monkeypatch.setenv("CONVERTER_SERVICE_TOKEN", "service-secret")
-    monkeypatch.setenv("NODE_INTERNAL_API_URL", "http://node.test/api/internal")
-    monkeypatch.setattr("app.student_session_client.httpx.post", fake_post)
-    token = _student_token()
-    attempt_payload = {
-        "event": "attempt_completed",
-        "sessionId": "507f1f77bcf86cd799439011",
-        "kind": "mapping_attempt",
-    }
-    hint_payload = {
-        "event": "hint_revealed",
-        "sessionId": "507f1f77bcf86cd799439011",
-        "attemptId": "attempt-1",
-        "issueId": "issue-1",
-        "level": 0,
-    }
-
-    record_attempt_completed(token, attempt_payload)
-    record_hint_revealed(token, hint_payload)
-
-    assert captured[0][0].endswith(
-        "/student/sessions/507f1f77bcf86cd799439011/attempts"
-    )
-    assert captured[1][0].endswith(
-        "/student/sessions/507f1f77bcf86cd799439011/attempts/attempt-1/hints"
-    )
-    for _, kwargs in captured:
-        assert kwargs["headers"] == {
-            "x-converter-service-token": "service-secret",
-            "x-student-context": token,
-        }
-
-
-def test_correction_after_hints_is_scored_from_prior_revisions_not_user_claims(
-    student_api,
-    monkeypatch,
-):
-    client, _ = student_api
-    token = _student_token()
-    analyzed = _analyze(client, token).json()
-    attempt_number = 0
-
-    def persist_attempt(context_token, payload):
-        nonlocal attempt_number
-        attempt_number += 1
-        return {
-            "success": True,
-            "attempt": {
-                "id": f"507f1f77bcf86cd79943909{attempt_number}",
-                "revision": attempt_number,
-                "kind": payload["kind"],
-                "score": payload["score"],
-                "rubricVersion": payload["rubricVersion"],
-                "sessionStateHash": payload["sessionStateHash"],
-                "submittedStateHash": payload["submittedStateHash"],
-                "summary": payload["summary"],
-                "hintLevelUsed": 0,
-                "createdAt": None,
-            },
-            "progress": {"userId": "user", "skills": {}, "updatedAt": None},
-        }
-
-    monkeypatch.setattr("app.student_workflow.record_attempt_completed", persist_attempt)
-    monkeypatch.setattr(
-        "app.student_workflow.record_hint_revealed",
-        lambda context_token, payload: {"success": True, "hintLevelUsed": payload["level"]},
-    )
-    wrong = _attempt_submission(analyzed)
-    wrong["classification"] = "purchase_goods"
-
-    first = client.post(
-        "/api/v1/student/sessions/507f1f77bcf86cd799439011/attempts",
-        headers={"X-Student-Context": token},
-        json={
-            "kind": "mapping_attempt",
-            "state_hash": analyzed["student_state_hash"],
-            "submitted": wrong,
-        },
-    ).json()
-    issue_id = first["evaluation"]["issues"][0]["id"]
-    assert client.post(
-        f"/api/v1/student/sessions/507f1f77bcf86cd799439011/attempts/{first['attempt']['id']}/hints/0",
-        headers={"X-Student-Context": token},
-        json={"issue_id": issue_id},
-    ).status_code == 200
-
-    unchanged = client.post(
-        "/api/v1/student/sessions/507f1f77bcf86cd799439011/attempts",
-        headers={"X-Student-Context": token},
-        json={
-            "kind": "mapping_attempt",
-            "state_hash": analyzed["student_state_hash"],
-            "submitted": {**wrong, "correction_after_hints": True},
-        },
-    ).json()
-    unchanged_correction = next(
-        item
-        for item in unchanged["evaluation"]["breakdown"]
-        if item["category"] == "correction_after_hints"
-    )
-    assert unchanged_correction["earned"] == 0
-
-    corrected_submission = _attempt_submission(analyzed)
-    corrected_submission["correction_after_hints"] = False
-    corrected = client.post(
-        "/api/v1/student/sessions/507f1f77bcf86cd799439011/attempts",
-        headers={"X-Student-Context": token},
-        json={
-            "kind": "mapping_attempt",
-            "state_hash": analyzed["student_state_hash"],
-            "submitted": corrected_submission,
-        },
-    ).json()
-    corrected_breakdown = next(
-        item
-        for item in corrected["evaluation"]["breakdown"]
-        if item["category"] == "correction_after_hints"
-    )
-    assert corrected_breakdown["earned"] == 5
-    assert corrected["evaluation"]["score"] == 100
-
-
 def test_accounting_map_endpoint_is_flag_scope_and_owner_bounded(
     student_api,
     monkeypatch,
@@ -1517,3 +1193,22 @@ def test_internship_report_requires_verified_activity_ids_and_safe_approved_note
     assert "Completed a deterministic reconciliation review." in response.text
     assert "Reviewed with the supervisor." in response.text
     assert "Khách A" not in response.text
+
+
+def test_student_grading_endpoints_are_not_available(student_api):
+    client, _ = student_api
+    token = _student_token()
+
+    attempt = client.post(
+        "/api/v1/student/sessions/507f1f77bcf86cd799439011/attempts",
+        headers={"X-Student-Context": token},
+        json={},
+    )
+    hint = client.post(
+        "/api/v1/student/sessions/507f1f77bcf86cd799439011/attempts/attempt-1/hints/0",
+        headers={"X-Student-Context": token},
+        json={},
+    )
+
+    assert attempt.status_code == 404
+    assert hint.status_code == 404

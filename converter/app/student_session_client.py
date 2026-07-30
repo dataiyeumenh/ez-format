@@ -143,31 +143,6 @@ def record_question_event(token: str, payload: dict[str, Any]) -> None:
         )
 
 
-def record_attempt_completed(token: str, payload: dict[str, Any]) -> dict[str, Any]:
-    session_id = str(payload.get("sessionId") or "").strip()
-    if not session_id:
-        raise StudentSessionClientError("Thiếu student session id để ghi nhận bài làm")
-    return _post_student_metadata(
-        token,
-        payload,
-        path=f"student/sessions/{session_id}/attempts",
-        failure_message="Không ghi nhận được student attempt",
-    )
-
-
-def record_hint_revealed(token: str, payload: dict[str, Any]) -> dict[str, Any]:
-    session_id = str(payload.get("sessionId") or "").strip()
-    attempt_id = str(payload.get("attemptId") or "").strip()
-    if not session_id or not attempt_id:
-        raise StudentSessionClientError("Thiếu student session hoặc attempt id")
-    return _post_student_metadata(
-        token,
-        payload,
-        path=f"student/sessions/{session_id}/attempts/{attempt_id}/hints",
-        failure_message="Không ghi nhận được student hint",
-    )
-
-
 def record_activity_event(token: str, payload: dict[str, Any]) -> dict[str, Any]:
     session_id = str(payload.get("sessionId") or "").strip()
     if not session_id:

@@ -31,7 +31,31 @@ function sendUpstream(response, res) {
   return res.status(response.status).json(response.data == null ? {} : response.data);
 }
 
-router.get("/capabilities", requireDb, protect, (_req, res) => res.json({ gateway: true, artifactStorage: "mongodb-gridfs" }));
+function mergeGatewayCapabilities(payload = {}, env = process.env) {
+  const backendStudentEnabled =
+    String(env.STUDENT_ASSISTANT_ENABLED || "false").toLowerCase() === "true";
+  return {
+    ...payload,
+    capabilities: {
+      ...(payload.capabilities || {}),
+      studentAssistant: Boolean(
+        backendStudentEnabled && payload.capabilities?.studentAssistant,
+      ),
+    },
+    gateway: true,
+    artifactStorage: "mongodb-gridfs",
+  };
+}
+
+router.get("/capabilities", requireDb, protect, asyncRoute(async (req, res) => {
+  const response = await forwardJson({
+    path: "/healthz",
+    method: "GET",
+    requestId: req.requestId,
+    requireContext: false,
+  });
+  return res.status(response.status).json(mergeGatewayCapabilities(response.data));
+}));
 router.get("/templates", requireDb, protect, asyncRoute(async (req, res) => sendUpstream(await forwardJson({ path: "/api/v1/templates", method: "GET", contextToken: gatewayContext(req), requestId: req.requestId, requireContext: false }), res)));
 router.post("/uploads/analyze", requireDb, protect, upload.single("file"), asyncRoute(async (req, res) => sendUpstream(await forwardMultipart({ path: "/api/v1/uploads/analyze", file: req.file, fields: req.body, contextToken: gatewayContext(req), requestId: req.requestId }), res)));
 router.post("/mappings/preview", requireDb, protect, asyncRoute(async (req, res) => sendUpstream(await forwardJson({ path: "/api/v1/mappings/preview", body: req.body, contextToken: gatewayContext(req), requestId: req.requestId }), res)));
@@ -39,4 +63,4 @@ router.post("/mappings/readiness", requireDb, protect, asyncRoute(async (req, re
 router.post("/mappings/confirm", requireDb, protect, asyncRoute(async (req, res) => sendUpstream(await forwardJson({ path: "/api/v1/mappings/confirm", body: req.body, contextToken: gatewayContext(req), requestId: req.requestId }), res)));
 router.post("/conversions/export", requireDb, protect, asyncRoute(async (req, res) => sendUpstream(await forwardBinary({ path: "/api/v1/conversions/export", body: req.body, contextToken: gatewayContext(req), requestId: req.requestId }), res)));
 
-module.exports = { router };
+module.exports = { mergeGatewayCapabilities, router };

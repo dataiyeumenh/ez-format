@@ -4,10 +4,11 @@ import base64
 import hashlib
 import hmac
 import json
-import os
 import time
 from dataclasses import dataclass
 from typing import Any
+
+from app.context_secrets import conversion_context_secret
 
 
 @dataclass(frozen=True)
@@ -28,9 +29,7 @@ def verify_student_context(token: str, required_scope: str) -> StudentContextCla
     if not normalized_scope:
         raise ValueError("Student context required scope là bắt buộc")
 
-    secret = os.getenv("CONVERSION_CONTEXT_SECRET") or os.getenv("JWT_SECRET")
-    if not secret:
-        raise ValueError("CONVERSION_CONTEXT_SECRET chưa được cấu hình")
+    secret = conversion_context_secret()
 
     try:
         header_part, payload_part, signature_part = str(token).split(".")

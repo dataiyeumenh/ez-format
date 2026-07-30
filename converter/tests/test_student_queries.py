@@ -333,6 +333,33 @@ def test_question_benchmark_has_at_least_fifty_cases_and_all_intent_families(sta
             assert case["answer_contains"].casefold() in answer.answer.casefold(), case
 
 
+def test_document_count_uses_mapping_when_raw_header_is_opaque():
+    state = _purchase_state()
+    table = state["table"]
+    state["table"] = InputTable(
+        headers=["SO_HD" if header == "Số hóa đơn" else header for header in table.headers],
+        rows=[
+            {
+                ("SO_HD" if key == "Số hóa đơn" else key): value
+                for key, value in row.items()
+            }
+            for row in table.rows
+        ],
+        sheet_name=table.sheet_name,
+        header_row_index=table.header_row_index,
+    )
+    state["mapping"] = {
+        ("SO_HD" if source == "Số hóa đơn" else source): target
+        for source, target in state["mapping"].items()
+    }
+
+    answer = answer_question("File mua có bao nhiêu hóa đơn?", state)
+
+    assert answer.outcome == "supported"
+    assert "3 chứng từ" in answer.answer
+    assert all(item.field == "SO_HD" for item in answer.evidence)
+
+
 def test_answer_evidence_is_bounded_and_uses_stable_unique_ids(states):
     answer = answer_question("Những dòng nào có hóa đơn HD001?", states["sales"])
 
@@ -405,6 +432,122 @@ def test_aggregate_amount_preserves_high_precision_and_ignores_blanks(states):
     assert answer.outcome == "supported"
     assert "9007199254740993.0000000001" in answer.answer
     assert answer.evidence_count == 2
+
+
+def test_aggregate_document_totals_counts_repeated_invoice_total_once():
+    state = {
+        "state_hash": "document-total-state",
+        "table": InputTable(
+            headers=["Số hóa đơn", "Tổng thanh toán"],
+            rows=[
+                {"Số hóa đơn": "HD001", "Tổng thanh toán": "108000"},
+                {"Số hóa đơn": "HD001", "Tổng thanh toán": "108000"},
+                {"Số hóa đơn": "HD002", "Tổng thanh toán": "50000"},
+            ],
+            sheet_name="Sales",
+            header_row_index=0,
+        ),
+        "mapping": {},
+        "target_headers": ["Số hóa đơn", "Tổng thanh toán"],
+    }
+
+    answer = answer_question("Tổng thanh toán là bao nhiêu?", state)
+
+    assert answer.outcome == "supported"
+    assert "158000" in answer.answer
+    assert answer.evidence_count == 2
+    assert [item.row for item in answer.evidence] == [2, 4]
+
+
+def test_aggregate_document_totals_rejects_conflicting_repeated_values():
+    state = {
+        "state_hash": "conflicting-document-total-state",
+        "table": InputTable(
+            headers=["Số hóa đơn", "Tổng thanh toán"],
+            rows=[
+                {"Số hóa đơn": "HD001", "Tổng thanh toán": "108000"},
+                {"Số hóa đơn": "HD001", "Tổng thanh toán": "109000"},
+            ],
+            sheet_name="Sales",
+            header_row_index=0,
+        ),
+        "mapping": {},
+        "target_headers": ["Số hóa đơn", "Tổng thanh toán"],
+    }
+
+    answer = answer_question("Tổng thanh toán là bao nhiêu?", state)
+
+    assert answer.outcome == "supported"
+    assert answer.needs_professional_review is True
+    assert "không thể kết luận tổng" in answer.answer.casefold()
+    assert answer.evidence_count == 2
+
+
+def test_aggregate_document_totals_resolves_soct_alias():
+    state = {
+        "state_hash": "opaque-document-key-state",
+        "table": InputTable(
+            headers=["SOCT", "Tổng tiền"],
+            rows=[
+                {"SOCT": "HD001", "Tổng tiền": "108000"},
+                {"SOCT": "HD001", "Tổng tiền": "108000"},
+            ],
+            sheet_name="Sales",
+            header_row_index=0,
+        ),
+        "mapping": {},
+        "target_headers": ["SOCT", "Tổng tiền"],
+    }
+
+    answer = answer_question("Tổng tiền là bao nhiêu?", state)
+
+    assert answer.outcome == "supported"
+    assert "108000" in answer.answer
+    assert answer.evidence_count == 1
+
+
+def test_aggregate_document_totals_uses_mapping_target_for_opaque_total_column(states):
+    state = deepcopy(states["sales"])
+    state["table"] = InputTable(
+        headers=["SOCT", "TTVND"],
+        rows=[
+            {"SOCT": "HD001", "TTVND": "108000"},
+            {"SOCT": "HD001", "TTVND": "108000"},
+        ],
+        sheet_name="Sales",
+        header_row_index=0,
+    )
+    state["mapping"] = {
+        "SOCT": "Số chứng từ (*)",
+        "TTVND": "Tổng tiền thanh toán",
+    }
+    state["target_headers"] = list(state["mapping"].values())
+
+    answer = answer_question("Tổng tiền thanh toán là bao nhiêu?", state)
+
+    assert answer.outcome == "supported"
+    assert "108000" in answer.answer
+    assert answer.evidence_count == 1
+
+
+def test_aggregate_document_totals_requires_document_key():
+    state = {
+        "state_hash": "missing-document-key-state",
+        "table": InputTable(
+            headers=["Tổng thanh toán"],
+            rows=[{"Tổng thanh toán": "108000"}],
+            sheet_name="Sales",
+            header_row_index=0,
+        ),
+        "mapping": {},
+        "target_headers": ["Tổng thanh toán"],
+    }
+
+    answer = answer_question("Tổng thanh toán là bao nhiêu?", state)
+
+    assert answer.outcome == "unsupported"
+    assert answer.unsupported_reason == "missing_document_key"
+    assert answer.evidence == []
 
 
 @pytest.mark.parametrize(

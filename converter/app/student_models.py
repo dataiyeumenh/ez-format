@@ -32,14 +32,6 @@ QuestionIntent = Literal[
 ]
 QuestionOutcome = Literal["supported", "unsupported", "ai_unavailable"]
 QuestionEvidenceKind = Literal["source_cell", "source_column", "issue", "template"]
-AttemptKind = Literal[
-    "mapping_attempt",
-    "data_cleanup_attempt",
-    "document_classification_attempt",
-    "voucher_review_attempt",
-    "reconciliation_attempt",
-]
-
 
 class StudentEvidence(BaseModel):
     kind: EvidenceKind
@@ -143,17 +135,6 @@ class StudentAnswer(BaseModel):
 
 class StudentQuestionRequest(BaseModel):
     question: str = Field(min_length=1, max_length=2000)
-
-
-class StudentAttemptRequest(BaseModel):
-    kind: AttemptKind
-    state_hash: str = Field(min_length=1, max_length=256)
-    submitted: dict[str, Any]
-    rubric_version: Literal["student-v1"] = "student-v1"
-
-
-class StudentHintRequest(BaseModel):
-    issue_id: str = Field(min_length=1, max_length=128)
 
 
 class StudentAnonymizationRequest(BaseModel):

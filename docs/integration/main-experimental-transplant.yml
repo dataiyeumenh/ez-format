@@ -92,6 +92,159 @@ rules:
   - path: frontend/src/services/api.js
     owner: compose
     reason: shared browser API boundary
+  - path: .env.example
+    owner: compose
+    reason: remove unsupported student grading feature flag
+  - path: backend/controllers/studentSessionController.js
+    owner: compose
+    reason: source student sessions without score persistence
+  - path: backend/models/StudentActivity.js
+    owner: source
+    reason: reviewed student activity metadata model
+  - path: backend/models/StudentFileSession.js
+    owner: source
+    reason: reviewed student session metadata model
+  - path: backend/models/StudentQuestionEvent.js
+    owner: source
+    reason: reviewed question metadata model
+  - path: backend/models/StudentAttempt.js
+    owner: compose
+    reason: remove unsupported student attempt persistence
+  - path: backend/models/StudentSkillProgress.js
+    owner: compose
+    reason: remove unsupported student score persistence
+  - path: backend/routes/converterGateway.js
+    owner: compose
+    reason: expose authenticated converter capability state
+  - path: backend/routes/student.js
+    owner: compose
+    reason: bind source student routes to deploy-safe gateway
+  - path: backend/services/studentSessionService.js
+    owner: source
+    reason: reviewed student ownership helper
+  - path: backend/tests/studentActivities.test.js
+    owner: source
+    reason: reviewed student activity privacy tests
+  - path: backend/tests/studentAttempts.test.js
+    owner: compose
+    reason: remove unsupported student grading tests
+  - path: backend/tests/studentQuestions.test.js
+    owner: source
+    reason: reviewed student question privacy tests
+  - path: backend/tests/studentSessions.test.js
+    owner: compose
+    reason: source tests plus gateway and support-only bindings
+  - path: converter/app/student_accounting_map.py
+    owner: source
+    reason: reviewed student accounting map
+  - path: converter/app/student_anonymization.py
+    owner: source
+    reason: reviewed student workbook anonymization
+  - path: converter/app/student_context.py
+    owner: source
+    reason: reviewed student context verification
+  - path: converter/app/student_explanations.py
+    owner: source
+    reason: reviewed evidence-backed explanations
+  - path: converter/app/student_field_dictionary.py
+    owner: source
+    reason: reviewed student field dictionary
+  - path: converter/app/student_models.py
+    owner: source
+    reason: reviewed support-only student models
+  - path: converter/app/student_queries.py
+    owner: compose
+    reason: source queries with pre-Task-6 document totals fallback
+  - path: converter/app/student_reconciliation.py
+    owner: source
+    reason: reviewed deterministic student reconciliation
+  - path: converter/app/student_reports.py
+    owner: source
+    reason: reviewed metadata-only internship reports
+  - path: converter/app/student_scoring.py
+    owner: compose
+    reason: remove unsupported student grading logic
+  - path: converter/app/student_session_client.py
+    owner: source
+    reason: reviewed authenticated student session client
+  - path: converter/app/student_store.py
+    owner: source
+    reason: reviewed bounded temporary student upload store
+  - path: converter/app/student_workflow.py
+    owner: compose
+    reason: source workflow plus gateway and production secret bindings
+  - path: converter/tests/test_student_accounting_map.py
+    owner: source
+    reason: reviewed accounting map tests
+  - path: converter/tests/test_student_anonymization.py
+    owner: compose
+    reason: source tests plus production anonymization secret gate
+  - path: converter/tests/test_student_api.py
+    owner: compose
+    reason: source tests plus authenticated gateway startup contract
+  - path: converter/tests/test_student_context.py
+    owner: compose
+    reason: source scope tests adapted to Task 4 operation contract
+  - path: converter/tests/test_student_explanations.py
+    owner: source
+    reason: reviewed explanation tests
+  - path: converter/tests/test_student_queries.py
+    owner: source
+    reason: reviewed deterministic query tests
+  - path: converter/tests/test_student_reconciliation.py
+    owner: source
+    reason: reviewed reconciliation tests
+  - path: converter/tests/test_student_reports.py
+    owner: source
+    reason: reviewed report safety tests
+  - path: converter/tests/test_student_scoring.py
+    owner: compose
+    reason: remove unsupported student grading tests
+  - path: frontend/src/components/student/AccountingMapPanel.jsx
+    owner: source
+    reason: reviewed student accounting map component
+  - path: frontend/src/components/student/ExplanationInspector.jsx
+    owner: source
+    reason: reviewed student explanation component
+  - path: frontend/src/components/student/FileQuestionPanel.jsx
+    owner: source
+    reason: reviewed student question component
+  - path: frontend/src/components/student/InternshipAssistantPanel.jsx
+    owner: source
+    reason: reviewed student report component
+  - path: frontend/src/components/student/ReconciliationPanel.jsx
+    owner: source
+    reason: reviewed student reconciliation component
+  - path: frontend/src/components/student/SourceRowPanel.jsx
+    owner: source
+    reason: reviewed student source-row component
+  - path: frontend/src/components/student/StudentMappingTable.jsx
+    owner: source
+    reason: reviewed student mapping component
+  - path: frontend/src/components/student/StudentSessionSummary.jsx
+    owner: source
+    reason: reviewed student summary component
+  - path: frontend/src/components/student/CheckWorkPanel.jsx
+    owner: compose
+    reason: remove unsupported student grading interface
+  - path: frontend/src/components/student/SkillProgressCard.jsx
+    owner: compose
+    reason: remove unsupported student score interface
+  - path: frontend/src/hooks/useStudentAssistantApi.js
+    owner: compose
+    reason: source student API bound to Node gateway
+  - path: frontend/src/hooks/useVoucherReconstruction.js
+    owner: compose
+    reason: keep existing voucher hook buildable before shared utility task
+  - path: frontend/src/pages/StudentAssistantPage.jsx
+    owner: source
+    reason: reviewed support-only student page
+  - path: frontend/src/utils/studentAssistant.js
+    owner: compose
+    reason: source utility plus backend capability gate
+  - path: frontend/src/utils/studentAssistant.test.mjs
+    owner: compose
+    reason: source tests plus dual feature-gate coverage
 excluded:
   - .superpowers/sdd/**
   - frontend/test-results/**

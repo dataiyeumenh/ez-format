@@ -27,7 +27,7 @@ export default function StudentSessionSummary({ analysis, onReset }) {
           </span>
           <div className="min-w-0">
             <p className="text-xs font-bold uppercase tracking-[0.14em] text-gray-400">
-              File đang học
+              File đang được hỗ trợ
             </p>
             <h2 className="mt-1 truncate text-base font-black text-gray-950">
               {summary.file_name || "File Excel"}
@@ -72,11 +72,7 @@ export default function StudentSessionSummary({ analysis, onReset }) {
           <CheckCircle2 size={15} />
           {analysis?.explanations?.length || 0} giải thích deterministic
         </div>
-        <button
-          type="button"
-          onClick={onReset}
-          className="btn-secondary mt-4 w-full"
-        >
+        <button type="button" onClick={onReset} className="btn-secondary mt-4 w-full">
           <RefreshCw size={16} /> Phân tích file khác
         </button>
       </section>
