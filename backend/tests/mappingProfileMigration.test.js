@@ -8,6 +8,23 @@ const {
   planMappingProfileIndexMigration,
 } = require("../services/mappingProfileMigrationService");
 
+test("mapping profile owner migration defaults to off without touching Mongo", async () => {
+  let queried = false;
+  const result = await migrateMappingProfileOwnerScope({
+    model: {
+      db: { readyState: 1 },
+      find() {
+        queried = true;
+        throw new Error("off mode must not query Mongo");
+      },
+    },
+  });
+
+  assert.equal(result.mode, "off");
+  assert.equal(result.skipped, true);
+  assert.equal(queried, false);
+});
+
 
 test("legacy mapping owner migration prefers workspace and falls back to updatedBy", () => {
   assert.deepEqual(
@@ -64,6 +81,48 @@ test("mapping profile index plan drops only the obsolete workspace unique index"
   );
 });
 
+test("mapping profile owner dry-run reports backfills and index drops without writes", async () => {
+  const writes = [];
+  const documents = [
+    { _id: "profile-1", workspace: "workspace-1", updatedBy: "user-1" },
+    { _id: "profile-2", workspace: null, updatedBy: "user-2" },
+  ];
+  const model = {
+    db: { readyState: 1 },
+    find() {
+      return {
+        select() {
+          return this;
+        },
+        lean: async () => documents,
+      };
+    },
+    async bulkWrite() {
+      writes.push("bulkWrite");
+    },
+    collection: {
+      async indexes() {
+        return [{ name: OBSOLETE_WORKSPACE_UNIQUE_INDEX }];
+      },
+      async dropIndex() {
+        writes.push("dropIndex");
+      },
+    },
+    async syncIndexes() {
+      writes.push("syncIndexes");
+    },
+  };
+
+  const result = await migrateMappingProfileOwnerScope({ model, mode: "dry-run" });
+
+  assert.equal(result.mode, "dry-run");
+  assert.equal(result.plannedBackfills, 2);
+  assert.deepEqual(result.indexPlan, {
+    dropIndexNames: [OBSOLETE_WORKSPACE_UNIQUE_INDEX],
+  });
+  assert.deepEqual(writes, []);
+});
+
 
 test("mapping profile migration backfills before dropping and syncing indexes", async () => {
   const calls = [];
@@ -104,7 +163,7 @@ test("mapping profile migration backfills before dropping and syncing indexes", 
     },
   };
 
-  const result = await migrateMappingProfileOwnerScope({ model });
+  const result = await migrateMappingProfileOwnerScope({ model, mode: "apply" });
 
   assert.equal(result.backfilled, 2);
   assert.deepEqual(result.droppedIndexes, [OBSOLETE_WORKSPACE_UNIQUE_INDEX]);
@@ -143,7 +202,7 @@ test("mapping profile migration syncs indexes for a fresh collection", async () 
     },
   };
 
-  const result = await migrateMappingProfileOwnerScope({ model });
+  const result = await migrateMappingProfileOwnerScope({ model, mode: "apply" });
 
   assert.deepEqual(result.droppedIndexes, []);
   assert.deepEqual(calls, ["syncIndexes"]);
@@ -179,7 +238,7 @@ test("concurrent mapping migrations ignore IndexNotFound while dropping the obso
     },
   };
 
-  const result = await migrateMappingProfileOwnerScope({ model });
+  const result = await migrateMappingProfileOwnerScope({ model, mode: "apply" });
 
   assert.deepEqual(result.droppedIndexes, [OBSOLETE_WORKSPACE_UNIQUE_INDEX]);
   assert.deepEqual(calls, [
@@ -217,7 +276,7 @@ test("mapping migration fails closed for non-IndexNotFound drop errors", async (
   };
 
   await assert.rejects(
-    () => migrateMappingProfileOwnerScope({ model }),
+    () => migrateMappingProfileOwnerScope({ model, mode: "apply" }),
     /drop denied/,
   );
   assert.equal(syncCalled, false);

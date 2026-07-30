@@ -282,3 +282,120 @@ test("enabled Student check-work refuses startup when attempt safeguards cannot 
   await assert.rejects(startServer(), /attempt indexes unavailable/);
   assert.equal(listenCalls, 0);
 });
+
+test("mapping-profile startup off mode performs compatibility checks without index mutation", async () => {
+  const previousMode = process.env.MAPPING_PROFILE_V2_MIGRATION_MODE;
+  process.env.MAPPING_PROFILE_V2_MIGRATION_MODE = "off";
+  const calls = [];
+  const fakeServer = { once() {} };
+  const startServer = createStartServer({
+    connectDatabase: async () => ({}),
+    migrateMappingProfiles: async (options) => {
+      calls.push(["owner", options]);
+      return { skipped: true };
+    },
+    ensureV2Indexes: async () => {
+      calls.push(["indexes"]);
+    },
+    migrateMappingProfilesV2: async (options) => {
+      calls.push(["v2", options]);
+      return { skipped: true };
+    },
+    migrateQuestionEvents: async () => ({ purged: 0 }),
+    migrateStudentAttempts: async () => ({ purged: 0 }),
+    listen: () => fakeServer,
+    logger: { error() {}, log() {} },
+  });
+
+  try {
+    assert.equal(await startServer(), fakeServer);
+    assert.deepEqual(calls, [
+      ["owner", { mode: "off" }],
+      ["v2", { mode: "off" }],
+    ]);
+  } finally {
+    if (previousMode === undefined) delete process.env.MAPPING_PROFILE_V2_MIGRATION_MODE;
+    else process.env.MAPPING_PROFILE_V2_MIGRATION_MODE = previousMode;
+  }
+});
+
+test("mapping-profile startup apply mode composes owner, index, and V2 mutations", async () => {
+  const previousMode = process.env.MAPPING_PROFILE_V2_MIGRATION_MODE;
+  process.env.MAPPING_PROFILE_V2_MIGRATION_MODE = "apply";
+  const calls = [];
+  const fakeServer = { once() {} };
+  const startServer = createStartServer({
+    connectDatabase: async () => ({}),
+    migrateMappingProfiles: async (options) => {
+      calls.push(["owner", options]);
+      return { skipped: false, backfilled: 0, droppedIndexes: [] };
+    },
+    ensureV2Indexes: async (options) => {
+      calls.push(["indexes", options]);
+      return { skipped: false, indexes: [], auditIndexes: [] };
+    },
+    migrateMappingProfilesV2: async (options) => {
+      calls.push(["v2", options]);
+      return {
+        skipped: false,
+        mode: "apply",
+        created: 0,
+        skippedExisting: 0,
+        quarantined: 0,
+      };
+    },
+    migrateQuestionEvents: async () => ({ purged: 0 }),
+    migrateStudentAttempts: async () => ({ purged: 0 }),
+    listen: () => fakeServer,
+    logger: { error() {}, log() {} },
+  });
+
+  try {
+    assert.equal(await startServer(), fakeServer);
+    assert.deepEqual(calls, [
+      ["owner", { mode: "apply" }],
+      ["indexes", { mode: "apply" }],
+      ["v2", { mode: "apply" }],
+    ]);
+  } finally {
+    if (previousMode === undefined) delete process.env.MAPPING_PROFILE_V2_MIGRATION_MODE;
+    else process.env.MAPPING_PROFILE_V2_MIGRATION_MODE = previousMode;
+  }
+});
+
+test("mapping-profile startup rejects rollback mode before any migration mutation", async () => {
+  const previousMode = process.env.MAPPING_PROFILE_V2_MIGRATION_MODE;
+  process.env.MAPPING_PROFILE_V2_MIGRATION_MODE = "rollback";
+  let migrationCalls = 0;
+  let listenCalls = 0;
+  const startServer = createStartServer({
+    connectDatabase: async () => ({}),
+    migrateMappingProfiles: async () => {
+      migrationCalls += 1;
+      return { skipped: true };
+    },
+    ensureV2Indexes: async () => {
+      migrationCalls += 1;
+    },
+    migrateMappingProfilesV2: async () => {
+      migrationCalls += 1;
+      return { skipped: true };
+    },
+    migrateQuestionEvents: async () => ({ purged: 0 }),
+    migrateStudentAttempts: async () => ({ purged: 0 }),
+    listen: () => {
+      listenCalls += 1;
+      return { once() {} };
+    },
+    logger: { error() {}, log() {} },
+  });
+
+  try {
+    await assert.rejects(startServer(), /rollback.*startup|startup.*rollback/i);
+    assert.equal(migrationCalls, 0);
+    assert.equal(listenCalls, 0);
+  } finally {
+    if (previousMode === undefined) delete process.env.MAPPING_PROFILE_V2_MIGRATION_MODE;
+    else process.env.MAPPING_PROFILE_V2_MIGRATION_MODE = previousMode;
+  }
+});

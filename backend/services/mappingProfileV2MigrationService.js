@@ -439,19 +439,109 @@ async function rollbackMappingProfilesV1ToV2({
   return report;
 }
 
-async function ensureMappingProfileV2Indexes({
+function derivedIndexName(keys = {}, options = {}) {
+  if (options.name) return options.name;
+  return Object.entries(keys)
+    .map(([field, direction]) => `${field}_${direction}`)
+    .join("_");
+}
+
+async function existingIndexes(model) {
+  if (typeof model?.collection?.indexes !== "function") return [];
+  try {
+    return await model.collection.indexes();
+  } catch (error) {
+    if (error?.code === 26 || error?.codeName === "NamespaceNotFound") return [];
+    throw error;
+  }
+}
+
+async function planModelIndexes(model) {
+  const desired = typeof model?.schema?.indexes === "function"
+    ? model.schema.indexes().map(([keys, options = {}]) => ({
+      name: derivedIndexName(keys, options),
+      keys,
+      options,
+    }))
+    : [];
+  const existing = await existingIndexes(model);
+  const existingByName = new Map(existing.map((index) => [index.name, index]));
+  const incompatibleIndexNames = desired
+    .filter(({ name, keys, options }) => {
+      const current = existingByName.get(name);
+      if (!current) return false;
+      return JSON.stringify(current.key || {}) !== JSON.stringify(keys)
+        || Boolean(current.unique) !== Boolean(options.unique)
+        || JSON.stringify(current.partialFilterExpression || null)
+          !== JSON.stringify(options.partialFilterExpression || null);
+    })
+    .map(({ name }) => name);
+
+  return {
+    existingIndexNames: existing.map((index) => index.name).filter(Boolean),
+    desiredIndexNames: desired.map((index) => index.name),
+    createIndexNames: desired
+      .filter(({ name }) => !existingByName.has(name))
+      .map(({ name }) => name),
+    incompatibleIndexNames,
+  };
+}
+
+async function planMappingProfileV2Indexes({
   model = MappingProfileV2,
   auditModel = model === MappingProfileV2 ? MappingProfileV2MigrationAudit : null,
 } = {}) {
+  return {
+    model: await planModelIndexes(model),
+    audit: auditModel
+      ? await planModelIndexes(auditModel)
+      : {
+        existingIndexNames: [],
+        desiredIndexNames: [],
+        createIndexNames: [],
+        incompatibleIndexNames: [],
+      },
+  };
+}
+
+async function ensureMappingProfileV2Indexes({
+  model = MappingProfileV2,
+  auditModel = model === MappingProfileV2 ? MappingProfileV2MigrationAudit : null,
+  mode = process.env.MAPPING_PROFILE_V2_MIGRATION_MODE || "off",
+} = {}) {
+  const normalizedMode = String(mode || "off").trim().toLowerCase();
+  if (!MIGRATION_MODES.has(normalizedMode)) {
+    throw new Error(
+      "MAPPING_PROFILE_V2_MIGRATION_MODE phải là off, dry-run, apply hoặc rollback",
+    );
+  }
+  const indexPlan = await planMappingProfileV2Indexes({ model, auditModel });
+  const report = {
+    mode: normalizedMode,
+    skipped: normalizedMode === "off" || normalizedMode === "rollback",
+    indexPlan,
+    indexes: [],
+    auditIndexes: [],
+  };
+  if (normalizedMode !== "apply") return report;
+
+  const incompatible = [
+    ...indexPlan.model.incompatibleIndexNames,
+    ...indexPlan.audit.incompatibleIndexNames,
+  ];
+  if (incompatible.length) {
+    throw new Error(
+      `MappingProfile V2 index compatibility check failed: ${incompatible.join(", ")}`,
+    );
+  }
   if (typeof model.createIndexes !== "function") {
     throw new Error("MappingProfileV2 model không hỗ trợ createIndexes");
   }
   const indexes = await model.createIndexes();
   const auditIndexes = auditModel ? await auditModel.createIndexes() : [];
-  return {
-    indexes: Array.isArray(indexes) ? indexes : [],
-    auditIndexes: Array.isArray(auditIndexes) ? auditIndexes : [],
-  };
+  report.indexes = Array.isArray(indexes) ? indexes : [];
+  report.auditIndexes = Array.isArray(auditIndexes) ? auditIndexes : [];
+  return report;
 }
 
 module.exports = {
@@ -460,5 +550,6 @@ module.exports = {
   ensureMappingProfileV2Indexes,
   inferLegacyDocumentType,
   migrateMappingProfilesV1ToV2,
+  planMappingProfileV2Indexes,
   rollbackMappingProfilesV1ToV2,
 };

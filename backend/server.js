@@ -199,6 +199,19 @@ function createStartServer({
   logger = console,
 } = {}) {
   return async function startServer() {
+    const v2MigrationMode = String(
+      process.env.MAPPING_PROFILE_V2_MIGRATION_MODE || "off",
+    ).trim().toLowerCase();
+    if (v2MigrationMode === "rollback") {
+      throw new Error(
+        "MappingProfile rollback cannot run during startup; use the production migration command",
+      );
+    }
+    if (!["off", "dry-run", "apply"].includes(v2MigrationMode)) {
+      throw new Error(
+        "MAPPING_PROFILE_V2_MIGRATION_MODE must be off, dry-run, or apply during startup",
+      );
+    }
     if (converterGatewayUsageReady) {
       assertConversionContextConfig();
       assertConverterGatewayStartupConfig();
@@ -218,17 +231,25 @@ function createStartServer({
         );
       }
     }
-    const migration = await migrateMappingProfiles();
+    const migration = await migrateMappingProfiles({ mode: v2MigrationMode });
     if (!migration.skipped) {
-      logger.log(
-        `[DB] MappingProfile owner migration: ${migration.backfilled} backfilled, ${migration.droppedIndexes.length} obsolete index(es) dropped`,
-      );
+      if (v2MigrationMode === "dry-run") {
+        logger.log(
+          `[DB] MappingProfile owner migration (dry-run): ${migration.plannedBackfills} backfill(s) planned, ${migration.indexPlan.dropIndexNames.length} obsolete index drop(s) planned`,
+        );
+      } else {
+        logger.log(
+          `[DB] MappingProfile owner migration: ${migration.backfilled} backfilled, ${migration.droppedIndexes.length} obsolete index(es) dropped`,
+        );
+      }
     }
-    const v2MigrationMode = String(
-      process.env.MAPPING_PROFILE_V2_MIGRATION_MODE || "off",
-    ).trim().toLowerCase();
-    if (mappingProfileV2Enabled || v2MigrationMode === "apply") {
-      await ensureV2Indexes();
+    if (v2MigrationMode === "dry-run" || v2MigrationMode === "apply") {
+      const v2Indexes = await ensureV2Indexes({ mode: v2MigrationMode });
+      if (v2MigrationMode === "dry-run") {
+        logger.log(
+          `[DB] MappingProfile V2 indexes (dry-run): ${v2Indexes.indexPlan.model.createIndexNames.length} model index(es), ${v2Indexes.indexPlan.audit.createIndexNames.length} audit index(es) planned`,
+        );
+      }
     }
     const v2Migration = await migrateMappingProfilesV2({ mode: v2MigrationMode });
     if (!v2Migration.skipped) {

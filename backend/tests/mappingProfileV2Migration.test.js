@@ -344,9 +344,19 @@ test("migration stays disabled unless explicitly selected", async () => {
   assert.equal(queried, false);
 });
 
-test("V2 indexes are created independently from the data migration mode", async () => {
+test("V2 index migration defaults to off and reports the pending index plan", async () => {
   let createIndexesCalls = 0;
   const model = {
+    schema: {
+      indexes() {
+        return [[{ ownerScope: 1, profileFamilyId: 1 }, { unique: true }]];
+      },
+    },
+    collection: {
+      async indexes() {
+        return [{ name: "_id_", key: { _id: 1 } }];
+      },
+    },
     async createIndexes() {
       createIndexesCalls += 1;
       return ["ownerScope_1_profileFamilyId_1"];
@@ -354,13 +364,64 @@ test("V2 indexes are created independently from the data migration mode", async 
   };
 
   const result = await ensureMappingProfileV2Indexes({ model });
-  const migration = await migrateMappingProfilesV1ToV2({
-    sourceModel: { find: async () => { throw new Error("must not read V1"); } },
-    targetModel: model,
-    mode: "off",
-  });
 
-  assert.equal(createIndexesCalls, 1);
-  assert.deepEqual(result.indexes, ["ownerScope_1_profileFamilyId_1"]);
-  assert.equal(migration.skipped, true);
+  assert.equal(result.mode, "off");
+  assert.equal(result.skipped, true);
+  assert.equal(createIndexesCalls, 0);
+  assert.deepEqual(result.indexPlan.model.createIndexNames, [
+    "ownerScope_1_profileFamilyId_1",
+  ]);
+});
+
+test("V2 index dry-run performs zero index writes", async () => {
+  let createIndexesCalls = 0;
+  const model = {
+    schema: { indexes: () => [] },
+    collection: { indexes: async () => [] },
+    async createIndexes() {
+      createIndexesCalls += 1;
+    },
+  };
+
+  const result = await ensureMappingProfileV2Indexes({ model, mode: "dry-run" });
+
+  assert.equal(result.mode, "dry-run");
+  assert.equal(result.skipped, false);
+  assert.equal(createIndexesCalls, 0);
+});
+
+test("V2 indexes mutate only in exact apply mode and remain idempotent", async () => {
+  let createIndexesCalls = 0;
+  const model = {
+    schema: { indexes: () => [] },
+    collection: { indexes: async () => [] },
+    async createIndexes() {
+      createIndexesCalls += 1;
+      return ["ownerScope_1_profileFamilyId_1"];
+    },
+  };
+
+  const first = await ensureMappingProfileV2Indexes({ model, mode: "apply" });
+  const second = await ensureMappingProfileV2Indexes({ model, mode: "apply" });
+
+  assert.equal(createIndexesCalls, 2);
+  assert.deepEqual(first.indexes, ["ownerScope_1_profileFamilyId_1"]);
+  assert.deepEqual(second.indexes, ["ownerScope_1_profileFamilyId_1"]);
+});
+
+test("V2 index apply fails closed on non-IndexNotFound errors", async () => {
+  const model = {
+    schema: { indexes: () => [] },
+    collection: { indexes: async () => [] },
+    async createIndexes() {
+      const error = new Error("index create denied");
+      error.code = 13;
+      throw error;
+    },
+  };
+
+  await assert.rejects(
+    ensureMappingProfileV2Indexes({ model, mode: "apply" }),
+    /index create denied/,
+  );
 });

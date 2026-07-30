@@ -2,6 +2,7 @@ const MappingProfile = require("../models/MappingProfile");
 
 const OBSOLETE_WORKSPACE_UNIQUE_INDEX =
   "workspace_1_targetTemplateId_1_sourceSignatureHash_1";
+const OWNER_SCOPE_MIGRATION_MODES = new Set(["off", "dry-run", "apply"]);
 const LEGACY_OWNER_SCOPE_FILTER = {
   $or: [
     { ownerScope: { $exists: false } },
@@ -62,9 +63,27 @@ function isIndexNotFound(error) {
   return error?.code === 27 || error?.codeName === "IndexNotFound";
 }
 
-async function migrateMappingProfileOwnerScope({ model = MappingProfile } = {}) {
+async function migrateMappingProfileOwnerScope({
+  model = MappingProfile,
+  mode = process.env.MAPPING_PROFILE_V2_MIGRATION_MODE || "off",
+} = {}) {
+  const normalizedMode = String(mode || "off").trim().toLowerCase();
+  if (!OWNER_SCOPE_MIGRATION_MODES.has(normalizedMode)) {
+    throw new Error(
+      "MappingProfile owner migration mode must be off, dry-run, or apply",
+    );
+  }
+  const report = {
+    mode: normalizedMode,
+    skipped: normalizedMode === "off",
+    plannedBackfills: 0,
+    backfilled: 0,
+    indexPlan: { dropIndexNames: [] },
+    droppedIndexes: [],
+  };
+  if (normalizedMode === "off") return report;
   if (model.db?.readyState !== 1) {
-    return { skipped: true, backfilled: 0, droppedIndexes: [] };
+    return { ...report, skipped: true };
   }
 
   const legacyProfiles = await model
@@ -72,12 +91,16 @@ async function migrateMappingProfileOwnerScope({ model = MappingProfile } = {}) 
     .select("_id workspace updatedBy")
     .lean();
   const operations = legacyProfiles.map(buildLegacyOwnerScopeUpdate);
+  const indexes = await existingMappingProfileIndexes(model);
+  const plan = planMappingProfileIndexMigration(indexes);
+  report.plannedBackfills = operations.length;
+  report.indexPlan = plan;
+  if (normalizedMode === "dry-run") return report;
+
   if (operations.length) {
     await model.bulkWrite(operations, { ordered: true });
   }
 
-  const indexes = await existingMappingProfileIndexes(model);
-  const plan = planMappingProfileIndexMigration(indexes);
   for (const indexName of plan.dropIndexNames) {
     try {
       await model.collection.dropIndex(indexName);
@@ -87,11 +110,9 @@ async function migrateMappingProfileOwnerScope({ model = MappingProfile } = {}) 
   }
   await model.syncIndexes();
 
-  return {
-    skipped: false,
-    backfilled: operations.length,
-    droppedIndexes: plan.dropIndexNames,
-  };
+  report.backfilled = operations.length;
+  report.droppedIndexes = plan.dropIndexNames;
+  return report;
 }
 
 module.exports = {
