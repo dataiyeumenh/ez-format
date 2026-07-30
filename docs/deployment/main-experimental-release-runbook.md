@@ -679,8 +679,9 @@ Production promotion is currently `BLOCKED`. When all live staging rows pass:
 3. On a clean checkout of `STAGING_TESTED_SHA`, run
    `npm run qa:main-integration` in release mode with real replica MongoDB,
    GridFS, live gateway, fixture, and credential inputs. Exit `0`,
-   `RELEASE_READY`, zero failed checks, and zero skipped mandatory checks are
-   required.
+   `status: RELEASE_READY`, `releaseEligible: true`, `missing: []`, zero failed
+   checks, and zero skipped mandatory checks are required. No alternate success
+   token is valid.
 4. Re-run flags-off smoke plus Stages 1-5 against deployments reporting
    `STAGING_TESTED_SHA`. Complete the live receipt and rollback drill.
 5. Create the release tag on `STAGING_TESTED_SHA` only after the receipt is
@@ -695,6 +696,23 @@ Any code, generated asset, dependency lock, environment-dependent frontend
 build input, or merge change after staging certification creates a new SHA.
 That SHA must return to step 2. A production deployment that is merely a
 descendant of the staging SHA is forbidden.
+
+### Machine status contract
+
+`scripts/qa-main-integration-status.ps1` is fail-closed and has three literal
+outcomes:
+
+| Invocation/evidence | Required status | Exit | Promotion meaning |
+|---|---|---:|---|
+| `-Mode Release`, all replica/GridFS/live inputs present | `RELEASE_READY` | `0` | Eligible for the separate backup, live-stage, rollback, and exact-SHA attestations. |
+| `-Mode Release`, any required input missing or invalid | `RELEASE_BLOCKED` | `2` | Stop; never promote. |
+| `-Mode LocalIncomplete` | `LOCAL_INCOMPLETE` | `0` | Local diagnostics only; `releaseEligible=false`. |
+
+The complete release result must contain the exact JSON values
+`status=RELEASE_READY`, `releaseEligible=true`, and `missing=[]`. A complete
+status-script result does not invent or replace private Mongo backup,
+replica/GridFS execution, live browser, rollback, or production SHA evidence;
+those remain mandatory receipt attestations.
 
 ## Rollback drill
 

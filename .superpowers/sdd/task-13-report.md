@@ -13,6 +13,8 @@ Status: `BLOCKED`
 - Created: `.superpowers/sdd/task-13-report.md`
 - Existing Student and `.superpowers/sdd/progress.md` working-tree changes were
   not edited or staged.
+- Review fix scope: `scripts/qa-main-integration-status.ps1` and
+  `backend/tests/mainIntegrationReleaseGate.test.js`.
 
 ## Implemented documentation
 
@@ -48,6 +50,10 @@ Status: `BLOCKED`
 - Accounting operation UI remains server-capability driven; no Vite operation
   force-enable flags are introduced.
 - MISA repair has one Node enable flag and no separate converter/Vite flag.
+- Release status script contract now uses only `RELEASE_READY` when its
+  configured checks are complete, `RELEASE_BLOCKED` for missing/invalid Release
+  evidence, and `LOCAL_INCOMPLETE` for explicit local diagnostics. Backup and
+  final staging attestations remain separate required receipt evidence.
 
 ## Validation evidence
 
@@ -84,6 +90,32 @@ detail: QA_EXPECT_LIVE=true is not set
 Task 11 evidence also records absent real MISA Mongo execution because neither
 `MISA_IMPORT_REPAIR_TEST_MONGO_URI` nor `MONGO_URI` was supplied to that gate.
 No live tests were reclassified as pass.
+
+Focused gate tests:
+
+```text
+node --test backend/tests/mainIntegrationReleaseGate.test.js backend/tests/releaseReplicaGate.test.js
+5 passed, 0 failed
+```
+
+Focused documentation contract:
+
+```text
+docs_gate=pass
+literals=exact
+fail_closed=documented
+local_incomplete=preserved
+fake_live_evidence=none
+```
+
+Synthetic status-contract checks used test-only values and are not live
+evidence:
+
+```text
+Release with missing inputs: RELEASE_BLOCKED, exit 2
+LocalIncomplete: LOCAL_INCOMPLETE, exit 0, releaseEligible=false
+Complete synthetic status inputs: RELEASE_READY, exit 0, releaseEligible=true, missing=[]
+```
 
 ## Release blockers
 

@@ -349,6 +349,8 @@ Result: `PENDING`
 ```text
 staging_tested_sha: PENDING
 release_qa_status: PENDING
+release_qa_release_eligible: PENDING
+release_qa_missing: PENDING
 release_qa_exit_code: PENDING
 release_qa_failed_checks: PENDING
 release_qa_skipped_checks: PENDING
@@ -365,7 +367,14 @@ approved_at_utc: PENDING
 ```
 
 - [ ] `npm run qa:main-integration` reports `RELEASE_READY`, exit `0`, zero
-      mandatory skips, bound to `staging_tested_sha`.
+      mandatory skips, `releaseEligible=true`, `missing=[]`, bound to
+      `staging_tested_sha`.
+- [ ] The machine JSON status is the literal `RELEASE_READY`; no alternate
+      success token is accepted.
+- [ ] Missing/invalid release evidence returns literal `RELEASE_BLOCKED`, exit
+      `2`; it never returns a promotable result.
+- [ ] `-Mode LocalIncomplete` remains literal `LOCAL_INCOMPLETE`, exit `0`,
+      `releaseEligible=false`, and cannot satisfy this attestation.
 - [ ] Flags-off plus Stages 1-5 all pass on `staging_tested_sha`.
 - [ ] Rollback drill passes on `staging_tested_sha`.
 - [ ] Release tag points exactly to `staging_tested_sha`.

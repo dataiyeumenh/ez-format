@@ -109,7 +109,7 @@ Add-EvidenceCheck "live_gateway" $liveReady $liveDetail
 $orderedMissing = @($missing | Sort-Object -Unique)
 $releaseEligible = $orderedMissing.Count -eq 0
 $status = if ($Mode -eq "Release") {
-    if ($releaseEligible) { "RELEASE_PREREQUISITES_PRESENT" } else { "RELEASE_BLOCKED" }
+    if ($releaseEligible) { "RELEASE_READY" } else { "RELEASE_BLOCKED" }
 } else {
     "LOCAL_INCOMPLETE"
 }

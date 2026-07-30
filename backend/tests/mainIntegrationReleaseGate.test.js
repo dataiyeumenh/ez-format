@@ -52,11 +52,11 @@ test("local incomplete mode is explicit and non-release", () => {
   assert.equal(status.releaseEligible, false);
 });
 
-test("release mode accepts a complete evidence configuration", () => {
+test("release mode emits the exact ready status for complete evidence", () => {
   const result = runStatus("Release", evidenceEnv);
   assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
   const status = readStatus(result);
-  assert.equal(status.status, "RELEASE_PREREQUISITES_PRESENT");
+  assert.equal(status.status, "RELEASE_READY");
   assert.equal(status.releaseEligible, true);
   assert.deepEqual(status.missing, []);
 });
