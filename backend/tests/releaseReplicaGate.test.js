@@ -23,7 +23,7 @@ test("qa:release fails closed when mandatory external evidence is absent", () =>
     PAYOS_CHECKSUM_KEY: "",
   });
 
-  assert.notEqual(result.status, 0);
+  assert.equal(result.status, 2, `${result.stdout}\n${result.stderr}`);
   const output = `${result.stdout}\n${result.stderr}`;
   assert.match(output, /RELEASE_BLOCKED/);
   assert.match(output, /"missing":\["gridfs","live_gateway","replica_mongo"\]/);

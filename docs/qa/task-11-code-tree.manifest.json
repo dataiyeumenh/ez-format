@@ -1,7 +1,7 @@
 {
   "schema_version": "1",
   "algorithm": "sha256-path-v1",
-  "tree_digest": "aa710aa553655e78bba78d4587cccd8f86bb424ca69bad4a37238213d6497f66",
+  "tree_digest": "e9882edd90044b643e5e5a0d75dd646017fa7be522563292d6659142f09d8578",
   "files": [
     {
       "path": ".gitattributes",
@@ -21,7 +21,7 @@
     },
     {
       "path": "backend/tests/mainIntegrationReleaseGate.test.js",
-      "sha256": "6b37f9dd2254d8653f36b1f2cb7f5ddc2187f4904a7cbc5eff4433aa7aee46c7"
+      "sha256": "06dc302ef68e560b3c1fe1a257e72c5e27df3e4dbcc9807480da726daaeac84e"
     },
     {
       "path": "backend/tests/mongoGridFsArtifactStorage.integration.test.js",
@@ -29,11 +29,11 @@
     },
     {
       "path": "backend/tests/releaseReplicaGate.test.js",
-      "sha256": "b86559a0766b9556002a932b058b49602642a5bad74d6ee278ed894bed12af9a"
+      "sha256": "92ad1039640c33dc0526d934f44274c99f373a62265033b5b49800f2f594688a"
     },
     {
       "path": "backend/tests/task11EvidenceBinding.test.js",
-      "sha256": "0d0ef821abf59d0f58effaf00789cbcadd87b262d155c73e4a356a6aca24586e"
+      "sha256": "799a42854fa4c5f6b321d14d05e4ffae63e48bf942656d4d563e11975e573010"
     },
     {
       "path": "converter/tests/test_e2e_extreme.py",

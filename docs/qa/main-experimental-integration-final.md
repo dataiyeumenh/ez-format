@@ -3,7 +3,7 @@
 Date: 2026-07-30
 Worktree: E:\0. EXE2\ez-format-main-experimental-integration
 Branch: codex/main-experimental-production-integration
-Tested code/test/gate tree digest: aa710aa553655e78bba78d4587cccd8f86bb424ca69bad4a37238213d6497f66
+Tested code/test/gate tree digest: e9882edd90044b643e5e5a0d75dd646017fa7be522563292d6659142f09d8578
 Merge revision: bff29ca024cb0b4b7b4c814cce7af1372e65ef86
 
 ## Verdict
@@ -72,6 +72,7 @@ The local-incomplete matrix is historical command evidence. Current focused chec
 - Schema validator: pwsh $HOME/.agents/skills/extreme-qa-qc/scripts/qa-evidence.ps1 validate docs/qa/task-11-evidence.json --root . --json.
 - Both validators must pass without .artifacts; no exact HEAD SHA is asserted.
 - Tree hashing canonicalizes CRLF to LF; .gitattributes pins byte-addressed Task 11 evidence to LF.
+- Focused guard suite adds exact release exit-code 2 assertions plus temporary-clone code/evidence mutation rejection; no external artifact is required.
 
 ## Task 11 Ownership
 

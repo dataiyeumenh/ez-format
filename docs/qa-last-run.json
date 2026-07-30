@@ -1,52 +1,5 @@
 {
-  "timestamp": "2026-07-30 21:41:39",
-  "steps": [
-    {
-      "name": "Prerequisites",
-      "seconds": 0.0063916,
-      "status": "ok"
-    },
-    {
-      "name": "Fixtures templates",
-      "seconds": 0.0051977,
-      "status": "ok"
-    },
-    {
-      "name": "Backend syntax",
-      "seconds": 0.4685702,
-      "status": "ok"
-    },
-    {
-      "name": "Backend student tests",
-      "seconds": 0.4687723,
-      "status": "ok"
-    },
-    {
-      "name": "Frontend tests",
-      "seconds": 1.0807852,
-      "status": "ok"
-    },
-    {
-      "name": "Frontend build",
-      "seconds": 3.9448973,
-      "status": "ok"
-    },
-    {
-      "name": "Converter API smoke",
-      "seconds": 1.760512,
-      "status": "ok"
-    },
-    {
-      "name": "Converter student integration",
-      "seconds": 12.9952754,
-      "status": "ok"
-    },
-    {
-      "name": "MISA import repair Task 9 gate",
-      "seconds": 25.3325523,
-      "status": "ok"
-    }
-  ],
+  "failed": [],
   "passed": [
     "Prerequisites",
     "Fixtures templates",
@@ -58,15 +11,62 @@
     "Converter student integration",
     "MISA import repair Task 9 gate"
   ],
-  "failed": [],
   "ok": true,
   "task11Verdict": "INCOMPLETE",
   "releaseGateStatus": "RELEASE_BLOCKED",
   "releaseEligible": false,
-  "testedCodeTestGateTreeDigest": "aa710aa553655e78bba78d4587cccd8f86bb424ca69bad4a37238213d6497f66",
+  "testedCodeTestGateTreeDigest": "e9882edd90044b643e5e5a0d75dd646017fa7be522563292d6659142f09d8578",
   "missingMandatoryEvidence": [
     "replica_mongo: PAYMENT_REPLICA_SET_TEST_URI is not set",
     "gridfs: GRIDFS_INTEGRATION_TEST_URI is not set",
     "live_gateway: QA_EXPECT_LIVE=true and live gateway inputs are not set"
+  ],
+  "timestamp": "2026-07-30 21:59:20",
+  "steps": [
+    {
+      "seconds": 0.0152918,
+      "name": "Prerequisites",
+      "status": "ok"
+    },
+    {
+      "seconds": 0.0142607,
+      "name": "Fixtures templates",
+      "status": "ok"
+    },
+    {
+      "seconds": 0.4655636,
+      "name": "Backend syntax",
+      "status": "ok"
+    },
+    {
+      "seconds": 0.4816878,
+      "name": "Backend student tests",
+      "status": "ok"
+    },
+    {
+      "seconds": 1.1002924,
+      "name": "Frontend tests",
+      "status": "ok"
+    },
+    {
+      "seconds": 3.9821151,
+      "name": "Frontend build",
+      "status": "ok"
+    },
+    {
+      "seconds": 1.8377486,
+      "name": "Converter API smoke",
+      "status": "ok"
+    },
+    {
+      "seconds": 13.0296042,
+      "name": "Converter student integration",
+      "status": "ok"
+    },
+    {
+      "seconds": 28.1551638,
+      "name": "MISA import repair Task 9 gate",
+      "status": "ok"
+    }
   ]
 }

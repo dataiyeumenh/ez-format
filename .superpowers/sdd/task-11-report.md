@@ -3,7 +3,7 @@
 Date: 2026-07-30
 Worktree: E:\0. EXE2\ez-format-main-experimental-integration
 Branch: codex/main-experimental-production-integration
-Tested code/test/gate tree digest: aa710aa553655e78bba78d4587cccd8f86bb424ca69bad4a37238213d6497f66
+Tested code/test/gate tree digest: e9882edd90044b643e5e5a0d75dd646017fa7be522563292d6659142f09d8578
 Merge revision: bff29ca024cb0b4b7b4c814cce7af1372e65ef86
 
 ## Verdict
@@ -40,6 +40,7 @@ INCOMPLETE. Full local code QA passed with zero failures. Release is not certifi
 - Evidence binds a deterministic tracked tree digest, not a self-referential HEAD SHA.
 - Required evidence is tracked under docs/qa; validators do not depend on .artifacts.
 - Digest hashing canonicalizes text to LF; durable evidence files enforce LF checkout.
+- Focused guard suite: 18 passed, including exact release exit-code 2 assertions and committed clone tamper/hash rejection.
 
 ## Skip Reasons
 

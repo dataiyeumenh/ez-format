@@ -38,7 +38,7 @@ function readStatus(result) {
 
 test("release mode fails closed when replica, GridFS, and live evidence are absent", () => {
   const result = runStatus("Release");
-  assert.notEqual(result.status, 0);
+  assert.equal(result.status, 2, `${result.stdout}\n${result.stderr}`);
   const status = readStatus(result);
   assert.equal(status.status, "RELEASE_BLOCKED");
   assert.deepEqual(status.missing.sort(), ["gridfs", "live_gateway", "replica_mongo"]);

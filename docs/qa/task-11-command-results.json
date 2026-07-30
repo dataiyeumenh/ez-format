@@ -1,7 +1,7 @@
 {
   "schema_version": "1",
   "scope": "Task 11 reproducible command/result manifest",
-  "tested_tree_binding": "sha256-path-v1 aa710aa553655e78bba78d4587cccd8f86bb424ca69bad4a37238213d6497f66; canonical LF text hashing; no commit SHA asserted.",
+  "tested_tree_binding": "sha256-path-v1 e9882edd90044b643e5e5a0d75dd646017fa7be522563292d6659142f09d8578; canonical LF text hashing; no commit SHA asserted.",
   "commands": [
     {
       "id": "release_preflight",
@@ -27,7 +27,7 @@
       "command": "cd backend; node --test tests/coupons.test.js tests/task11EvidenceBinding.test.js tests/mainIntegrationReleaseGate.test.js tests/releaseReplicaGate.test.js",
       "exit_code": 0,
       "status": "PASS",
-      "result": "17 passed, 0 failed; coupon checkout behavior, release fail-closed contracts, CRLF-stable tree digest, and evidence binding passed."
+      "result": "18 passed, 0 failed; coupon checkout behavior, exact release exit codes, CRLF-stable tree digest, tamper rejection, and evidence binding passed."
     },
     {
       "id": "qa_fast",

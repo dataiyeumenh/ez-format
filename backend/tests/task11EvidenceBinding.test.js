@@ -9,6 +9,14 @@ const test = require("node:test");
 const repositoryRoot = path.resolve(__dirname, "../..");
 const validator = path.join(repositoryRoot, "scripts", "validate-task11-evidence.ps1");
 
+function runBinding(root) {
+  return spawnSync(
+    "pwsh",
+    ["-NoProfile", "-File", path.join(root, "scripts", "validate-task11-evidence.ps1"), "-RepositoryRoot", root],
+    { encoding: "utf8", env: { ...process.env } },
+  );
+}
+
 test("Task 11 evidence binds to the tracked code/test/gate tree without artifact storage", () => {
   const result = spawnSync(
     "pwsh",
@@ -89,4 +97,34 @@ test("Task 11 durable evidence files have deterministic LF checkout", () => {
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /task-11-command-results\.json: eol: lf/);
   assert.match(result.stdout, /task-11-evidence\.json: eol: lf/);
+});
+
+test("Task 11 validator rejects code tampering and stale evidence hashes", (t) => {
+  const parentRoot = fs.mkdtempSync(path.join(os.tmpdir(), "task11-evidence-clone-"));
+  const cloneRoot = path.join(parentRoot, "repository");
+  t.after(() => fs.rmSync(parentRoot, { recursive: true, force: true }));
+
+  const clone = spawnSync("git", ["clone", "--no-local", repositoryRoot, cloneRoot], {
+    encoding: "utf8",
+  });
+  assert.equal(clone.status, 0, `${clone.stdout}\n${clone.stderr}`);
+  assert.equal(fs.existsSync(path.join(cloneRoot, ".artifacts")), false);
+
+  const codePath = path.join(cloneRoot, "backend", "tests", "coupons.test.js");
+  const originalCode = fs.readFileSync(codePath, "utf8");
+  fs.appendFileSync(codePath, "\n// Task 11 tamper probe\n");
+  let result = runBinding(cloneRoot);
+  assert.equal(result.status, 1, `${result.stdout}\n${result.stderr}`);
+  assert.match(`${result.stdout}\n${result.stderr}`, /tracked tree file changed: backend\/tests\/coupons\.test\.js/);
+
+  fs.writeFileSync(codePath, originalCode);
+  fs.appendFileSync(
+    path.join(cloneRoot, "docs", "qa", "task-11-command-results.json"),
+    "\n// Task 11 stale evidence probe\n",
+  );
+  result = runBinding(cloneRoot);
+  assert.equal(result.status, 1, `${result.stdout}\n${result.stderr}`);
+  const evidenceFailure = `${result.stdout}\n${result.stderr}`;
+  assert.match(evidenceFailure, /tracked command\/result evidence hash or size mismatch:/);
+  assert.match(evidenceFailure, /docs\/qa\/task-11-command-results\.json/);
 });

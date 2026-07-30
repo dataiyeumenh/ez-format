@@ -316,18 +316,25 @@
 - **Explicit skips:** 9 replica payment tests (PAYMENT_REPLICA_SET_TEST_URI absent), 1 GridFS integration test (GRIDFS_INTEGRATION_TEST_URI absent), 2 real-Mongo MISA tests (MISA_IMPORT_REPAIR_TEST_MONGO_URI and MONGO_URI absent), 3 live gateway tests (QA_EXPECT_LIVE=true and live inputs absent), plus 2 converter skips documented in the Task 11 receipt.
 - **Release gate:** RELEASE_BLOCKED; npm run qa:main-integration exit 2 because replica_mongo, gridfs, and live_gateway evidence are missing.
 - **Scans:** conflict markers, frontend production URLs, forbidden object-storage providers clean; no S3.
-- **Evidence binding:** code/test/gate tree sha256 aa710aa553655e78bba78d4587cccd8f86bb424ca69bad4a37238213d6497f66; no exact HEAD SHA asserted.
+- **Evidence binding:** code/test/gate tree sha256 e9882edd90044b643e5e5a0d75dd646017fa7be522563292d6659142f09d8578; no exact HEAD SHA asserted.
 
 ## 2026-07-30 21:36:23
 - **Result:** PASS
 - Passed: Prerequisites, Fixtures templates, Backend syntax, Backend student tests, Frontend tests, Frontend build, Converter API smoke, Converter student integration, MISA import repair Task 9 gate
 - Failed: none
-- Task 11 digest: aa710aa553655e78bba78d4587cccd8f86bb424ca69bad4a37238213d6497f66 (canonical LF text hashing).
+- Task 11 digest: e9882edd90044b643e5e5a0d75dd646017fa7be522563292d6659142f09d8578 (canonical LF text hashing).
 - Task 11 verdict: INCOMPLETE; mandatory replica MongoDB, GridFS, and live gateway evidence absent.
 
 ## 2026-07-30 21:41:39
 - **Result:** PASS
 - Passed: Prerequisites, Fixtures templates, Backend syntax, Backend student tests, Frontend tests, Frontend build, Converter API smoke, Converter student integration, MISA import repair Task 9 gate
 - Failed: none
-- Task 11 digest: aa710aa553655e78bba78d4587cccd8f86bb424ca69bad4a37238213d6497f66 (canonical LF text hashing).
+- Task 11 digest: e9882edd90044b643e5e5a0d75dd646017fa7be522563292d6659142f09d8578 (canonical LF text hashing).
+- Task 11 verdict: INCOMPLETE; mandatory replica MongoDB, GridFS, and live gateway evidence absent.
+
+## 2026-07-30 21:59:20
+- **Result:** PASS
+- Passed: Prerequisites, Fixtures templates, Backend syntax, Backend student tests, Frontend tests, Frontend build, Converter API smoke, Converter student integration, MISA import repair Task 9 gate
+- Failed: none
+- Task 11 digest: e9882edd90044b643e5e5a0d75dd646017fa7be522563292d6659142f09d8578 (canonical LF text hashing).
 - Task 11 verdict: INCOMPLETE; mandatory replica MongoDB, GridFS, and live gateway evidence absent.
