@@ -99,9 +99,20 @@ $steps = @()
     Pop-Location
 })
 
+$converterApiSmokeTests = @(
+    "tests/test_api.py::test_healthz",
+    "tests/test_api.py::test_conversion_types_endpoint",
+    "tests/test_api.py::test_preview_endpoint_returns_json_rows",
+    "tests/test_api.py::test_export_endpoint_rejects_client_rows_even_if_legacy_flag_is_set",
+    "tests/test_api.py::test_export_endpoint_rejects_rows_before_loading_bound_artifacts",
+    "tests/test_misa_purchase_domestic.py::test_purchase_domestic_template_exposes_real_58_column_contract",
+    "tests/test_misa_purchase_domestic.py::test_analyze_preview_and_export_purchase_file",
+    "tests/test_misa_template_export_contract.py"
+)
+
 [void]($steps += Step "Converter API smoke" {
     Push-Location (Join-Path $RepoRoot "converter")
-    python -m pytest tests/test_api.py::test_healthz tests/test_api.py::test_conversion_types_endpoint tests/test_api.py::test_preview_endpoint_returns_json_rows tests/test_api.py::test_export_rows_endpoint_rejects_legacy_rows_by_default tests/test_api.py::test_export_rows_endpoint_returns_xls_when_explicitly_enabled -q --tb=line
+    python -m pytest @converterApiSmokeTests -q --tb=line
     if ($LASTEXITCODE -ne 0) { throw "API smoke tests failed" }
     Pop-Location
 })
