@@ -65,6 +65,7 @@ from app.misa_workflow import (
     export_confirmed_profile,
     manifest_for_confirmed_profile,
     preview_mapping,
+    purge_student_raw_state,
     readiness_mapping,
     _read_metadata as _read_upload_metadata,
     sync_mapping_session,
@@ -550,6 +551,38 @@ async def analyze_student_session(
         return JSONResponse(jsonable_encoder(payload))
     except StudentWorkflowError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+@app.delete(
+    "/api/v1/student/sessions/{session_id}/purge",
+    dependencies=INTERNAL_SERVICE_DEPENDENCIES,
+)
+async def purge_student_session_state(
+    session_id: str,
+    x_conversion_context: Annotated[str | None, Header()] = None,
+    x_student_context: Annotated[str | None, Header()] = None,
+) -> JSONResponse:
+    student_claims = _verified_student_rate_claims(
+        x_student_context or "",
+        "analyze",
+        session_id,
+    )
+    context_token, _ = _conversion_context_for_request(
+        x_conversion_context,
+        required_scope="analyze",
+        session_id=session_id,
+        conversion_run_id=f"student:{session_id}",
+    )
+    try:
+        payload = await run_in_threadpool(
+            purge_student_raw_state,
+            session_id=session_id,
+            student_claims=student_claims,
+            conversion_context_token=str(context_token or ""),
+        )
+    except (ConversionContextError, OperationStoreError, ValueError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return JSONResponse(jsonable_encoder(payload))
 
 
 @app.get("/api/v1/student/sessions/{session_id}/overview")

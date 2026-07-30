@@ -79,6 +79,9 @@ from app.operation_store import (
 )
 from app.student_context import StudentContextClaims, verify_student_context
 from app.student_store import (
+    STUDENT_METADATA_FILENAME,
+    STUDENT_OWNER_TYPES,
+    STUDENT_RETENTION_TYPE,
     assert_upload_owner,
     bind_upload_to_student,
     student_upload_is_bound,
@@ -2135,6 +2138,71 @@ def _upload_content_type(filename: str) -> str:
     if Path(filename or "").suffix.lower() == ".xls":
         return "application/vnd.ms-excel"
     return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+
+def purge_student_raw_state(
+    *,
+    session_id: str,
+    student_claims: StudentContextClaims,
+    conversion_context_token: str,
+) -> dict[str, Any]:
+    claims = verify_conversion_context_token(conversion_context_token)
+    upload_id = str(claims.get("upload_id") or "").strip()
+    expected = {
+        "operation_session_id": session_id,
+        "conversion_run_id": f"student:{session_id}",
+        "user_id": student_claims.user_id,
+        "owner_scope": student_claims.owner_scope,
+        "workspace_id": str(student_claims.workspace_id or ""),
+    }
+    actual = {key: str(claims.get(key) or "").strip() for key in expected}
+    if not upload_id or any(actual[key] != str(value) for key, value in expected.items()):
+        raise OperationStoreError("Student purge context binding không hợp lệ")
+
+    store = OperationStore(conversion_context_token=conversion_context_token)
+    operation_exists = store.has_local_session_state(session_id)
+    upload_bound = student_upload_is_bound(upload_id)
+    upload_dir = _upload_dir(upload_id)
+    upload_exists = upload_dir.exists() or upload_dir.is_symlink()
+
+    if operation_exists:
+        session = store.assert_context_binding(
+            session_id,
+            claims,
+            required_scope="analyze",
+        )
+        if (
+            store.state_contract(session_id) != STUDENT_METADATA_STATE_CONTRACT
+            or session.upload_id != upload_id
+            or session.user_id != student_claims.user_id
+            or session.workspace_id != student_claims.workspace_id
+            or session.owner_scope != student_claims.owner_scope
+        ):
+            raise OperationStoreError("Student operation state binding không hợp lệ")
+
+    if upload_exists:
+        if not upload_bound:
+            raise OperationStoreError("Student upload marker không hợp lệ")
+        assert_upload_owner(upload_id, student_claims)
+        with _UPLOAD_CACHE_LOCK:
+            shutil.rmtree(upload_dir)
+    if upload_dir.exists():
+        raise OperationStoreError("Không thể purge Student raw upload")
+
+    operation_session_deleted = (
+        store.purge_local_session_state(session_id) if operation_exists else True
+    )
+    if not operation_session_deleted:
+        raise OperationStoreError("Không thể purge Student operation session")
+    return {
+        "success": True,
+        "session_id": session_id,
+        "upload_id": upload_id,
+        "raw_upload_deleted": True,
+        "operation_session_deleted": True,
+    }
+
+
 def cleanup_expired_uploads(now: float | int | None = None) -> list[str]:
     """Delete expired converter cache entries without deleting active sessions."""
     current_time = float(time.time() if now is None else now)
@@ -2182,16 +2250,23 @@ def cleanup_expired_uploads(now: float | int | None = None) -> list[str]:
 def _upload_cache_is_active(
     metadata: dict[str, Any], upload_dir: Path, current_time: float
 ) -> bool:
-    student_metadata_path = upload_dir / "student_metadata.json"
+    student_metadata_path = upload_dir / STUDENT_METADATA_FILENAME
     if student_metadata_path.is_file():
         try:
             student_metadata = json.loads(
                 student_metadata_path.read_text(encoding="utf-8")
             )
-            student_expires_at = _metadata_timestamp(student_metadata.get("expires_at"))
-            if student_expires_at is not None and student_expires_at > current_time:
+            owner_type = str(student_metadata.get("owner_type") or "")
+            owner_scope = str(student_metadata.get("owner_scope") or "")
+            if (
+                student_metadata.get("retention_type") != STUDENT_RETENTION_TYPE
+                or owner_type not in STUDENT_OWNER_TYPES
+                or not owner_scope.startswith(f"{owner_type}:")
+            ):
                 return True
-        except (OSError, json.JSONDecodeError):
+            student_expires_at = _metadata_timestamp(student_metadata.get("expires_at"))
+            return student_expires_at is None or student_expires_at > current_time
+        except (OSError, AttributeError, json.JSONDecodeError):
             return True
 
     if not str(metadata.get("operation_session_id") or "").strip():

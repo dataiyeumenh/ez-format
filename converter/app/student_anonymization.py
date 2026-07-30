@@ -99,16 +99,18 @@ _PII_PATTERNS = {
 }
 
 _VIETNAMESE_NAME_PATTERN = re.compile(
-    r"(?<!\w)((?:Nguyễn|Trần|Lê|Phạm|Hoàng|Huỳnh|Phan|Vũ|Võ|Đặng|"
-    r"Bùi|Đỗ|Hồ|Ngô|Dương|Lý)"
-    r"(?:\s+[A-ZÀÁÂÃÈÉÊÌÍÒÓÔÕÙÚĂĐĨŨƠƯẠ-Ỵ][a-zàáâãèéêìíòóôõùúăđĩũơưạ-ỵ]+){1,4})"
-    r"(?!\w)"
+    r"(?<!\w)((?:nguy[eễ]n|tr[aầ]n|l[eê]|ph[aạ]m|ho[aà]ng|hu[yỳ]nh|phan|"
+    r"v[uũ]|v[oõ]|[dđ][aặ]ng|b[uù]i|[dđ][oỗ]|h[oồ]|ng[oô]|d[uư][oơ]ng|l[yý])"
+    r"(?:\s+[A-ZÀ-ỴĐ][A-Za-zÀ-ỹĐđ]{1,30}){1,4})(?!\w)",
+    re.IGNORECASE,
 )
 _VIETNAMESE_ADDRESS_PATTERN = re.compile(
     r"(?<!\w)(\d{1,5}(?:[/-]\d{1,5})?\s+"
-    r"(?:đường|duong|phố|pho|ngõ|ngo|hẻm|hem|ấp|ap|thôn|thon)"
-    r"\s+[^;|\n]{2,160})",
-    re.IGNORECASE,
+    r"(?:(?i:(?:đường|duong|phố|pho|ngõ|ngo|hẻm|hem|ấp|ap|thôn|thon)"
+    r"\s+[^;|\n]{2,160})|"
+    r"(?:[A-ZÀ-ỴĐ][a-zà-ỹđ]{1,30}|[A-ZÀ-ỴĐ]{2,30})"
+    r"(?:\s+(?:[A-ZÀ-ỴĐ][a-zà-ỹđ]{1,30}|[A-ZÀ-ỴĐ]{2,30})){1,5}))"
+    r"(?!\w)"
 )
 _CCCD_PATTERN = re.compile(r"(?<!\d)(\d{12})(?!\d)")
 
@@ -126,10 +128,12 @@ _POST_SCAN_PII_PATTERNS = (
     (
         "counterparty",
         re.compile(
-            r"(?<!\w)(?:Nguyễn|Trần|Lê|Phạm|Hoàng|Huỳnh|Phan|Vũ|Võ|Đặng|"
-            r"Bùi|Đỗ|Hồ|Ngô|Dương|Lý)"
-            r"(?:\s+[A-ZÀÁÂÃÈÉÊÌÍÒÓÔÕÙÚĂĐĨŨƠƯẠ-Ỵ][a-zàáâãèéêìíòóôõùúăđĩũơưạ-ỵ]+){1,4}"
+            r"(?<!\w)(?:nguy[eễ]n|tr[aầ]n|l[eê]|ph[aạ]m|ho[aà]ng|hu[yỳ]nh|"
+            r"phan|v[uũ]|v[oõ]|[dđ][aặ]ng|b[uù]i|[dđ][oỗ]|h[oồ]|ng[oô]|"
+            r"d[uư][oơ]ng|l[yý])"
+            r"(?:\s+[A-ZÀ-ỴĐ][A-Za-zÀ-ỹĐđ]{1,30}){1,4}"
             r"(?!\w)",
+            re.IGNORECASE,
         ),
     ),
     (
@@ -145,9 +149,11 @@ _POST_SCAN_PII_PATTERNS = (
         re.compile(
             r"(?:[dđ][iị]a\s*ch[iỉ]|dia\s*chi|address)\s*[:#-]\s*[^;|\n]{4,180}"
             r"|(?<!\w)\d{1,5}(?:[/-]\d{1,5})?\s+"
-            r"(?:đường|duong|phố|pho|ngõ|ngo|hẻm|hem|ấp|ap|thôn|thon)"
-            r"\s+[^;|\n]{2,160}",
-            re.IGNORECASE,
+            r"(?:(?i:(?:đường|duong|phố|pho|ngõ|ngo|hẻm|hem|ấp|ap|thôn|thon)"
+            r"\s+[^;|\n]{2,160})|"
+            r"(?:[A-ZÀ-ỴĐ][a-zà-ỹđ]{1,30}|[A-ZÀ-ỴĐ]{2,30})"
+            r"(?:\s+(?:[A-ZÀ-ỴĐ][a-zà-ỹđ]{1,30}|[A-ZÀ-ỴĐ]{2,30})){1,5})"
+            r"(?!\w)",
         ),
     ),
     (

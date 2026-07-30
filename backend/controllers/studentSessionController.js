@@ -6,9 +6,11 @@ const StudentActivity = require("../models/StudentActivity");
 const AccountingWorkspace = require("../models/AccountingWorkspace");
 const { userCanAccessWorkspace } = require("../services/masterDataService");
 const {
+  createConversionContextToken,
   createStudentContextToken,
   verifyStudentContextToken,
 } = require("../services/conversionContextService");
+const { forwardJson } = require("../services/converterGatewayService");
 const {
   buildOwnerScope,
   hashStudentQuestion,
@@ -387,6 +389,68 @@ function createContextToken(session) {
   });
 }
 
+function studentPurgeFailure(cause) {
+  const error = new Error("Student converter purge chưa hoàn tất");
+  error.code = String(cause?.code || "STUDENT_PURGE_UNAVAILABLE").slice(0, 80);
+  error.statusCode = 503;
+  error.studentPurgeFailure = true;
+  return error;
+}
+
+function assertStudentPurgeCompleted(result, session) {
+  if (
+    result?.success !== true ||
+    String(result?.session_id || "") !== String(session._id) ||
+    String(result?.upload_id || "") !== String(session.converterUploadId || "") ||
+    result?.raw_upload_deleted !== true ||
+    result?.operation_session_deleted !== true
+  ) {
+    const error = new Error("Converter purge response không đầy đủ");
+    error.code = "STUDENT_PURGE_INCOMPLETE";
+    throw error;
+  }
+  return result;
+}
+
+async function purgeStudentOperationSession(req, session, forward = forwardJson) {
+  if (!session.converterUploadId) {
+    return {
+      success: true,
+      session_id: String(session._id),
+      upload_id: "",
+      raw_upload_deleted: true,
+      operation_session_deleted: true,
+    };
+  }
+  const contextToken = createConversionContextToken({
+    userId: session.userId,
+    workspaceId: session.workspaceId || null,
+    ownerScope: session.ownerScope,
+    conversionRunId: `student:${session._id}`,
+    operationSessionId: session._id,
+    uploadId: session.converterUploadId,
+    targetTemplateId: session.targetTemplateId || "student_session",
+    scopes: ["analyze"],
+    expiresIn: "2m",
+  });
+  const response = await forward({
+    path: `/api/v1/student/sessions/${encodeURIComponent(String(session._id))}/purge`,
+    method: "DELETE",
+    body: {},
+    contextToken,
+    requestId: req.requestId || crypto.randomUUID(),
+    extraHeaders: {
+      "x-student-context": String(req.headers?.["x-student-context"] || ""),
+    },
+  });
+  if (response?.status !== 200) {
+    const error = new Error("Converter purge bị từ chối");
+    error.code = "STUDENT_PURGE_REJECTED";
+    throw error;
+  }
+  return response.data;
+}
+
 async function createStudentSession(req, res) {
   try {
     const payload = cleanStudentSessionPayload(req.body);
@@ -440,7 +504,11 @@ async function getStudentSession(req, res) {
   }
 }
 
-async function deleteStudentSession(req, res) {
+async function deleteStudentSession(
+  req,
+  res,
+  { purgeOperationSession = purgeStudentOperationSession } = {},
+) {
   try {
     const session = await findAccessibleSession(req.params.id, req.user._id);
     if (!session) {
@@ -473,11 +541,24 @@ async function deleteStudentSession(req, res) {
       ownerScope: deletingSession.ownerScope,
       workspaceId: deletingSession.workspaceId || null,
     };
+    try {
+      const purgeResult = await purgeOperationSession(req, deletingSession);
+      assertStudentPurgeCompleted(purgeResult, deletingSession);
+    } catch (error) {
+      throw studentPurgeFailure(error);
+    }
     await StudentQuestionEvent.deleteMany(metadataFilter);
     await StudentActivity.deleteMany(metadataFilter);
     await deletingSession.deleteOne();
     return res.json({ success: true });
   } catch (error) {
+    if (error?.studentPurgeFailure) {
+      return res.status(503).json({
+        success: false,
+        message: "Không thể xác nhận đã purge dữ liệu Student tại converter",
+        purge: { completed: false, code: error.code },
+      });
+    }
     return res.status(500).json({ success: false, message: "Không thể xoá phiên hỗ trợ", error: error.message });
   }
 }
@@ -1015,6 +1096,7 @@ module.exports = {
   getInternalStudentActivities,
   getStudentActivities,
   getStudentSession,
+  purgeStudentOperationSession,
   recordStudentAnalysisCompleted,
   recordStudentActivity,
   recordStudentQuestionEvent,

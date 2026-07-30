@@ -10,9 +10,11 @@ from pathlib import Path
 import openpyxl
 import pytest
 
+from app import misa_workflow as misa_workflow_module
 from app import student_store as student_store_module
 from app.misa_workflow import (
     analyze_upload,
+    cleanup_expired_uploads,
     confirm_mapping,
     export_confirmed_profile,
     preview_mapping,
@@ -125,12 +127,16 @@ def test_student_upload_binding_rejects_cross_owner_and_session(tmp_path, monkey
 
     metadata = json.loads((upload_dir / "student.json").read_text(encoding="utf-8"))
     assert set(metadata) == {
+        "retention_type",
+        "owner_type",
         "session_id",
         "user_id",
         "owner_scope",
         "workspace_id",
         "expires_at",
     }
+    assert metadata["retention_type"] == "student"
+    assert metadata["owner_type"] == "user"
     assert_upload_owner("upload-1", claims)
 
     other_owner = verify_student_context(
@@ -202,6 +208,40 @@ def test_cleanup_expired_student_uploads_deletes_only_expired_bound_directories(
     assert deleted == ["expired"]
     assert not (tmp_path / "expired").exists()
     assert (tmp_path / "active").exists()
+
+
+def test_generic_cleanup_preserves_active_student_upload_past_generic_ttl(
+    tmp_path, monkeypatch
+):
+    now = int(time.time())
+    monkeypatch.setenv("CONVERSION_CONTEXT_SECRET", "student-secret")
+    monkeypatch.setenv("UPLOAD_CACHE_TTL_SECONDS", "60")
+    monkeypatch.setattr(student_store_module, "UPLOAD_ROOT", tmp_path)
+    monkeypatch.setattr(misa_workflow_module, "UPLOAD_ROOT", tmp_path)
+    claims = verify_student_context(
+        _student_token(
+            exp=now + 600,
+            retention_expires_at=now + 3600,
+        ),
+        "analyze",
+    )
+
+    upload_id, _ = misa_workflow_module.save_upload(
+        "student.xlsx",
+        _workbook_bytes(),
+        student_claims=claims,
+        student_ttl_seconds=3600,
+    )
+    marker = json.loads(
+        (tmp_path / upload_id / "student.json").read_text(encoding="utf-8")
+    )
+
+    deleted = cleanup_expired_uploads(now=now + 61)
+
+    assert deleted == []
+    assert (tmp_path / upload_id / "input.xlsx").is_file()
+    assert marker["retention_type"] == "student"
+    assert marker["owner_type"] == "user"
 
 
 def test_find_student_upload_rejects_multiple_active_matches(tmp_path, monkeypatch):

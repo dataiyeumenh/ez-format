@@ -4,6 +4,7 @@ import base64
 import hashlib
 import hmac
 import json
+import threading
 import time
 from datetime import datetime, timezone
 from types import SimpleNamespace
@@ -321,6 +322,51 @@ def test_operation_session_sweeper_is_bounded_and_restart_safe(
     )
     assert len(second) == 1
     assert all(not (store.root / item.session_id).exists() for item in expired)
+
+
+def test_operation_session_sweeper_preserves_in_flight_creation_without_session_json(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv("OPERATION_STORE_PROVIDER", "local")
+    monkeypatch.setenv("NODE_ENV", "test")
+    monkeypatch.setenv("OPERATION_STORE_ALLOW_LOCAL", "true")
+    monkeypatch.setenv("CONVERTER_SERVICE_TOKEN", "converter-service-secret")
+    store = OperationStore(root=tmp_path / "sessions")
+    write_started = threading.Event()
+    release_write = threading.Event()
+    result = {}
+    original_atomic_write = store._atomic_write
+
+    def interleaved_atomic_write(path, payload):
+        if path.name == "table.json":
+            write_started.set()
+            assert release_write.wait(2)
+        return original_atomic_write(path, payload)
+
+    store._atomic_write = interleaved_atomic_write
+
+    def create():
+        result["session"] = _create_test_operation_session(store)
+
+    creator = threading.Thread(target=create, daemon=True)
+    creator.start()
+    assert write_started.wait(2)
+    in_flight_dir = next(path for path in store.root.iterdir() if path.is_dir())
+
+    deleted = cleanup_expired_operation_sessions(
+        root=store.root,
+        now=datetime.now(timezone.utc),
+        batch_size=1,
+    )
+
+    assert deleted == []
+    assert in_flight_dir.is_dir()
+    release_write.set()
+    creator.join(2)
+    assert not creator.is_alive()
+    assert (in_flight_dir / "session.json").is_file()
+    assert not (in_flight_dir / ".creating.json").exists()
 
 
 def test_student_startup_cleanup_wires_operation_session_sweeper(monkeypatch):

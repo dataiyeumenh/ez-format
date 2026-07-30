@@ -22,6 +22,8 @@ from app.operation_store_client import NodeOperationStoreClient, OperationStoreC
 
 STUDENT_METADATA_STATE_CONTRACT = "student_metadata_v1"
 DEFAULT_OPERATION_SESSION_CLEANUP_BATCH_SIZE = 100
+DEFAULT_OPERATION_SESSION_CREATION_GRACE_SECONDS = 300
+_OPERATION_SESSION_DIRECTORY_LOCK = threading.RLock()
 
 
 class OperationStoreError(ValueError):
@@ -118,21 +120,22 @@ def cleanup_expired_operation_sessions(
     current_time = now or datetime.now(timezone.utc)
     deleted: list[str] = []
     inspected = 0
-    for directory in sorted(session_root.iterdir(), key=lambda path: path.name):
-        if inspected >= limit:
-            break
-        if not directory.is_dir() and not directory.is_symlink():
-            continue
-        inspected += 1
-        expires_at = _local_session_expiry(directory)
-        if expires_at is not None and expires_at > current_time:
-            continue
-        try:
-            _remove_operation_session_directory(session_root, directory)
-        except OSError:
-            continue
-        if not directory.exists():
-            deleted.append(directory.name)
+    with _OPERATION_SESSION_DIRECTORY_LOCK:
+        for directory in sorted(session_root.iterdir(), key=lambda path: path.name):
+            if inspected >= limit:
+                break
+            if not directory.is_dir() and not directory.is_symlink():
+                continue
+            inspected += 1
+            expires_at = _local_session_expiry(directory)
+            if expires_at is not None and expires_at > current_time:
+                continue
+            try:
+                _remove_operation_session_directory(session_root, directory)
+            except OSError:
+                continue
+            if not directory.exists():
+                deleted.append(directory.name)
     return deleted
 
 
@@ -283,9 +286,21 @@ class OperationStore:
             self._state_contracts[session_id] = state_contract
         if self._remote_client is None or state_contract == STUDENT_METADATA_STATE_CONTRACT:
             directory = self._directory(session_id)
-            directory.mkdir(parents=True, exist_ok=False)
+            with _OPERATION_SESSION_DIRECTORY_LOCK:
+                directory.mkdir(parents=True, exist_ok=False)
+                self._atomic_write(
+                    directory / ".creating.json",
+                    {
+                        "expires_at": (
+                            created_at
+                            + timedelta(seconds=_creation_grace_seconds())
+                        ).isoformat()
+                    },
+                )
             self._atomic_write(directory / "table.json", table_payload)
         self._save_session(session, table_payload)
+        if self._remote_client is None or state_contract == STUDENT_METADATA_STATE_CONTRACT:
+            (self._directory(session_id) / ".creating.json").unlink(missing_ok=True)
         return session
 
     def load_session(self, session_id: str) -> NormalizedSession:
@@ -826,8 +841,20 @@ class OperationStore:
         self._remote_storage_revisions.pop(session_id, None)
         self._state_contracts.pop(session_id, None)
         directory = self._directory(session_id)
-        if directory.exists() or directory.is_symlink():
-            _remove_operation_session_directory(self.root, directory)
+        with _OPERATION_SESSION_DIRECTORY_LOCK:
+            if directory.exists() or directory.is_symlink():
+                _remove_operation_session_directory(self.root, directory)
+
+    def purge_local_session_state(self, session_id: str) -> bool:
+        self._purge_local_state(session_id)
+        return not self._directory(session_id).exists()
+
+    def has_local_session_state(self, session_id: str) -> bool:
+        directory = self._directory(session_id)
+        return directory.exists() or directory.is_symlink()
+
+    def state_contract(self, session_id: str) -> str | None:
+        return self._state_contracts.get(session_id)
 
     @staticmethod
     def _raise_remote_error(exc: OperationStoreClientError) -> None:
@@ -932,7 +959,9 @@ def _file_lock(path: Path) -> Iterator[None]:
 def _local_session_expiry(directory: Path) -> datetime | None:
     path = directory / "session.json"
     if not path.is_file():
-        return None
+        path = directory / ".creating.json"
+        if not path.is_file():
+            return None
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
         raw_value = payload.get("expires_at")
@@ -942,6 +971,19 @@ def _local_session_expiry(directory: Path) -> datetime | None:
         return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
     except (OSError, ValueError, TypeError, json.JSONDecodeError, AttributeError):
         return None
+
+
+def _creation_grace_seconds() -> int:
+    try:
+        configured = int(
+            os.getenv(
+                "OPERATION_SESSION_CREATION_GRACE_SECONDS",
+                str(DEFAULT_OPERATION_SESSION_CREATION_GRACE_SECONDS),
+            )
+        )
+    except ValueError:
+        configured = DEFAULT_OPERATION_SESSION_CREATION_GRACE_SECONDS
+    return min(max(configured, 30), 3600)
 
 
 def _remove_operation_session_directory(root: Path, directory: Path) -> None:

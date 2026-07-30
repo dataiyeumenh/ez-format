@@ -405,6 +405,81 @@ def test_student_analyze_uses_node_binding_with_metadata_only_remote_state(
         assert forbidden not in serialized
 
 
+def test_student_purge_contract_removes_raw_upload_and_operation_session(
+    student_api,
+    monkeypatch,
+    tmp_path,
+):
+    client, _ = student_api
+    session_id = "507f1f77bcf86cd799439011"
+    captured = {}
+
+    class RemoteStore:
+        def __init__(self):
+            self.run_id = f"student:{session_id}"
+            self.session_id = session_id
+
+        @staticmethod
+        def put_state(**payload):
+            captured.update(payload)
+            return {"session": {"revision": payload["revision"]}}
+
+        @staticmethod
+        def get_state(**_payload):
+            return {
+                "state": captured["state"],
+                "session": {"revision": captured["revision"]},
+            }
+
+    remote = RemoteStore()
+    operation_root = tmp_path / "operation-sessions"
+    monkeypatch.setenv("OPERATION_STORE_PROVIDER", "node")
+    monkeypatch.setenv("OPERATION_SESSION_DIR", str(operation_root))
+    monkeypatch.setattr(
+        "app.operation_store.NodeOperationStoreClient",
+        lambda _token: remote,
+    )
+    student_token = _student_token()
+    analyzed = client.post(
+        "/api/v1/student/sessions/analyze",
+        headers={
+            "X-Student-Context": student_token,
+            "X-Conversion-Context": _student_operation_token(),
+        },
+        data={"context_token": student_token, "target_template_id": "bsn_sales"},
+        files={
+            "file": (
+                "sales.xlsx",
+                _workbook_bytes(),
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+        },
+    )
+    assert analyzed.status_code == 200, analyzed.text
+    upload_id = analyzed.json()["upload_id"]
+    assert (student_store.UPLOAD_ROOT / upload_id / "input.xlsx").is_file()
+    assert (operation_root / session_id / "table.json").is_file()
+
+    purged = client.delete(
+        f"/api/v1/student/sessions/{session_id}/purge",
+        headers={
+            "X-Student-Context": student_token,
+            "X-Conversion-Context": _student_operation_token(upload_id=upload_id),
+        },
+    )
+
+    assert purged.status_code == 200, purged.text
+    assert purged.json() == {
+        "success": True,
+        "session_id": session_id,
+        "upload_id": upload_id,
+        "raw_upload_deleted": True,
+        "operation_session_deleted": True,
+    }
+    assert not (student_store.UPLOAD_ROOT / upload_id).exists()
+    assert not (operation_root / session_id).exists()
+
+
 def test_student_analyze_rejects_upload_over_configured_maximum(
     student_api,
     monkeypatch,

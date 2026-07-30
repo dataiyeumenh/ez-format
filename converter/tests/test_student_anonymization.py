@@ -217,8 +217,11 @@ def test_anonymized_export_discovers_pii_in_generic_notes_and_variants():
         ["Đối tác: Công ty TNHH Bí Mật; MST: 0312345678; địa chỉ: 12 Đường Riêng"]
     )
     worksheet.append(["Nguyễn Văn An"])
+    worksheet.append(["NGUYỄN VĂN AN"])
+    worksheet.append(["Nguyen Van An"])
     worksheet.append(["079203001234"])
     worksheet.append(["12 Đường Nguyễn Trãi, Phường Bến Thành, Quận 1"])
+    worksheet.append(["12 Nguyen Trai"])
     stream = BytesIO()
     workbook.save(stream)
 
@@ -242,8 +245,10 @@ def test_anonymized_export_discovers_pii_in_generic_notes_and_variants():
     assert "0312345678" not in exported_text
     assert "12 đường riêng" not in exported_text
     assert "nguyễn văn an" not in exported_text
+    assert "nguyen van an" not in exported_text
     assert "079203001234" not in exported_text
     assert "12 đường nguyễn trãi" not in exported_text
+    assert "12 nguyen trai" not in exported_text
     assert set(exported.replaced_categories) >= {
         "company",
         "counterparty",
@@ -274,7 +279,9 @@ def test_anonymized_export_post_scan_is_independent_from_primary_discovery(
     monkeypatch,
 ):
     workbook = Workbook()
-    workbook.active["A1"] = "Nguyễn Văn An - 079203001234 - 12 Đường Nguyễn Trãi"
+    workbook.active["A1"] = (
+        "NGUYỄN VĂN AN - Nguyen Van An - 079203001234 - 12 Nguyen Trai"
+    )
     stream = BytesIO()
     workbook.save(stream)
     monkeypatch.setattr(anonymization_module, "discover_pii_values", lambda _payload: {})

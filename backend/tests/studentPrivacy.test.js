@@ -6,10 +6,14 @@ const StudentFileSession = require("../models/StudentFileSession");
 const StudentQuestionEvent = require("../models/StudentQuestionEvent");
 const {
   deleteStudentSession,
+  purgeStudentOperationSession,
   recordStudentActivity,
   recordStudentQuestionEvent,
 } = require("../controllers/studentSessionController");
-const { createStudentContextToken } = require("../services/conversionContextService");
+const {
+  createStudentContextToken,
+  verifyConversionContextToken,
+} = require("../services/conversionContextService");
 const { createStartServer } = require("../server");
 const {
   migrateStudentPrivacy,
@@ -358,6 +362,7 @@ test("manual session deletion cascades question and activity metadata first", as
     userId: "507f1f77bcf86cd799439012",
     workspaceId: null,
     ownerScope: "user:507f1f77bcf86cd799439012",
+    converterUploadId: "student-upload-1",
     status: "analyzed",
     retentionExpiresAt: new Date(Date.now() + 60_000),
     deleteOne: async () => order.push("session"),
@@ -401,14 +406,149 @@ test("manual session deletion cascades question and activity metadata first", as
         headers: { "x-student-context": token },
       },
       response,
+      {
+        purgeOperationSession: async () => {
+          order.push("converter-purge");
+          return {
+            success: true,
+            session_id: String(session._id),
+            upload_id: session.converterUploadId,
+            raw_upload_deleted: true,
+            operation_session_deleted: true,
+          };
+        },
+      },
     );
     assert.equal(response.statusCode, 200);
     assert.deepEqual(order, [
       "session-deleting",
+      "converter-purge",
       "questions",
       "activities",
       "session",
     ]);
+  } finally {
+    StudentFileSession.findOne = originals.findOne;
+    StudentFileSession.findOneAndUpdate = originals.findOneAndUpdate;
+    StudentQuestionEvent.deleteMany = originals.questions;
+    StudentActivity.deleteMany = originals.activities;
+  }
+});
+
+test("Student delete converter contract is owner-bound and metadata-only", async () => {
+  const session = {
+    _id: "507f1f77bcf86cd799439011",
+    userId: "507f1f77bcf86cd799439012",
+    workspaceId: null,
+    ownerScope: "user:507f1f77bcf86cd799439012",
+    converterUploadId: "student-upload-1",
+    targetTemplateId: "bsn_sales",
+  };
+  const token = createStudentContextToken({
+    sessionId: session._id,
+    userId: session.userId,
+    ownerScope: session.ownerScope,
+    allowedScopes: ["analyze"],
+    retentionExpiresAt: new Date(Date.now() + 60_000),
+  });
+  let forwarded;
+  const result = await purgeStudentOperationSession(
+    {
+      requestId: "student-delete-request",
+      headers: { "x-student-context": token },
+    },
+    session,
+    async (request) => {
+      forwarded = request;
+      return {
+        status: 200,
+        data: {
+          success: true,
+          session_id: String(session._id),
+          upload_id: session.converterUploadId,
+          raw_upload_deleted: true,
+          operation_session_deleted: true,
+        },
+      };
+    },
+  );
+
+  assert.equal(forwarded.path, `/api/v1/student/sessions/${session._id}/purge`);
+  assert.equal(forwarded.method, "DELETE");
+  assert.deepEqual(forwarded.body, {});
+  assert.deepEqual(forwarded.extraHeaders, { "x-student-context": token });
+  const claims = verifyConversionContextToken(forwarded.contextToken);
+  assert.equal(claims.operation_session_id, String(session._id));
+  assert.equal(claims.conversion_run_id, `student:${session._id}`);
+  assert.equal(claims.upload_id, session.converterUploadId);
+  assert.equal(JSON.stringify(forwarded).includes("raw-workbook"), false);
+  assert.deepEqual(result, {
+    success: true,
+    session_id: String(session._id),
+    upload_id: session.converterUploadId,
+    raw_upload_deleted: true,
+    operation_session_deleted: true,
+  });
+});
+
+test("manual Student delete fails closed when converter purge is unavailable", async () => {
+  const session = {
+    _id: "507f1f77bcf86cd799439011",
+    userId: "507f1f77bcf86cd799439012",
+    workspaceId: null,
+    ownerScope: "user:507f1f77bcf86cd799439012",
+    converterUploadId: "student-upload-1",
+    status: "analyzed",
+    retentionExpiresAt: new Date(Date.now() + 60_000),
+    deleteOne: async () => { throw new Error("must not delete parent"); },
+  };
+  const token = createStudentContextToken({
+    sessionId: session._id,
+    userId: session.userId,
+    ownerScope: session.ownerScope,
+    allowedScopes: ["analyze"],
+    retentionExpiresAt: session.retentionExpiresAt,
+  });
+  const originals = {
+    findOne: StudentFileSession.findOne,
+    findOneAndUpdate: StudentFileSession.findOneAndUpdate,
+    questions: StudentQuestionEvent.deleteMany,
+    activities: StudentActivity.deleteMany,
+  };
+  let metadataDeletes = 0;
+  StudentFileSession.findOne = async () => session;
+  StudentFileSession.findOneAndUpdate = async () => {
+    session.status = "deleting";
+    return session;
+  };
+  StudentQuestionEvent.deleteMany = async () => { metadataDeletes += 1; };
+  StudentActivity.deleteMany = async () => { metadataDeletes += 1; };
+
+  try {
+    const response = responseRecorder();
+    await deleteStudentSession(
+      {
+        params: { id: session._id },
+        user: { _id: session.userId },
+        headers: { "x-student-context": token },
+      },
+      response,
+      {
+        purgeOperationSession: async () => {
+          const error = new Error("converter unavailable");
+          error.code = "CONVERTER_UNREACHABLE";
+          throw error;
+        },
+      },
+    );
+
+    assert.equal(response.statusCode, 503);
+    assert.deepEqual(response.body.purge, {
+      completed: false,
+      code: "CONVERTER_UNREACHABLE",
+    });
+    assert.equal(session.status, "deleting");
+    assert.equal(metadataDeletes, 0);
   } finally {
     StudentFileSession.findOne = originals.findOne;
     StudentFileSession.findOneAndUpdate = originals.findOneAndUpdate;
@@ -535,6 +675,15 @@ test("delete racing authorized question and activity writes leaves no orphan", a
           headers: { "x-student-context": token },
         },
         deleteResponse,
+        {
+          purgeOperationSession: async () => ({
+            success: true,
+            session_id: sessionId,
+            upload_id: session.converterUploadId,
+            raw_upload_deleted: true,
+            operation_session_deleted: true,
+          }),
+        },
       );
       assert.equal(deleteResponse.statusCode, 200);
       releaseInsert();

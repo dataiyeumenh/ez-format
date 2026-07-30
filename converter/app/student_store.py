@@ -18,6 +18,8 @@ from app.student_context import StudentContextClaims
 
 UPLOAD_ROOT = BACKEND_ROOT / ".artifacts" / "uploads"
 STUDENT_METADATA_FILENAME = "student.json"
+STUDENT_RETENTION_TYPE = "student"
+STUDENT_OWNER_TYPES = {"user", "workspace"}
 MAX_STUDENT_UPLOAD_TTL_SECONDS = 24 * 60 * 60
 MAX_STUDENT_ANALYZE_TIMEOUT_SECONDS = 60 * 60
 
@@ -265,7 +267,12 @@ def bind_upload_to_student(
     upload_dir = UPLOAD_ROOT / normalized_upload_id
     if not upload_dir.is_dir():
         raise KeyError(f"Upload not found: {normalized_upload_id}")
+    owner_type = str(claims.owner_scope or "").partition(":")[0]
+    if owner_type not in STUDENT_OWNER_TYPES:
+        raise ValueError("Student upload owner type không hợp lệ")
     metadata = {
+        "retention_type": STUDENT_RETENTION_TYPE,
+        "owner_type": owner_type,
         "session_id": claims.session_id,
         "user_id": claims.user_id,
         "owner_scope": claims.owner_scope,
