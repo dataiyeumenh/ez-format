@@ -5,6 +5,7 @@ const { buildPaymentDescription } = require("../services/paymentPlans");
 const { findActivePlanByCodeOrId, serializePlan } = require("../services/planService");
 const { applyPaidPlanToUser } = require("../services/subscriptionService");
 const {
+  applyPaidPayment,
   normalizePayOSStatus,
   syncPaymentStatusFromPayOS,
 } = require("../services/paymentStatusSync");
@@ -335,38 +336,27 @@ async function handlePayOSWebhook(req, res) {
         payment.status = webhookMappedStatus === "pending" ? "failed" : webhookMappedStatus;
         await payment.save();
       }
-      await payment.save();
       return res.status(200).json({ success: true });
     }
 
-    const user = await User.findById(payment.user);
-    if (!user) {
-      payment.status = "failed";
-      await payment.save();
+    const settledPayment = await applyPaidPayment(payment, webhookData, payment.payosData);
+    if (!settledPayment || settledPayment.status !== "paid") {
       return res.status(200).json({ success: true, message: "User missing" });
     }
 
-    const paidAt = new Date();
-    applyPaidPlanToUser(user, payment.plan, paidAt);
-    await user.save();
-
-    payment.status = "paid";
-    payment.paidAt = paidAt;
-    await payment.save();
-
-    if (payment.coupon && !payment.couponApplied) {
+    if (settledPayment.coupon && !settledPayment.couponApplied) {
       // legacy safety
     }
-    if (payment.coupon) {
+    if (settledPayment.coupon) {
       const already = await require("../models/CouponUsage").exists({
-        payment: payment._id,
+        payment: settledPayment._id,
       });
       if (!already) {
         await recordCouponUsage({
-          couponId: payment.coupon,
-          userId: user._id,
-          paymentId: payment._id,
-          discountAmount: payment.discountAmount || 0,
+          couponId: settledPayment.coupon,
+          userId: settledPayment.user,
+          paymentId: settledPayment._id,
+          discountAmount: settledPayment.discountAmount || 0,
         });
       }
     }
