@@ -520,8 +520,9 @@ or disables the whole stage.
 Owner: security/release owner provisions the anonymization secret; Render owner
 changes Node and converter; Vercel owner changes frontend; QA owner executes
 gates. `STUDENT_ANONYMIZATION_SECRET` must be a dedicated private value of at
-least 32 characters and distinct from `CONVERSION_CONTEXT_SECRET` and
-`CONVERTER_SERVICE_TOKEN`.
+least 32 characters with at least 12 distinct characters, not a documented
+example/default/placeholder, and distinct from `CONVERSION_CONTEXT_SECRET`
+and `CONVERTER_SERVICE_TOKEN`.
 
 Converter first:
 

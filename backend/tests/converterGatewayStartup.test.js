@@ -20,12 +20,41 @@ const VALID_ENV = {
   MONGO_URI: "mongodb://mongo.example/ezformat",
 };
 
-test("gateway off passes without converter or artifact secrets", () => {
+const DISABLED_PRODUCTION_ENV = {
+  NODE_ENV: "production",
+  JWT_SECRET: VALID_ENV.JWT_SECRET,
+};
+
+test("gateway off validates JWT but does not require converter or artifact secrets", () => {
   assert.equal(
-    isConverterGatewayUsageReady({ NODE_ENV: "production" }),
+    isConverterGatewayUsageReady(DISABLED_PRODUCTION_ENV),
     false,
   );
-  assert.doesNotThrow(() => assertConverterGatewayStartupConfig({ NODE_ENV: "production" }));
+  assert.doesNotThrow(() => assertConverterGatewayStartupConfig(DISABLED_PRODUCTION_ENV));
+});
+
+test("gateway off rejects a missing production JWT secret", () => {
+  for (const validate of [isConverterGatewayUsageReady, assertConverterGatewayStartupConfig]) {
+    assert.throws(
+      () => validate({ NODE_ENV: "production" }),
+      (error) => error.statusCode === 503 && error.code === "WEAK_PRODUCTION_SECRET",
+    );
+  }
+});
+
+test("gateway off rejects placeholder, repeated, and low-diversity JWT secrets", () => {
+  for (const jwtSecret of [
+    "dev_change_me_in_production",
+    "replace-with-a-long-random-secret",
+    "x".repeat(64),
+    "abc123".repeat(12),
+  ]) {
+    assert.throws(
+      () => isConverterGatewayUsageReady({ ...DISABLED_PRODUCTION_ENV, JWT_SECRET: jwtSecret }),
+      (error) => error.statusCode === 503 && error.code === "WEAK_PRODUCTION_SECRET",
+      jwtSecret,
+    );
+  }
 });
 
 test("gateway on fails closed for missing context, service, and GridFS config", () => {

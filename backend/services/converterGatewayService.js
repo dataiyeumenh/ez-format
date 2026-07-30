@@ -27,6 +27,9 @@ function gatewayError(statusCode, message, code) {
 }
 
 function isConverterGatewayUsageReady(env = process.env) {
+  if (String(env.NODE_ENV || "").trim().toLowerCase() === "production") {
+    assertHighEntropyProductionSecret("JWT_SECRET", env.JWT_SECRET);
+  }
   return String(env.CONVERTER_PUBLIC_PROXY_ENABLED || "false").trim().toLowerCase() === "true" &&
     String(env.CONVERTER_GATEWAY_USAGE_READY || "false").trim().toLowerCase() === "true";
 }

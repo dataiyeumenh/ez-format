@@ -13,6 +13,7 @@ const {
   exportExcel,
   legacyExportMigrationGate,
 } = require("../controllers/convertController");
+const { isConverterGatewayUsageReady } = require("../services/converterGatewayService");
 
 const router = express.Router();
 
@@ -48,12 +49,14 @@ router.post("/", upload.single("file"), convertExcel);
  * Complete legacy bindings are authenticated, then bridged to canonical export.
  * Rows-only requests receive a migration response before DB/auth middleware.
  */
-router.post(
-  "/export",
-  legacyExportMigrationGate,
-  requireDb,
-  protect,
-  exportExcel,
-);
+if (isConverterGatewayUsageReady()) {
+  router.post(
+    "/export",
+    legacyExportMigrationGate,
+    requireDb,
+    protect,
+    exportExcel,
+  );
+}
 
 module.exports = router;

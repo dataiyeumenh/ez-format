@@ -16,7 +16,10 @@ const { readExcelBuffer } = require("../utils/excelReader");
 const { detectColumns } = require("../utils/columnDetector");
 const { mapToMisa } = require("../utils/misaMapper");
 const { MISA_HEADERS } = require("../utils/misaWriter");
-const { forwardBinary } = require("../services/converterGatewayService");
+const {
+  bindConversionContextToUser,
+  forwardBinary,
+} = require("../services/converterGatewayService");
 const { getConversionTypes, getConversionType, buildValidationReport } = require("../services/conversionService");
 
 const CANONICAL_EXPORT_PATH = "/api/v1/conversions/export";
@@ -126,10 +129,14 @@ async function exportExcel(req, res) {
   if (!contract.ok) return sendMigrationResponse(contract, res);
 
   try {
+    const contextToken = bindConversionContextToUser({
+      contextToken: contract.contextToken,
+      user: req.user,
+    });
     const response = await forwardBinary({
       path: CANONICAL_EXPORT_PATH,
       body: contract.body,
-      contextToken: contract.contextToken,
+      contextToken,
       requestId: req.requestId,
     });
     for (const [name, value] of Object.entries(response.headers || {})) {

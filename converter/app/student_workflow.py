@@ -59,6 +59,16 @@ from app.voucher_reconstruction import reconstruct_vouchers
 
 OVERVIEW_FILENAME = "student-overview.json"
 MAX_STUDENT_PREVIEW_ROWS = 25
+MIN_STUDENT_ANONYMIZATION_SECRET_CHARS = 32
+MIN_UNIQUE_STUDENT_ANONYMIZATION_SECRET_CHARS = 12
+_UNSAFE_STUDENT_ANONYMIZATION_SECRETS = {
+    "change-me",
+    "changeme",
+    "default",
+    "dev_change_me_in_production",
+    "password",
+    "secret",
+}
 
 _CONFIDENTIAL_HEADER_MARKERS = {
     "company": ("ten_cong_ty", "ten_doanh_nghiep", "ten_don_vi"),
@@ -715,9 +725,21 @@ def assert_student_anonymization_config() -> None:
         return
 
     secret = os.getenv("STUDENT_ANONYMIZATION_SECRET", "").strip()
-    if len(secret) < 32:
+    normalized_secret = secret.lower()
+    unsafe_secret = (
+        len(secret) < MIN_STUDENT_ANONYMIZATION_SECRET_CHARS
+        or len(set(secret)) < MIN_UNIQUE_STUDENT_ANONYMIZATION_SECRET_CHARS
+        or normalized_secret in _UNSAFE_STUDENT_ANONYMIZATION_SECRETS
+        or normalized_secret.startswith(("default-", "replace-with-", "your-"))
+        or "change_me_in_production" in normalized_secret
+        or "change-me-in-production" in normalized_secret
+        or (secret.startswith("<") and secret.endswith(">"))
+    )
+    if unsafe_secret:
         raise ValueError(
-            "STUDENT_ANONYMIZATION_SECRET must contain at least 32 characters"
+            "STUDENT_ANONYMIZATION_SECRET must be a high-entropy secret of at "
+            "least 32 characters with at least 12 distinct characters, not an "
+            "example or placeholder"
         )
     for forbidden_name in (
         "CONVERSION_CONTEXT_SECRET",
