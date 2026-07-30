@@ -266,3 +266,54 @@
 - Skipped: 9 real replica-set payment tests because `PAYMENT_REPLICA_SET_TEST_URI` is not set
 - Release gate: remains required through `REQUIRE_REPLICA_TESTS=1`
 
+
+## 2026-07-30 15:45:55
+- **Result:** FAIL
+- Passed: Prerequisites, Fixtures templates, Backend syntax, Frontend tests, Frontend build, Converter student integration, MISA import repair Task 9 gate
+- Failed: Backend student tests, Converter API smoke
+
+
+## 2026-07-30 15:50:36
+- **Result:** PASS
+- Passed: Prerequisites, Fixtures templates, Backend syntax, Backend student tests, Frontend tests, Frontend build, Converter API smoke, Converter student integration, MISA import repair Task 9 gate
+- Failed: none
+
+
+## 2026-07-30 16:54:55
+- **Result:** FAIL
+- Passed: Prerequisites, Fixtures templates, Backend syntax, Backend student tests, Frontend tests, Frontend build, Converter API smoke, Converter student integration
+- Failed: MISA import repair Task 9 gate
+
+
+## 2026-07-30 16:56:56
+- **Result:** PASS
+- Passed: Prerequisites, Fixtures templates, Backend syntax, Backend student tests, Frontend tests, Frontend build, Converter API smoke, Converter student integration, MISA import repair Task 9 gate
+- Failed: none
+
+
+## 2026-07-30 17:23:45
+- **Result:** FAIL
+- Passed: Prerequisites, Fixtures templates, Backend syntax, Backend student tests, Frontend tests, Frontend build, Converter API smoke, Converter student integration
+- Failed: MISA import repair Task 9 gate
+
+
+## 2026-07-30 17:25:45
+- **Result:** PASS
+- Passed: Prerequisites, Fixtures templates, Backend syntax, Backend student tests, Frontend tests, Frontend build, Converter API smoke, Converter student integration, MISA import repair Task 9 gate
+- Failed: none
+
+
+## 2026-07-30 17:28:06
+- **Result:** PASS
+- Passed: Prerequisites, Fixtures templates, Backend syntax, Backend student tests, Frontend tests, Frontend build, Converter API smoke, Converter student integration, MISA import repair Task 9 gate
+- Failed: none
+
+\n## 2026-07-30 17:49:51\n- **Result:** PASS\n- Passed: Prerequisites, Fixtures templates, Backend syntax, Backend student tests, Frontend tests, Frontend build, Converter API smoke, Converter student integration, MISA import repair Task 9 gate\n- Failed: none\n\n\n## 2026-07-30 18:07:24\n- **Result:** PASS\n- Passed: Prerequisites, Fixtures templates, Backend syntax, Backend student tests, Frontend tests, Frontend build, Converter API smoke, Converter student integration, MISA import repair Task 9 gate\n- Failed: none\n\n\n## 2026-07-30 18:23:37\n- **Result:** PASS\n- Passed: Prerequisites, Fixtures templates, Backend syntax, Backend student tests, Frontend tests, Frontend build, Converter API smoke, Converter student integration, MISA import repair Task 9 gate\n- Failed: none\n\n\n## 2026-07-30 18:26:50\n- **Result:** PASS\n- Passed: Prerequisites, Fixtures templates, Backend syntax, Backend student tests, Frontend tests, Frontend build, Converter API smoke, Converter student integration, MISA import repair Task 9 gate\n- Failed: none\n\n\n## 2026-07-30 18:43:25\n- **Result:** PASS\n- Passed: Prerequisites, Fixtures templates, Backend syntax, Backend student tests, Frontend tests, Frontend build, Converter API smoke, Converter student integration, MISA import repair Task 9 gate\n- Failed: none\n\n\n## 2026-07-30 19:39:18\n- **Result:** PASS\n- Passed: Prerequisites, Fixtures templates, Backend syntax, Backend student tests, Frontend tests, Frontend build, Converter API smoke, Converter student integration, MISA import repair Task 9 gate\n- Failed: none\n\n\n## 2026-07-30 19:44:23\n- **Result:** PASS\n- Passed: Prerequisites, Fixtures templates, Backend syntax, Backend student tests, Frontend tests, Frontend build, Converter API smoke, Converter student integration, MISA import repair Task 9 gate\n- Failed: none\n\n\n## 2026-07-30 19:49:25\n- **Result:** PASS\n- Passed: Prerequisites, Fixtures templates, Backend syntax, Backend student tests, Frontend tests, Frontend build, Converter API smoke, Converter student integration, MISA import repair Task 9 gate\n- Failed: none\n\n\n## 2026-07-30 19:54:19\n- **Result:** PASS\n- Passed: Prerequisites, Fixtures templates, Backend syntax, Backend student tests, Frontend tests, Frontend build, Converter API smoke, Converter student integration, MISA import repair Task 9 gate\n- Failed: none\n\n\n## 2026-07-30 20:07:31\n- **Result:** PASS\n- Passed: Prerequisites, Fixtures templates, Backend syntax, Backend student tests, Frontend tests, Frontend build, Converter API smoke, Converter student integration, MISA import repair Task 9 gate\n- Failed: none\n\n\n## 2026-07-30 20:27:08\n- **Result:** PASS\n- Passed: Prerequisites, Fixtures templates, Backend syntax, Backend student tests, Frontend tests, Frontend build, Converter API smoke, Converter student integration, MISA import repair Task 9 gate\n- Failed: none\n\n\n## 2026-07-30 20:56:32\n- **Result:** PASS\n- Passed: Prerequisites, Fixtures templates, Backend syntax, Backend student tests, Frontend tests, Frontend build, Converter API smoke, Converter student integration, MISA import repair Task 9 gate\n- Failed: none\n\n
+## 2026-07-30 20:56:32 - Task 11
+- **Result:** INCOMPLETE
+- **Scope:** qa:fast generated summary plus full main-integration local-incomplete matrix.
+- **Code matrix:** backend 407 tests (395 passed, 0 failed, 12 skipped); converter 550 passed, 2 skipped, 1 warning; frontend 109 passed; lint/build exit 0; Playwright MISA 8 passed.
+- **Explicit skips:** 9 replica payment tests (PAYMENT_REPLICA_SET_TEST_URI absent), 1 GridFS integration test (GRIDFS_INTEGRATION_TEST_URI absent), 2 real-Mongo MISA tests (MISA_IMPORT_REPAIR_TEST_MONGO_URI and MONGO_URI absent), 3 live gateway tests (QA_EXPECT_LIVE=true and live inputs absent), plus 2 converter skips documented in the Task 11 receipt.
+- **Release gate:** RELEASE_BLOCKED; npm run qa:main-integration exit 1 because replica_mongo, gridfs, and live_gateway evidence are missing.
+- **Scans:** conflict markers, frontend production URLs, forbidden object-storage providers clean; no S3.
+- **Evidence revision:** 9c27805a0df3d64c9cdd32887bfe3456d275584a.

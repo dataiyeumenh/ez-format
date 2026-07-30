@@ -1,72 +1,82 @@
 # Main Experimental Integration - Task 11 QA
 
 Date: 2026-07-30
-Worktree: `E:\0. EXE2\ez-format-main-experimental-integration`
-Branch: `codex/main-experimental-production-integration`
-QA starting HEAD: `c1669ea48c4ac4a156c23c089e2579ddcab5a2e0`
+Worktree: E:\0. EXE2\ez-format-main-experimental-integration
+Branch: codex/main-experimental-production-integration
+Evidence content revision: 9c27805a0df3d64c9cdd32887bfe3456d275584a
+Merge revision: bff29ca024cb0b4b7b4c814cce7af1372e65ef86
 
 ## Verdict
 
-**INCOMPLETE: local code QA complete; live and real-Mongo gates remain unverified.**
+**INCOMPLETE**
 
-This is not a production-ready certification. No merge, rebase, or cherry-pick was performed after the required `origin/main` drift was detected.
+Local code QA completed with zero executable test failures. Release certification is incomplete. Do not claim production-ready: mandatory replica MongoDB, real MongoDB/GridFS, and live gateway evidence are absent.
 
-## Base Drift
+## Origin Drift and Merge Evidence
 
-Required plan base: `8d1a9343dc98a8abb715fe7efc8df9adf65a10fa`
+Task 11 started with git fetch origin exit 0.
 
-Observed after `git fetch origin`:
+- Plan base: 8d1a9343dc98a8abb715fe7efc8df9adf65a10fa.
+- Refreshed origin/main: 2250102293021a54bcd1cf4fc8a7d6037e980524.
+- Remote drift: 7 files, 121 insertions, 35 deletions from the plan base.
+- Pre-merge git merge-tree --write-tree reported known conflicts in backend/services/paymentStatusSync.js, backend/tests/coupons.test.js, and frontend/src/App.jsx.
+- Merge evidence: .artifacts/task11-review-pre-merge/merge-tree-origin-main.txt.
+- Normal merge commit: bff29ca024cb0b4b7b4c814cce7af1372e65ef86; parents are the integrated branch parent and refreshed origin/main.
+- Conflict resolution preserved latest main payment/coupon contracts while retaining integrated transactional settlement, idempotency coverage, and feature-gated Student routing.
+- Experimental commit 2da3d8f6b4214304d331dc9e1f06e6ac28ccc50a is not an ancestor.
+- No merge, rebase, cherry-pick, reset, or checkout-destructive command was used during this rerun.
 
-- `origin/main`: `2250102293021a54bcd1cf4fc8a7d6037e980524`
-- Base-to-origin divergence: `1` base-side commit, `6` origin-side commits.
-- Origin delta: 7 files, 121 insertions, 35 deletions.
-- `git merge-tree --messages HEAD origin/main` conflicts: `backend/services/paymentStatusSync.js`, `backend/tests/coupons.test.js`, `frontend/src/App.jsx`.
-- No functional merge resolution attempted. Drift was reported before Task 11 functional work; Task 11 changes are test fixtures/contracts, the QA runner, and evidence documents only.
+Rollback ref pushed before reconciliation:
 
-## Command Evidence
+refs/heads/rollback/main-pre-task11-reconcile-20260730-203721 at 2250102293021a54bcd1cf4fc8a7d6037e980524.
 
-All commands below ran from the worktree. The final `npm run qa:main-integration` exit code was `0`.
+## Release Gate Modes
+
+- npm run qa:main-integration: exit 1. Machine status: RELEASE_BLOCKED; missing replica_mongo, gridfs, live_gateway.
+- npm run qa:main-integration:local-incomplete: exit 0. Machine status: LOCAL_INCOMPLETE; runs the local code matrix only and cannot certify release.
+- npm run qa:main-integration:local-incomplete sets REQUIRE_REPLICA_TESTS off only for explicit local skip reporting. Release mode fails before the matrix when mandatory evidence is missing.
+
+## Full Local Matrix
+
+Final local-incomplete run completed after the release-gate and stale-contract fixes, with final test content committed as 9c27805.
 
 | Command | Result |
 |---|---|
-| `npm run qa:main-contracts` | Backend: 83 tests, 74 passed, 0 failed, 9 skipped. Frontend payment contract: 2 passed. |
-| `node --test` from `backend` | 402 tests, 391 passed, 0 failed, 11 skipped. |
-| `python -m pytest -q --tb=short` from `converter` | 549 passed, 2 skipped, 1 warning; exit `0`; 166.92s in final gate run. |
-| `npm test` from `frontend` | 109 passed, 0 failed. |
-| `npm run lint` from `frontend` | Exit `0`. |
-| `npm run build` from `frontend` | Exit `0`; Vite warning for 575 kB and 368 kB chunks. |
-| Gateway UI Playwright suite | 2 skipped. |
-| Gateway API Playwright suite | 1 skipped. |
-| MISA import repair Playwright suite | 8 passed. |
-| `npm run qa:fast` | `QA/QC PASSED (9 steps)`; latest repair evidence: `.artifacts/qa/misa-import-repair/20260730-202729`. |
-| Conflict marker scan | Clean. |
-| Frontend production URL scan | Clean; no direct FastAPI/localhost production URL hit in `frontend/src` production files. |
-| Forbidden object-storage provider scan | Clean; no S3/R2/MinIO provider pattern in scanned source. MongoDB/GridFS remains the storage contract. |
-| `git diff --check` | Known pre-existing generated QA whitespace only in `docs/qa-last-run.json` and `docs/qa-log.md`; preserved by instruction. |
+| npm run qa:main-contracts | 84 total; 75 passed; 0 failed; 9 replica skips. Frontend payment contract: 2 passed. |
+| Backend node --test | 407 total; 395 passed; 0 failed; 12 skipped. |
+| Converter python -m pytest -q --tb=short | 550 passed; 2 skipped; 0 failed; 1 FastAPI deprecation warning; 170.24s. |
+| Frontend npm test | 109 passed; 0 failed; 0 skipped. |
+| Frontend npm run lint | Exit 0; 2 existing warnings in frontend/src/pages/admin/RevenuePage.jsx. |
+| Frontend npm run build | Exit 0; 2 Vite chunk-size warnings (575 kB and 368 kB chunks). |
+| Playwright gateway UI | 2 skipped; QA_EXPECT_LIVE=true and live inputs absent. |
+| Playwright gateway API | 1 skipped; QA_EXPECT_LIVE=true and live inputs absent. |
+| Playwright MISA import repair | 8 passed in 20.1s. |
+| npm run qa:fast | QA/QC PASSED (9 steps); generated summary refreshed. |
+| Conflict markers / frontend URL / object-storage scans | Clean. |
+| git diff --check during matrix | Only preserved generated QA summary whitespace was reported; canonical final files were normalized afterward. |
 
-## Explicit Skips and Gaps
+## Exact Skips and Gaps
 
-- Payment replica-set tests: skipped because `PAYMENT_REPLICA_SET_TEST_URI` is not set. This covers nine main-contract tests and nine duplicate tests in the full backend run.
-- Real Mongo MISA repair model tests: two skipped because `MISA_IMPORT_REPAIR_TEST_MONGO_URI` and `MONGO_URI` are not set.
-- Converter performance benchmark: two pytest cases skipped because `RUN_ACCOUNTING_OPERATIONS_PERFORMANCE=1` is not set.
-- Gateway UI Playwright: two tests skipped because `QA_EXPECT_LIVE=true` is not set; no live gateway URL or short-lived UI credentials were supplied.
-- Gateway API Playwright: one test skipped for the same missing `QA_EXPECT_LIVE=true` live-stack prerequisite.
-- Real staging Vercel -> Node -> converter journey: not run.
-- Real MongoDB/GridFS artifact round-trip: not run; local GridFS adapter contract tests passed, but no live Mongo/GridFS environment was supplied.
+- Backend: 9 payment settlement tests skipped because PAYMENT_REPLICA_SET_TEST_URI is not set; 2 real-Mongo MISA repair tests skipped because neither MISA_IMPORT_REPAIR_TEST_MONGO_URI nor MONGO_URI is set; 1 GridFS integration test skipped because GRIDFS_INTEGRATION_TEST_URI is not set.
+- Converter: 2 explicit skips. The performance benchmark requires RUN_ACCOUNTING_OPERATIONS_PERFORMANCE=1; the export-manifest test skips when create_export_manifest is not composed by the Task 9 converter app.
+- Playwright live suites require QA_EXPECT_LIVE=true, QA_FRONTEND_URL, QA_GATEWAY_URL, QA_CONVERTER_URL, owner credentials/JWT, release ID, and an existing QA_RAW_FIXTURE.
+- No real replica MongoDB, real GridFS round-trip, live gateway UI journey, or live gateway API journey ran. These are release blockers, not PASS results.
+- No S3, R2, MinIO, or other object-storage provider was introduced; the scanned storage contract remains MongoDB/GridFS.
 
-## Regression Handling
+## Task 11 Ownership
 
-The six initial converter failures were reproduced. They were stale test/setup contracts exposed by the operation-session and fail-closed export behavior, not production-code failures:
+Task 11 substantive changes:
 
-- Signed context helper was patched to validate real signed tokens after the analyze-only stub.
-- Readiness/export fixtures now provide explicit safe sales defaults and mutate the trusted source workbook for blank-value coverage.
-- Session export tests now distinguish missing server state from the automatic authenticated test context.
-- Preview-edit export asserts client rows are ignored when a trusted operation session exists.
-- Safe-default export expectations no longer infer unmapped `ĐVT` values.
-- A fresh intermittent failure in `test_generated_purchase_workbooks_are_stable_and_readable` was reproduced: `docProps/core.xml` contained openpyxl's wall-clock modified timestamp. `converter/app/purchase_scenarios.py` now canonicalizes that timestamp; the focused test passed 20 consecutive runs.
+- scripts/qa-main-integration.ps1
+- scripts/qa-main-integration-status.ps1
+- package.json
+- backend/.env.example
+- backend/tests/mainIntegrationReleaseGate.test.js
+- backend/tests/mongoGridFsArtifactStorage.integration.test.js
+- backend/tests/releaseReplicaGate.test.js
+- converter/tests/test_e2e_extreme.py
+- converter/tests/test_stress_999.py
+- docs/qa/main-first-integration-baseline.md
+- Fresh Task 11 receipt and generated QA summaries.
 
-Focused tests passed, then the full converter suite passed. The initial six fixes are test-contract/setup changes; the deterministic workbook timestamp required the production fix noted above.
-
-## Release Decision
-
-Local code and static QA evidence are green. Mandatory external gates are not green because the real replica Mongo/GridFS and live gateway environments are absent. Keep the release status **code-complete, live-unverified**. Do not claim production-ready until those gates execute against the same certified SHA.
+Unrelated .superpowers/sdd/progress.md, Student EOL changes, and existing Student/QA noise remain unstaged.
