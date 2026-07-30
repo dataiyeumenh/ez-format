@@ -48,6 +48,14 @@ from app.converter import convert_file, export_rows, preview_file, validate_file
 from app.document_structure import validate_excel_magic
 from app.error_check import check_file_for_errors
 from app.excel_io import InputReadError
+from app.import_repair_export import RetryBlockedError
+from app.import_result_models import ImportResultSchemaError
+from app.import_result_workflow import (
+    analyze_import_result,
+    build_bound_retry_readiness,
+    export_bound_retry_workbook,
+    normalize_bound_import_result,
+)
 from app.misa_workflow import (
     EXPORT_MEDIA_TYPE,
     ReadinessGateError,
@@ -55,6 +63,7 @@ from app.misa_workflow import (
     cleanup_expired_uploads,
     confirm_mapping,
     export_confirmed_profile,
+    manifest_for_confirmed_profile,
     preview_mapping,
     readiness_mapping,
     _read_metadata as _read_upload_metadata,
@@ -74,7 +83,7 @@ from app.master_data_client import (
     verify_conversion_context_token,
 )
 from app.mapping_profile_v2 import MappingProfileV2Error
-from app.models import ExportRowsRequest, PreviewResponse, ValidationReport
+from app.models import ExportManifestV1, ExportRowsRequest, PreviewResponse, ValidationReport
 from app.operation_store import (
     OperationStore,
     OperationStoreConflictError,
@@ -242,8 +251,11 @@ EXCEL_MEDIA_TYPE = "application/vnd.ms-excel"
 
 @app.get("/healthz")
 def healthz() -> dict[str, object]:
+    ai_provider = os.getenv("AI_PROVIDER", "disabled").strip().lower()
+    ai_status = "disabled" if ai_provider == "disabled" else _ai_runtime_status()
     return {
         "status": "ok",
+        "ai": ai_status,
         "capabilities": {
             "converter": True,
             "operations": True,
@@ -271,6 +283,118 @@ def conversion_types() -> dict[str, list[dict[str, str]]]:
             for definition in CONVERSION_TYPES.values()
         ]
     }
+
+
+@app.post("/api/v1/import-results/analyze", dependencies=INTERNAL_SERVICE_DEPENDENCIES)
+async def analyze_import_result_workbook(
+    file: Annotated[UploadFile, File()],
+) -> JSONResponse:
+    filename, content = await _read_limited_import_result_upload(file)
+    _acquire_import_result_parse_slot()
+    try:
+        try:
+            inspection = await run_in_threadpool(
+                analyze_import_result,
+                content=content,
+                filename=filename,
+            )
+        except ImportResultSchemaError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+    finally:
+        _IMPORT_RESULT_PARSE_SLOTS.release()
+    return JSONResponse(inspection.model_dump(mode="json"))
+
+
+@app.post("/api/v1/import-results/normalize", dependencies=INTERNAL_SERVICE_DEPENDENCIES)
+async def normalize_import_result_workbook(
+    file: Annotated[UploadFile, File()],
+    mapping_json: Annotated[str, Form()],
+) -> JSONResponse:
+    filename, content = await _read_limited_import_result_upload(file)
+    try:
+        mapping = json.loads(mapping_json)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail="mapping_json must be valid JSON.") from exc
+    if not isinstance(mapping, dict):
+        raise HTTPException(status_code=400, detail="mapping_json must be a JSON object.")
+    _acquire_import_result_parse_slot()
+    try:
+        try:
+            issues = await run_in_threadpool(
+                normalize_bound_import_result,
+                content=content,
+                filename=filename,
+                mapping=mapping,
+            )
+        except ImportResultSchemaError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+    finally:
+        _IMPORT_RESULT_PARSE_SLOTS.release()
+    return JSONResponse(
+        {
+            "issues": [issue.model_dump(mode="json") for issue in issues],
+            "requires_user_confirmation": True,
+            "retry_allowed": False,
+        }
+    )
+
+
+@app.post("/api/v1/import-repairs/readiness", dependencies=INTERNAL_SERVICE_DEPENDENCIES)
+async def readiness_import_repair(
+    body: dict,
+    x_conversion_context: Annotated[str | None, Header()] = None,
+) -> JSONResponse:
+    context_token, _ = _conversion_context_for_request(
+        x_conversion_context,
+        body.get("conversion_context_token"),
+        required_scope="export",
+        upload_id=body.get("upload_id"),
+        session_id=body.get("session_id"),
+        target_template_id=body.get("target_template_id"),
+        conversion_run_id=body.get("conversion_run_id"),
+    )
+    try:
+        payload = await run_in_threadpool(
+            build_bound_retry_readiness,
+            body=body,
+            context_token=str(context_token or ""),
+        )
+    except (RetryBlockedError, ValueError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return JSONResponse(jsonable_encoder(payload))
+
+
+@app.post(
+    "/api/v1/import-repairs/export",
+    response_model=None,
+    dependencies=INTERNAL_SERVICE_DEPENDENCIES,
+)
+async def export_import_repair(
+    body: dict,
+    x_conversion_context: Annotated[str | None, Header()] = None,
+) -> Response:
+    context_token, _ = _conversion_context_for_request(
+        x_conversion_context,
+        body.get("conversion_context_token"),
+        required_scope="export",
+        upload_id=body.get("upload_id"),
+        session_id=body.get("session_id"),
+        target_template_id=body.get("target_template_id"),
+        conversion_run_id=body.get("conversion_run_id"),
+    )
+    try:
+        content, filename = await run_in_threadpool(
+            export_bound_retry_workbook,
+            body=body,
+            context_token=str(context_token or ""),
+        )
+    except (RetryBlockedError, ValueError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return Response(
+        content=content,
+        media_type=EXPORT_MEDIA_TYPE,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @app.post("/api/v1/master-data/parse")
@@ -990,6 +1114,94 @@ async def preview_conversion(
         _cleanup_tmp_root()
 
 
+@app.post("/api/v1/exports/manifest", dependencies=INTERNAL_SERVICE_DEPENDENCIES)
+async def create_export_manifest(
+    body: dict,
+    x_conversion_context: Annotated[str | None, Header()] = None,
+) -> ExportManifestV1:
+    upload_id = str(body.get("upload_id") or "").strip()
+    profile_id = str(body.get("profile_id") or "").strip()
+    conversion_run_id = str(body.get("conversion_run_id") or "").strip()
+    export_batch_id = str(body.get("export_batch_id") or "").strip()
+    if not upload_id or not profile_id or not conversion_run_id or not export_batch_id:
+        raise HTTPException(status_code=400, detail="Manifest thiếu export binding")
+
+    context_token, initial_claims = _conversion_context_for_request(
+        x_conversion_context,
+        body.get("conversion_context_token"),
+        required_scope="export",
+    )
+    try:
+        binding = _read_export_binding(
+            upload_id,
+            conversion_context_token=context_token,
+            claims=initial_claims,
+        )
+    except OperationStoreConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except OperationStoreExpiredError as exc:
+        raise HTTPException(status_code=410, detail=str(exc)) from exc
+    except (KeyError, OperationStoreError) as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    target_template_id = str(
+        body.get("target_template_id") or binding["target_template_id"]
+    ).strip()
+    session_id = str(
+        body.get("session_id") or binding.get("operation_session_id") or ""
+    ).strip() or None
+    context_token, claims = _conversion_context_for_request(
+        x_conversion_context,
+        context_token,
+        required_scope="export",
+        upload_id=upload_id,
+        session_id=session_id,
+        target_template_id=target_template_id,
+        conversion_run_id=conversion_run_id,
+    )
+    _assert_export_binding(
+        upload_id=upload_id,
+        profile_id=profile_id,
+        requested_target_template_id=body.get("target_template_id"),
+        requested_session_id=body.get("session_id"),
+        requested_conversion_run_id=conversion_run_id,
+        binding=binding,
+        claims=claims,
+    )
+    try:
+        return await run_in_threadpool(
+            manifest_for_confirmed_profile,
+            upload_id=upload_id,
+            profile_id=profile_id,
+            context_token=context_token,
+            conversion_id=conversion_run_id,
+            export_batch_id=export_batch_id,
+            edited_rows=None,
+            acknowledge_warnings=bool(body.get("acknowledge_warnings")),
+            session_id=body.get("session_id"),
+            revision=body.get("revision"),
+            state_hash=body.get("state_hash"),
+            requested_profile_version=body.get("profile_version"),
+            requested_profile_state_hash=body.get("profile_state_hash"),
+            vat_basis=body.get("vat_basis"),
+        )
+    except OperationStoreConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except OperationStoreExpiredError as exc:
+        raise HTTPException(status_code=410, detail=str(exc)) from exc
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ReadinessGateError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail=jsonable_encoder(exc.report.model_dump(mode="json")),
+        ) from exc
+    except MappingProfileV2Error as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @app.post("/api/v1/conversions/export", response_model=None)
 async def export_conversion_rows(
     body: dict,
@@ -1301,11 +1513,44 @@ async def _read_limited_student_upload(file: UploadFile) -> bytes:
     return content
 
 
+async def _read_limited_import_result_upload(file: UploadFile) -> tuple[str, bytes]:
+    filename = file.filename or ""
+    suffix = Path(filename).suffix.lower()
+    if suffix not in SUPPORTED_SUFFIXES:
+        await file.close()
+        raise HTTPException(status_code=415, detail="Chi ho tro file Excel .xls va .xlsx")
+    content = await read_upload_with_limit(
+        file,
+        _positive_env_int(
+            "IMPORT_RESULT_MAX_FILE_BYTES",
+            _positive_env_int("MAX_UPLOAD_BYTES", 20 * 1024 * 1024),
+        ),
+    )
+    try:
+        validate_excel_magic(filename, content)
+    except ValueError as exc:
+        raise HTTPException(status_code=415, detail=str(exc)) from exc
+    return filename, content
+
+
 def _positive_env_int(name: str, default: int) -> int:
     try:
         return max(1, int(os.getenv(name, str(default))))
     except ValueError:
         return default
+
+
+_IMPORT_RESULT_PARSE_SLOTS = threading.BoundedSemaphore(
+    _positive_env_int("IMPORT_RESULT_MAX_CONCURRENT_PARSERS", 2)
+)
+
+
+def _acquire_import_result_parse_slot() -> None:
+    if not _IMPORT_RESULT_PARSE_SLOTS.acquire(blocking=False):
+        raise HTTPException(
+            status_code=503,
+            detail="Converter dang xu ly toi da import-result workbooks",
+        )
 
 
 def _verified_student_rate_claims(

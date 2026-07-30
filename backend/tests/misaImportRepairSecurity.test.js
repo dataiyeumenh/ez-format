@@ -1007,7 +1007,7 @@ test("server preserves opaque request IDs for existing conversion correlation", 
   }
 });
 
-test("concurrent server lifecycles own independent repair sweepers", { skip: "Task 9 composes backend/server.js" }, async () => {
+test("concurrent server lifecycles own independent repair sweepers", async () => {
   const serverPath = require.resolve("../server");
   const restorers = [];
   const previousEnv = {
@@ -1031,10 +1031,6 @@ test("concurrent server lifecycles own independent repair sweepers", { skip: "Ta
         assertArtifactStorageConfigured() {},
         ensureConversionArtifactIndexes: async () => ({ droppedIndexes: [] }),
         startConversionArtifactSweeper: () => ({ stop() {} }),
-      }),
-      mockModule(require.resolve("../services/conversionSessionStateService"), {
-        ensureConversionSessionStateIndexes: async () => ({ droppedIndexes: [] }),
-        startConversionSessionStateSweeper: () => ({ stop() {} }),
       }),
       mockModule(require.resolve("../services/misaImportRepairMigrationService"), {
         ensureMisaImportRepairIndexes: async () => ({ droppedIndexes: [], unsetNullKeys: 0 }),
@@ -1065,9 +1061,10 @@ test("concurrent server lifecycles own independent repair sweepers", { skip: "Ta
     );
 
     delete require.cache[serverPath];
-    const { app, startServer } = require("../server");
-    const originalListen = app.listen;
-    app.listen = () => {
+    const { createStartServer } = require("../server");
+    const startServer = createStartServer({
+      migrateQuestionEvents: async () => ({ purged: 0 }),
+      listen: () => {
       const server = {
         closeHandler: null,
         once(event, callback) {
@@ -1075,20 +1072,17 @@ test("concurrent server lifecycles own independent repair sweepers", { skip: "Ta
         },
       };
       return server;
-    };
-    try {
-      const firstServer = await startServer();
-      const secondServer = await startServer();
-      assert.equal(startCalls, 2);
-      assert.equal(stopCalls, 0);
-      firstServer.closeHandler();
-      assert.equal(stopCalls, 1);
-      assert.equal(sweepers.get(secondServer).stopped, false);
-      secondServer.closeHandler();
-      assert.equal(stopCalls, 2);
-    } finally {
-      app.listen = originalListen;
-    }
+      },
+    });
+    const firstServer = await startServer();
+    const secondServer = await startServer();
+    assert.equal(startCalls, 2);
+    assert.equal(stopCalls, 0);
+    firstServer.closeHandler();
+    assert.equal(stopCalls, 1);
+    assert.equal(sweepers.get(secondServer).stopped, false);
+    secondServer.closeHandler();
+    assert.equal(stopCalls, 2);
   } finally {
     delete require.cache[serverPath];
     for (const restore of restorers.reverse()) restore();

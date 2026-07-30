@@ -76,3 +76,34 @@ test("converter status is offline but keeps default templates when all status en
   assert.equal(status.aiOnline, null);
   assert.deepEqual(status.templates, DEFAULT_CONVERTER_TEMPLATES);
 });
+
+test("callable Axios clients use Node gateway paths without duplicating /api", async () => {
+  const requests = [];
+  const client = Object.assign(
+    () => {
+      throw new Error("callable Axios client must use get()");
+    },
+    {
+      get: async (url) => {
+        requests.push(url);
+        if (url === "/health") {
+          return { data: { capabilities: { operations: {} } } };
+        }
+        if (url === "/converter/capabilities") {
+          return { data: { ai: "offline", capabilities: {} } };
+        }
+        return { data: { items: [{ id: "bsn_sales" }] } };
+      },
+    },
+  );
+
+  const status = await fetchConverterStatus(client);
+
+  assert.deepEqual(requests, [
+    "/health",
+    "/converter/capabilities",
+    "/converter/templates",
+  ]);
+  assert.equal(status.serviceOnline, true);
+  assert.equal(status.aiOnline, false);
+});

@@ -1,7 +1,7 @@
 import axios from "axios";
 
-// In dev: Vite proxy forwards Node API /api → localhost:5000
-// Browser traffic always targets the authenticated Node API.
+// Leave unset in development to use Vite's authenticated Node API proxy.
+// Browser traffic never targets the converter service directly.
 const viteEnv = import.meta.env || {};
 const configuredBaseURL = viteEnv.VITE_API_URL || viteEnv.VITE_NODE_API_URL;
 

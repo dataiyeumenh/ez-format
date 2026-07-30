@@ -73,6 +73,16 @@ function mergeGatewayCapabilities(payload = {}, env = process.env, operations = 
     String(env.STUDENT_ASSISTANT_ENABLED || "false").toLowerCase() === "true";
   return {
     ...payload,
+    misa_import_repair: {
+      enabled:
+        String(env.MISA_IMPORT_REPAIR_ENABLED || "false").trim().toLowerCase() ===
+        "true",
+      phase: 1,
+      adapter: "manual_excel_v1",
+      verified_adapter: false,
+      auto_match: false,
+      retry_unit: "document_group",
+    },
     capabilities: {
       ...(payload.capabilities || {}),
       ...operations,

@@ -439,9 +439,11 @@ async function openConvertedRepair(page, actor, fixture, options = {}) {
   await expect(page.getByRole("heading", { name: /Chuyển đổi Excel/ }).first()).toBeVisible();
   const original = workbookBytes(fixture);
   await page.locator('input[type="file"]').first().setInputFiles({ name: fixture.name, mimeType: fixture.bookType === "biff8" ? "application/vnd.ms-excel" : "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", buffer: original });
+  await page.getByRole("button", { name: "Phân tích & gợi ý ghép cột", exact: true }).click();
   await expect(page.getByRole("heading", { name: "Ghép cột Excel → Chuẩn định dạng kế toán" })).toBeVisible({ timeout: 20_000 });
+  await page.getByRole("button", { name: "Xem trước", exact: true }).first().click();
   await page.getByRole("button", { name: "Kiểm tra lỗi", exact: true }).first().click();
-  const originalExportButton = page.getByRole("button", { name: "Tải file kết quả", exact: true }).first();
+  const originalExportButton = page.getByRole("button", { name: "Tải file MISA", exact: true }).first();
   await expect(originalExportButton).toBeEnabled({ timeout: 20_000 });
   const originalDownload = page.waitForEvent("download");
   const originalResponse = page.waitForResponse((response) => response.url().endsWith("/api/converter/conversions/export"));
@@ -526,7 +528,9 @@ test("production app completes purchase, sales, multiline, and warning repair jo
     expect(uploaded).toBeTruthy();
     expect(state.mapping).toEqual({ technical_message: "Thông báo kỹ thuật", document_number: "Số chứng từ" });
     expect(state.credits).toBe(1);
-    await expect(page.getByText(/AI offline|AI mapping không khả dụng/).first()).toBeVisible();
+    await expect(
+      page.getByText(/AI tạm thời không hoạt động|AI diễn giải đang ngoại tuyến/).first(),
+    ).toBeVisible();
     await context.close();
   }
 });
@@ -580,7 +584,9 @@ test("negative production journeys assert HTTP 403/410/503 and preserve the orig
   const denied = await deniedResponse;
   expect(denied.status()).toBe(403);
   expect(await denied.text()).toContain("Không có quyền truy cập phiên sửa lỗi");
-  await expect(foreignPage.getByText("Không có quyền dùng hồ sơ này", { exact: true }).first()).toBeVisible();
+  await expect(
+    foreignPage.getByText("Không có quyền truy cập phiên sửa lỗi của người dùng khác", { exact: true }).first(),
+  ).toBeVisible();
   expect(foreignState.requests.some((request) => request.url().includes("/api/converter/import-repairs/repair-cross-user"))).toBe(true);
   await foreignContext.close();
 
@@ -643,9 +649,11 @@ test("warning journey is keyboard-only, screen-reader-labelled, and mobile-safe 
   await expect(page.locator('input[type="file"]').first()).toHaveAttribute("accept", ".xlsx,.xls,.pdf");
   await assertNoHorizontalOverflow(page);
   await keyboardChooseFile(page, originalFileButton, { name: fixture.name, mimeType: contract.mimeType, buffer: workbookBytes(fixture) });
+  await keyboardActivate(page, page.getByRole("button", { name: "Phân tích & gợi ý ghép cột", exact: true }));
   await expect(page.getByRole("heading", { name: "Ghép cột Excel → Chuẩn định dạng kế toán" })).toBeVisible({ timeout: 20_000 });
+  await keyboardActivate(page, page.getByRole("button", { name: "Xem trước", exact: true }).first());
   await keyboardActivate(page, page.getByRole("button", { name: "Kiểm tra lỗi", exact: true }).first());
-  const originalExportButton = page.getByRole("button", { name: "Tải file kết quả", exact: true }).first();
+  const originalExportButton = page.getByRole("button", { name: "Tải file MISA", exact: true }).first();
   await expect(originalExportButton).toBeEnabled({ timeout: 20_000 });
   const originalDownloadPromise = page.waitForEvent("download");
   const originalResponsePromise = page.waitForResponse((response) => response.url().endsWith("/api/converter/conversions/export"));

@@ -95,6 +95,14 @@ test("converter capability response preserves the student backend gate", () => {
     }, { STUDENT_ASSISTANT_ENABLED: "true" }),
     {
       capabilities: { studentAssistant: true, studentFileExplain: true },
+      misa_import_repair: {
+        enabled: false,
+        phase: 1,
+        adapter: "manual_excel_v1",
+        verified_adapter: false,
+        auto_match: false,
+        retry_unit: "document_group",
+      },
       gateway: true,
       artifactStorage: "mongodb-gridfs",
     },

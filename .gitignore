@@ -4,6 +4,7 @@ node_modules
 dist/
 .env
 .env.local
+.env.*.local
 .env.*
 !.env.example
 *.log
@@ -17,6 +18,9 @@ __pycache__/
 backend/.env
 frontend/.env
 frontend/.env.local
+frontend/test-results/
+.fastembed_cache/
+.superpowers/brainstorm/
 
 converter/.tmp/
 converter/__pycache__/

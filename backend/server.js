@@ -9,6 +9,12 @@ const {
   migrateMappingProfileOwnerScope,
 } = require("./services/mappingProfileMigrationService");
 const {
+  ensureMisaImportRepairIndexes,
+} = require("./services/misaImportRepairMigrationService");
+const {
+  startMisaImportRepairSweeper,
+} = require("./services/misaImportRepairSweeper");
+const {
   ensureMappingProfileV2Indexes,
   migrateMappingProfilesV1ToV2,
 } = require("./services/mappingProfileV2MigrationService");
@@ -31,6 +37,9 @@ const {
   assertConverterGatewayStartupConfig,
   isConverterGatewayUsageReady,
 } = require("./services/converterGatewayService");
+const {
+  mergeGatewayCapabilities,
+} = require("./routes/converterGateway");
 const StudentQuestionEvent = require("./models/StudentQuestionEvent");
 const {
   migrateStudentQuestionEventPrivacy,
@@ -131,9 +140,11 @@ if (mappingProfileV2Enabled) {
 app.get("/api/revenue", requireDb, protect, adminOnly, getRevenue);
 app.get("/admin/revenue", requireDb, protect, adminOnly, getRevenue);
 
-app.get("/api/converter/capabilities", requireDb, protect, (_req, res) => {
-  res.json(runtimeCapabilities);
-});
+if (!converterGatewayUsageReady) {
+  app.get("/api/converter/capabilities", requireDb, protect, (_req, res) => {
+    res.json(mergeGatewayCapabilities(runtimeCapabilities));
+  });
+}
 
 // Health check
 app.get("/api/health", (req, res) => {
@@ -160,7 +171,9 @@ function createStartServer({
   migrateMappingProfilesV2 = migrateMappingProfilesV1ToV2,
   migrateQuestionEvents = migrateStudentQuestionEventPrivacy,
   questionEventModel = StudentQuestionEvent,
+  ensureRepairIndexes = ensureMisaImportRepairIndexes,
   startArtifactSweeper = startConversionArtifactSweeper,
+  startRepairSweeper = startMisaImportRepairSweeper,
   listen = app.listen.bind(app),
   logger = console,
 } = {}) {
@@ -175,6 +188,12 @@ function createStartServer({
       const mongoConnection = connection || mongoose.connection;
       await assertArtifactStorageReachable({ connection: mongoConnection });
       await ensureConversionArtifactIndexes();
+    }
+    const repairIndexes = await ensureRepairIndexes();
+    if (repairIndexes.droppedIndexes.length || repairIndexes.unsetNullKeys) {
+      logger.log(
+        `[DB] MisaImportRepair indexes: ${repairIndexes.droppedIndexes.length} legacy index(es) dropped, ${repairIndexes.unsetNullKeys} null key(s) unset`,
+      );
     }
     const migration = await migrateMappingProfiles();
     if (!migration.skipped) {
@@ -210,7 +229,11 @@ function createStartServer({
     const server = listen(PORT, () => {
       logger.log(`Server running on port ${PORT}`);
     });
-    server.once("close", () => artifactSweeper?.stop());
+    const repairSweeper = startRepairSweeper({ owner: server });
+    server.once("close", () => {
+      artifactSweeper?.stop();
+      repairSweeper.stop();
+    });
     return server;
   };
 }

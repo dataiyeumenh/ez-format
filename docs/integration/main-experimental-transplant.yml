@@ -14,6 +14,51 @@ rules:
   - path: docs/integration/main-experimental-transplant.yml
     owner: main
     reason: deterministic integration ownership policy
+  - path: .gitignore
+    owner: compose
+    reason: Task 9 local and generated file boundary
+  - path: backend/tests/registrationUniqueness.test.js
+    owner: compose
+    reason: Task 9 Express and Mongoose registration contract
+  - path: converter/tests/test_route_uniqueness.py
+    owner: compose
+    reason: Task 9 FastAPI registration contract
+  - path: converter/tests/test_api.py
+    owner: compose
+    reason: Task 9 health and legacy export compatibility contract
+  - path: frontend/src/routeRegistrations.test.mjs
+    owner: compose
+    reason: Task 9 React route registration contract
+  - path: frontend/src/index.css
+    owner: compose
+    reason: Task 9 reduced-motion behavior composition
+  - path: frontend/src/hooks/useConversionSession.js
+    owner: source
+    reason: accounting operation session contract
+  - path: scripts/qa-misa-import-repair.ps1
+    owner: source
+    reason: Task 9 focused MISA import repair gate
+  - path: scripts/qa-qc.ps1
+    owner: compose
+    reason: Task 9 focused gate composition
+  - path: scripts/qa-converter-gateway.ps1
+    owner: source
+    reason: converter gateway QA contract
+  - path: scripts/qa-accounting-operations.ps1
+    owner: source
+    reason: accounting operations QA contract
+  - path: docs/qa/converter-gateway-release-gate.md
+    owner: source
+    reason: converter gateway release evidence contract
+  - path: docs/qa/accounting-operations-release-gate.md
+    owner: source
+    reason: accounting operations release evidence contract
+  - path: frontend/tests/converter-gateway.integration.spec.mjs
+    owner: source
+    reason: converter gateway live UI contract
+  - path: frontend/tests/converter-gateway.api.integration.spec.mjs
+    owner: source
+    reason: converter gateway live API contract
   - path: scripts/verify-transplant-manifest.ps1
     owner: main
     reason: deterministic integration ownership gate

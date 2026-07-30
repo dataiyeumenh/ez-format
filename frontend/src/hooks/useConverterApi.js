@@ -107,11 +107,48 @@ async function readApiResponse(request, fallback) {
   }
 }
 
+function buildOperationHeaders(conversionContextToken, headers = {}) {
+  const token = String(conversionContextToken || "").trim();
+  if (!token) throw new Error("Thiếu conversion context cho thao tác phiên dữ liệu.");
+  return { ...headers, "X-Conversion-Context": token };
+}
+
+function sessionUrl(sessionId, suffix = "") {
+  return `/converter/sessions/${encodeURIComponent(sessionId)}${suffix}`;
+}
+
+async function requestSessionJson(
+  sessionId,
+  suffix,
+  { method = "GET", data, headers, signal } = {},
+  fallback,
+  conversionContextToken,
+) {
+  try {
+    const response = await api.request({
+      url: sessionUrl(sessionId, suffix),
+      method,
+      data,
+      signal,
+      headers: buildOperationHeaders(conversionContextToken, headers),
+    });
+    return response.data;
+  } catch (error) {
+    throw gatewayRequestError(error, fallback);
+  }
+}
+
 function aiStatusFromHealth(health) {
-  const ai = health?.ai;
-  if (ai === "online") return true;
-  if (ai === "offline") return false;
+  const ai = health?.ai || health?.capabilities?.ai;
+  const gateway = typeof ai === "object" ? ai.gateway : ai;
+  if (gateway === "online") return true;
+  if (gateway === "offline") return false;
   return "disabled";
+}
+
+function conversionContextConfig(payload = {}) {
+  const token = String(payload.conversion_context_token || "").trim();
+  return token ? { headers: { "X-Conversion-Context": token } } : {};
 }
 
 async function fetchJson(fetchImpl, url) {
@@ -123,7 +160,9 @@ async function fetchJson(fetchImpl, url) {
 }
 
 export async function fetchConverterStatus(client = api) {
-  const [backendResult, healthResult, templatesResult] = typeof client === "function"
+  const usesFetchFunction =
+    typeof client === "function" && typeof client.get !== "function";
+  const [backendResult, healthResult, templatesResult] = usesFetchFunction
     ? await Promise.allSettled([
         fetchJson(client, "/api/health"),
         fetchJson(client, "/api/healthz"),
@@ -136,21 +175,23 @@ export async function fetchConverterStatus(client = api) {
       ]);
 
   const backend = backendResult.status === "fulfilled"
-    ? (typeof client === "function" ? backendResult.value : backendResult.value.data)
+    ? (usesFetchFunction ? backendResult.value : backendResult.value.data)
     : null;
   const health = healthResult.status === "fulfilled"
-    ? (typeof client === "function" ? healthResult.value : healthResult.value.data)
+    ? (usesFetchFunction ? healthResult.value : healthResult.value.data)
     : null;
   const templatesData =
     templatesResult.status === "fulfilled"
-      ? (typeof client === "function" ? templatesResult.value : templatesResult.value.data)
+      ? (usesFetchFunction ? templatesResult.value : templatesResult.value.data)
       : null;
 
   const serviceOnline = Boolean(health || templatesData);
   const nodeCapabilities = normalizeOperationCapabilities(
     backend?.capabilities?.operations,
   );
-  const converterCapabilities = normalizeOperationCapabilities(health);
+  const converterCapabilities = normalizeOperationCapabilities(
+    health?.capabilities || health,
+  );
 
   return {
     serviceOnline,
@@ -162,7 +203,7 @@ export async function fetchConverterStatus(client = api) {
     ),
     capabilitiesOnline: Boolean(backend && health),
     misaImportRepair: normalizeMisaImportRepairCapability(
-      backend?.capabilities || backend || health,
+      health || backend?.capabilities || backend,
     ),
     templates: templatesData?.items?.length
       ? templatesData.items
@@ -419,16 +460,209 @@ export function useConverterApi() {
     return { blob: response.data, filename: match ? match[1] : "MISA-retry.xls" };
   }, [requestImportRepair]);
 
+  const syncMappingSession = useCallback(
+    (payload) =>
+      readApiResponse(
+        api.post("/converter/sessions", payload, conversionContextConfig(payload)),
+        "Không thể đồng bộ mapping với phiên dữ liệu.",
+      ),
+    [],
+  );
+
+  const detectAnomalies = useCallback(
+    (sessionId, payload, conversionContextToken) =>
+      requestSessionJson(
+        sessionId,
+        "/anomalies/detect",
+        { method: "POST", data: payload },
+        "Không thể kiểm tra bất thường dữ liệu.",
+        conversionContextToken,
+      ),
+    [],
+  );
+
+  const reviewAnomaly = useCallback(
+    (sessionId, anomalyId, payload, conversionContextToken) =>
+      requestSessionJson(
+        sessionId,
+        `/anomalies/${encodeURIComponent(anomalyId)}/review`,
+        { method: "POST", data: payload },
+        "Không thể lưu trạng thái rà soát.",
+        conversionContextToken,
+      ),
+    [],
+  );
+
+  const proposeCorrections = useCallback(
+    (sessionId, payload, conversionContextToken) =>
+      requestSessionJson(
+        sessionId,
+        "/corrections/propose",
+        { method: "POST", data: payload },
+        "Không thể tạo đề xuất sửa hàng loạt.",
+        conversionContextToken,
+      ),
+    [],
+  );
+
+  const simulateCorrections = useCallback(
+    (sessionId, payload, conversionContextToken) =>
+      requestSessionJson(
+        sessionId,
+        "/corrections/simulate",
+        { method: "POST", data: payload },
+        "Không thể xem trước thay đổi.",
+        conversionContextToken,
+      ),
+    [],
+  );
+
+  const applyCorrections = useCallback(
+    (sessionId, payload, conversionContextToken, idempotencyKey) =>
+      requestSessionJson(
+        sessionId,
+        "/corrections/apply",
+        {
+          method: "POST",
+          data: payload,
+          headers: { "Idempotency-Key": idempotencyKey },
+        },
+        "Không thể áp dụng thay đổi.",
+        conversionContextToken,
+      ),
+    [],
+  );
+
+  const undoCorrections = useCallback(
+    (sessionId, payload, conversionContextToken, idempotencyKey) =>
+      requestSessionJson(
+        sessionId,
+        "/corrections/undo",
+        {
+          method: "POST",
+          data: payload,
+          headers: { "Idempotency-Key": idempotencyKey },
+        },
+        "Không thể hoàn tác correction.",
+        conversionContextToken,
+      ),
+    [],
+  );
+
+  const getSessionRevisions = useCallback(
+    (sessionId, conversionContextToken) =>
+      requestSessionJson(
+        sessionId,
+        "",
+        {},
+        "Không thể tải phiên bản dữ liệu mới.",
+        conversionContextToken,
+      ),
+    [],
+  );
+
+  const addComparisonFile = useCallback(
+    (sessionId, file, role, mutationContext, conversionContextToken) => {
+      const formData = new FormData();
+      formData.append("file", file);
+      formData.append("role", role);
+      formData.append("revision", String(mutationContext?.revision ?? ""));
+      formData.append("state_hash", mutationContext?.state_hash || "");
+      return requestSessionJson(
+        sessionId,
+        "/comparison-files",
+        { method: "POST", data: formData },
+        "Không thể tải file đối chiếu.",
+        conversionContextToken,
+      );
+    },
+    [],
+  );
+
+  const removeComparisonFile = useCallback(
+    (sessionId, fileId, payload, conversionContextToken) => {
+      const query = new URLSearchParams({
+        revision: String(payload?.revision ?? ""),
+        state_hash: String(payload?.state_hash || ""),
+      });
+      return requestSessionJson(
+        sessionId,
+        `/comparison-files/${encodeURIComponent(fileId)}?${query.toString()}`,
+        { method: "DELETE" },
+        "Không thể bỏ file đối chiếu.",
+        conversionContextToken,
+      );
+    },
+    [],
+  );
+
+  const runReconciliation = useCallback(
+    (sessionId, payload, conversionContextToken) =>
+      requestSessionJson(
+        sessionId,
+        "/reconciliation/run",
+        { method: "POST", data: payload },
+        "Không thể chạy đối chiếu.",
+        conversionContextToken,
+      ),
+    [],
+  );
+
+  const confirmReconciliationMatch = useCallback(
+    (sessionId, reportId, matchId, payload, conversionContextToken) =>
+      requestSessionJson(
+        sessionId,
+        `/reconciliation/${encodeURIComponent(reportId)}/matches/${encodeURIComponent(matchId)}/confirm`,
+        { method: "POST", data: payload },
+        "Không thể xác nhận chứng từ đối chiếu.",
+        conversionContextToken,
+      ),
+    [],
+  );
+
+  const askAccountingQuestion = useCallback(
+    (sessionId, payload, conversionContextToken) =>
+      requestSessionJson(
+        sessionId,
+        "/questions",
+        { method: "POST", data: payload },
+        "Không thể trả lời câu hỏi về file này.",
+        conversionContextToken,
+      ),
+    [],
+  );
+
   const previewMapping = useCallback(async (payload) => {
-    return readApiResponse(api.post("/converter/mappings/preview", payload), "Không thể xem trước mapping MISA.");
+    return readApiResponse(
+      api.post(
+        "/converter/mappings/preview",
+        payload,
+        conversionContextConfig(payload),
+      ),
+      "Không thể xem trước mapping MISA.",
+    );
   }, []);
 
   const confirmMapping = useCallback(async (payload) => {
-    return readApiResponse(api.post("/converter/mappings/confirm", payload), "Không thể lưu setting mapping.");
+    return readApiResponse(
+      api.post(
+        "/converter/mappings/confirm",
+        payload,
+        conversionContextConfig(payload),
+      ),
+      "Không thể lưu setting mapping.",
+    );
   }, []);
 
   const checkReadiness = useCallback(async (payload) => {
-    return readApiResponse(api.post("/converter/mappings/readiness", payload), "Không kiểm tra được trạng thái sẵn sàng import MISA.");
+    return readApiResponse(
+      api.post(
+        "/converter/mappings/readiness",
+        payload,
+        conversionContextConfig(payload),
+      ),
+      "Không kiểm tra được trạng thái sẵn sàng import MISA.",
+    );
   }, []);
 
   const exportConfirmed = useCallback(
@@ -469,6 +703,19 @@ export function useConverterApi() {
     capabilitiesOnline,
     misaImportRepair,
     analyzeFile,
+    syncMappingSession,
+    detectAnomalies,
+    reviewAnomaly,
+    proposeCorrections,
+    simulateCorrections,
+    applyCorrections,
+    undoCorrections,
+    getSessionRevisions,
+    addComparisonFile,
+    removeComparisonFile,
+    runReconciliation,
+    confirmReconciliationMatch,
+    askAccountingQuestion,
     createImportRepair,
     submitImportResultSchema,
     getImportRepair,

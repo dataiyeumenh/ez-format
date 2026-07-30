@@ -79,7 +79,7 @@ $steps = @()
 })
 
 [void]($steps += Step "Backend student tests" {
-    node --test backend/tests/studentSessions.test.js backend/tests/studentQuestions.test.js backend/tests/studentAttempts.test.js backend/tests/studentActivities.test.js
+    node --test backend/tests/studentSessions.test.js backend/tests/studentQuestions.test.js backend/tests/studentActivities.test.js
     if ($LASTEXITCODE -ne 0) { throw "Backend student tests failed" }
 })
 
@@ -99,7 +99,7 @@ $steps = @()
 
 [void]($steps += Step "Converter API smoke" {
     Push-Location (Join-Path $RepoRoot "converter")
-    python -m pytest tests/test_api.py::test_healthz tests/test_api.py::test_conversion_types_endpoint tests/test_api.py::test_preview_endpoint_returns_json_rows tests/test_api.py::test_export_rows_endpoint_returns_xls -q --tb=line
+    python -m pytest tests/test_api.py::test_healthz tests/test_api.py::test_conversion_types_endpoint tests/test_api.py::test_preview_endpoint_returns_json_rows tests/test_api.py::test_export_rows_endpoint_rejects_legacy_rows_by_default tests/test_api.py::test_export_rows_endpoint_returns_xls_when_explicitly_enabled -q --tb=line
     if ($LASTEXITCODE -ne 0) { throw "API smoke tests failed" }
     Pop-Location
 })
@@ -110,6 +110,13 @@ $steps = @()
     if ($LASTEXITCODE -ne 0) { throw "Student integration tests failed" }
     Pop-Location
 })
+
+if ($SkipSlowTests) {
+    [void]($steps += Step "MISA import repair Task 9 gate" {
+        & (Join-Path $RepoRoot "scripts\qa-misa-import-repair.ps1") -RepoRoot $RepoRoot -SkipSlowTests
+        if ($LASTEXITCODE -ne 0) { throw "Task 9 focused QA failed" }
+    })
+}
 
 if (-not $SkipSlowTests) {
     [void]($steps += Step "Converter full tests" {

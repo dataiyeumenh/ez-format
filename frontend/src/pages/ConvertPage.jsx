@@ -28,7 +28,13 @@ import MasterDataManager from "../components/accounting/MasterDataManager";
 import MasterDataResolutionTable from "../components/accounting/MasterDataResolutionTable";
 import SmartReconstructionPanel from "../components/reconstruction/SmartReconstructionPanel";
 import MappingProfileV2Card from "../components/converter/MappingProfileV2Card";
+import AnomalyWorkspace from "../components/converter/AnomalyWorkspace";
+import BulkCorrectionDialog from "../components/converter/BulkCorrectionDialog";
+import ReconciliationWorkspace from "../components/converter/ReconciliationWorkspace";
+import AccountingAssistantDrawer from "../components/converter/AccountingAssistantDrawer";
+import MisaImportRepairPanel from "../components/import-repair/MisaImportRepairPanel";
 import { useConverterApi } from "../hooks/useConverterApi";
+import { useConversionSession } from "../hooks/useConversionSession";
 import { useAccountingWorkspaces } from "../hooks/useAccountingWorkspaces";
 import { useAuth } from "../context/AuthContext";
 import api from "../services/api";
@@ -39,7 +45,12 @@ import {
   summarizeMappingFields,
 } from "../utils/converterUx";
 import { getReconstructionAvailability } from "../utils/reconstruction";
-import { extractProfileMatch } from "../utils/converterOperations.js";
+import {
+  buildAnomalyReviewPayload,
+  buildAssistantQuestionPayload,
+  buildCorrectionPayload,
+  extractProfileMatch,
+} from "../utils/converterOperations.js";
 
 const STATUS = {
   IDLE: "idle",
@@ -194,12 +205,38 @@ const ConvertPage = () => {
     backendCapabilities,
     capabilities,
     capabilitiesOnline,
+    misaImportRepair,
     analyzeFile,
+    syncMappingSession,
     previewMapping,
     confirmMapping,
     checkReadiness,
     exportConfirmed,
+    detectAnomalies,
+    reviewAnomaly,
+    proposeCorrections,
+    simulateCorrections,
+    applyCorrections,
+    undoCorrections,
+    getSessionRevisions,
+    addComparisonFile,
+    removeComparisonFile,
+    runReconciliation,
+    confirmReconciliationMatch,
+    askAccountingQuestion,
+    createImportRepair,
+    submitImportResultSchema,
+    getImportRepair,
+    issueImportRepairConfirmation,
+    confirmImportIssueMatch,
+    setDocumentImportStatus,
+    resolveImportIssue,
+    simulateBulkRepair,
+    applyBulkRepair,
+    createRetryBatch,
+    downloadRetryBatch,
   } = useConverterApi();
+  const operationSession = useConversionSession();
   const { user, refreshUser } = useAuth();
   const {
     enabled: workspacesEnabled,
@@ -261,6 +298,14 @@ const ConvertPage = () => {
   const [masterDataState, setMasterDataState] = useState(null);
   const [conversionMode, setConversionMode] = useState("mapping");
   const [mappingFilter, setMappingFilter] = useState("all");
+  const [mappingSessionReady, setMappingSessionReady] = useState(false);
+  const [correctionOpen, setCorrectionOpen] = useState(false);
+  const [correctionPatchSet, setCorrectionPatchSet] = useState(null);
+  const [correctionSimulation, setCorrectionSimulation] = useState(null);
+  const [correctionError, setCorrectionError] = useState("");
+  const [lastAppliedRevision, setLastAppliedRevision] = useState(null);
+  const [comparisonFiles, setComparisonFiles] = useState([]);
+  const [reconciliationReport, setReconciliationReport] = useState(null);
 
   const inputRef = useRef(null);
   const mappingTableRef = useRef(null);
@@ -300,6 +345,10 @@ const ConvertPage = () => {
   const mappingSource = analyzePayload?.mapping_suggestion?.source;
   const confidence = analyzePayload?.mapping_suggestion?.confidence;
   const profileV2Match = extractProfileMatch(analyzePayload);
+  const anomalyResult = operationSession.results.anomaly || {};
+  const anomalyIssues = anomalyResult.issues || anomalyResult.items || [];
+  const sessionReady = Boolean(operationSession.session?.sessionId);
+  const operationsReady = sessionReady && mappingSessionReady;
   const extractTargetsFromText = (text) => {
     if (!text) return [];
     return [...targetHeaders]
@@ -465,6 +514,15 @@ const ConvertPage = () => {
     setConversionContext(null);
     setMasterDataState(null);
     setMappingFilter("all");
+    setMappingSessionReady(false);
+    setCorrectionOpen(false);
+    setCorrectionPatchSet(null);
+    setCorrectionSimulation(null);
+    setCorrectionError("");
+    setLastAppliedRevision(null);
+    setComparisonFiles([]);
+    setReconciliationReport(null);
+    operationSession.resetSession();
   };
 
   const createConversionRunLog = async (file, templateId, context = null) => {
@@ -601,7 +659,7 @@ const ConvertPage = () => {
       runId = await createConversionRunLog(file, templateId, context);
       const result = await analyzeFile(file, templateId, context?.contextToken || null);
       const suggestion = result.mapping_suggestion || {};
-      setAnalyzePayload(result);
+      setAnalyzePayload({ ...result, conversionRunId: runId });
       setTargetTemplateId(result.target_template_id || templateId);
       setTargetMapping(rawMappingToTargetMapping(suggestion.mapping));
       setDefaults(suggestion.defaults || {});
@@ -610,6 +668,8 @@ const ConvertPage = () => {
       setIssues(result.issues || []);
       setProfileId(suggestion.profile_id || null);
       setMasterDataState(result.master_data || null);
+      operationSession.setAnalysis(result);
+      setMappingSessionReady(false);
       setConvStatus(STATUS.MAPPING);
       await updateConversionRunLog(
         "processing",
@@ -631,30 +691,44 @@ const ConvertPage = () => {
     }
   }
 
-  const buildMappingPayload = () => ({
-    upload_id: analyzePayload?.upload_id,
-    target_template_id: targetTemplateId,
-    mapping: targetMappingToRawMapping(targetMapping),
-    defaults,
-    formulas,
-    conversion_context_token: conversionContext?.contextToken || null,
-  });
+  const buildMappingPayload = (sessionOverride = operationSession.session) => {
+    const payload = {
+      upload_id: analyzePayload?.upload_id,
+      target_template_id: targetTemplateId,
+      conversion_run_id: conversionRunId,
+      mapping: targetMappingToRawMapping(targetMapping),
+      defaults,
+      formulas,
+      conversion_context_token: conversionContext?.contextToken || null,
+    };
+    if (sessionOverride) {
+      payload.session_id = sessionOverride.sessionId;
+      payload.revision = sessionOverride.revision;
+      payload.state_hash = sessionOverride.stateHash;
+    }
+    return payload;
+  };
 
-  const buildReadinessPayload = (rows = null) => {
-    const payload = buildMappingPayload();
+  const buildReadinessPayload = (rows = null, sessionOverride = operationSession.session) => {
+    const payload = buildMappingPayload(sessionOverride);
     if (Array.isArray(rows)) {
       payload.rows = rows;
     }
     return payload;
   };
 
-  const runReadinessCheck = async (rows = null) => {
+  const runReadinessCheck = async (
+    rows = null,
+    sessionOverride = operationSession.session,
+  ) => {
     if (!analyzePayload?.upload_id) return null;
     setAcknowledgeWarnings(false);
     setReadinessReport(null);
     setReadinessLoading(true);
     try {
-      const report = await checkReadiness(buildReadinessPayload(rows));
+      const report = await checkReadiness(
+        buildReadinessPayload(rows, sessionOverride),
+      );
       setReadinessReport(report);
       setMasterDataState(report.master_data || null);
       return report;
@@ -666,12 +740,26 @@ const ConvertPage = () => {
   const createPreview = async () => {
     setReadinessReport(null);
     setAcknowledgeWarnings(false);
-    const result = await previewMapping(buildMappingPayload());
+    let syncedSession = operationSession.session;
+    if (sessionReady) {
+      const syncResult = await syncMappingSession(buildMappingPayload());
+      operationSession.syncSession(syncResult);
+      syncedSession = {
+        sessionId: syncResult.session.session_id,
+        revision: syncResult.session.active_revision,
+        stateHash: syncResult.session.state_hash,
+      };
+      setMappingSessionReady(true);
+    }
+    const result = await previewMapping(buildMappingPayload(syncedSession));
     setPreviewHeaders(result.headers || []);
     setPreviewRows(result.rows || []);
     setIssues(result.issues || []);
     setMasterDataState(result.master_data || null);
-    await runReadinessCheck(result.rows || []);
+    await runReadinessCheck(
+      sessionReady ? null : result.rows || [],
+      syncedSession,
+    );
     return result;
   };
 
@@ -716,6 +804,7 @@ const ConvertPage = () => {
       ...buildMappingPayload(),
       profile_name: selectedTemplate?.label || "Thiết lập ghép cột",
     });
+    if (result.session) operationSession.syncSession(result);
     setProfileId(result.profile_id);
     return result.profile_id;
   };
@@ -892,6 +981,308 @@ const ConvertPage = () => {
     setReadinessReport(null);
     setAcknowledgeWarnings(false);
     setPreviewRows((prev) => prev.filter((_, index) => index !== rowIndex));
+  };
+
+  const refreshConversionContext = async () => {
+    if (!selectedWorkspaceId) {
+      const token = conversionContext?.contextToken;
+      if (!token) throw new Error("Thiếu conversion context cho thao tác mở rộng.");
+      return token;
+    }
+    const context = await createConversionContext(selectedWorkspaceId);
+    setConversionContext(context);
+    return context?.contextToken || null;
+  };
+
+  const requireOperationAccess = async () => {
+    if (!operationSession.session?.sessionId || !operationSession.mutationContext) {
+      throw new Error(
+        "Phiên chuyển đổi mở rộng chưa sẵn sàng. Vui lòng phân tích lại file.",
+      );
+    }
+    return {
+      session: operationSession.session,
+      contextToken: await refreshConversionContext(),
+    };
+  };
+
+  const handleOperationFailure = async (operation, error, options = {}) => {
+    operationSession.failOperation(operation, error, options);
+    if (Number(error?.status || 0) !== 409 || !operationSession.session?.sessionId) {
+      return;
+    }
+    try {
+      const latest = await getSessionRevisions(
+        operationSession.session.sessionId,
+        await refreshConversionContext(),
+      );
+      operationSession.syncSession(latest);
+      setMappingSessionReady(false);
+      setPreviewHeaders([]);
+      setPreviewRows([]);
+      setReadinessReport(null);
+      setAcknowledgeWarnings(false);
+      setConvStatus(STATUS.MAPPING);
+    } catch (recoveryError) {
+      console.error("[ConvertPage] Stale session recovery failed:", recoveryError);
+    }
+  };
+
+  const handleDetectAnomalies = async () => {
+    operationSession.startOperation("anomaly");
+    try {
+      const { session, contextToken } = await requireOperationAccess();
+      const result = await detectAnomalies(
+        session.sessionId,
+        { ...operationSession.mutationContext },
+        contextToken,
+      );
+      operationSession.finishOperation(
+        "anomaly",
+        result,
+        "Đã hoàn tất kiểm tra bất thường dữ liệu.",
+      );
+    } catch (error) {
+      await handleOperationFailure("anomaly", error);
+    }
+  };
+
+  const handleReviewAnomaly = async (issue) => {
+    operationSession.startOperation("anomaly");
+    try {
+      const { session, contextToken } = await requireOperationAccess();
+      const result = await reviewAnomaly(
+        session.sessionId,
+        issue.id,
+        buildAnomalyReviewPayload(operationSession.mutationContext),
+        contextToken,
+      );
+      operationSession.finishOperation("anomaly", {
+        ...anomalyResult,
+        issues: anomalyIssues.map((item) =>
+          item.id === issue.id
+            ? { ...item, reviewed: true, review_action: result.action }
+            : item,
+        ),
+      });
+    } catch (error) {
+      await handleOperationFailure("anomaly", error);
+    }
+  };
+
+  const handleOpenBulkCorrection = async () => {
+    setCorrectionError("");
+    operationSession.startOperation("correction");
+    try {
+      const { session, contextToken } = await requireOperationAccess();
+      const result = await proposeCorrections(
+        session.sessionId,
+        { ...operationSession.mutationContext },
+        contextToken,
+      );
+      setCorrectionPatchSet(result);
+      setCorrectionSimulation(null);
+      setCorrectionOpen(true);
+      operationSession.finishOperation("correction", result);
+    } catch (error) {
+      setCorrectionError(error.message || "Không thể tạo đề xuất sửa hàng loạt.");
+      await handleOperationFailure("correction", error);
+    }
+  };
+
+  const handleSimulateCorrections = async (selectedIds) => {
+    operationSession.startOperation("correction");
+    try {
+      const { session, contextToken } = await requireOperationAccess();
+      const result = await simulateCorrections(
+        session.sessionId,
+        buildCorrectionPayload(
+          operationSession.mutationContext,
+          correctionPatchSet,
+          selectedIds,
+        ),
+        contextToken,
+      );
+      setCorrectionSimulation(result);
+      operationSession.finishOperation("correction", result);
+    } catch (error) {
+      setCorrectionError(error.message || "Không thể xem trước thay đổi.");
+      await handleOperationFailure("correction", error);
+      throw error;
+    }
+  };
+
+  const handleApplyCorrections = async (selectedIds, acknowledged) => {
+    operationSession.startOperation("correction");
+    try {
+      const { session, contextToken } = await requireOperationAccess();
+      if (correctionSimulation?.requires_acknowledgement && acknowledged !== true) {
+        throw new Error("Cần xác nhận các thay đổi cần rà soát trước khi áp dụng.");
+      }
+      const idempotencyKey =
+        globalThis.crypto?.randomUUID?.() || `correction-${Date.now()}`;
+      const result = await applyCorrections(
+        session.sessionId,
+        buildCorrectionPayload(
+          operationSession.mutationContext,
+          correctionPatchSet,
+          selectedIds,
+        ),
+        contextToken,
+        idempotencyKey,
+      );
+      operationSession.finishOperation("correction", result);
+      setLastAppliedRevision({
+        revision: Number(result.active_revision ?? result.revision ?? session.revision + 1),
+        parentRevision: session.revision,
+      });
+      setPreviewRows([]);
+      setReadinessReport(result.validation || null);
+      setCorrectionOpen(false);
+    } catch (error) {
+      setCorrectionError(error.message || "Không thể áp dụng thay đổi.");
+      await handleOperationFailure("correction", error);
+      throw error;
+    }
+  };
+
+  const handleUndoCorrection = async () => {
+    operationSession.startOperation("correction");
+    try {
+      const { session, contextToken } = await requireOperationAccess();
+      const result = await undoCorrections(
+        session.sessionId,
+        {
+          ...operationSession.mutationContext,
+          patch_set_id: correctionPatchSet?.patch_set_id,
+        },
+        contextToken,
+        globalThis.crypto?.randomUUID?.() || `undo-${Date.now()}`,
+      );
+      operationSession.finishOperation("correction", result);
+      setLastAppliedRevision(null);
+      setReadinessReport(null);
+      setCorrectionOpen(false);
+    } catch (error) {
+      setCorrectionError(error.message || "Không thể hoàn tác thay đổi.");
+      await handleOperationFailure("correction", error);
+    }
+  };
+
+  const handleAddComparisonFile = async (file, role) => {
+    operationSession.startOperation("reconciliation");
+    try {
+      const { session, contextToken } = await requireOperationAccess();
+      const result = await addComparisonFile(
+        session.sessionId,
+        file,
+        role,
+        operationSession.mutationContext,
+        contextToken,
+      );
+      setComparisonFiles((current) => [...current, result]);
+      operationSession.finishOperation("reconciliation", result);
+    } catch (error) {
+      await handleOperationFailure("reconciliation", error, { optional: true });
+    }
+  };
+
+  const handleRemoveComparisonFile = async (file) => {
+    operationSession.startOperation("reconciliation");
+    try {
+      const { session, contextToken } = await requireOperationAccess();
+      const fileId = file.id || file.file_id;
+      const result = await removeComparisonFile(
+        session.sessionId,
+        fileId,
+        operationSession.mutationContext,
+        contextToken,
+      );
+      setComparisonFiles((current) =>
+        current.filter((item) => (item.id || item.file_id) !== fileId),
+      );
+      setReconciliationReport(null);
+      operationSession.finishOperation("reconciliation", result);
+    } catch (error) {
+      await handleOperationFailure("reconciliation", error, { optional: true });
+    }
+  };
+
+  const handleRunReconciliation = async () => {
+    operationSession.startOperation("reconciliation");
+    try {
+      const { session, contextToken } = await requireOperationAccess();
+      const result = await runReconciliation(
+        session.sessionId,
+        { ...operationSession.mutationContext },
+        contextToken,
+      );
+      setReconciliationReport(result);
+      operationSession.finishOperation("reconciliation", result);
+    } catch (error) {
+      await handleOperationFailure("reconciliation", error, { optional: true });
+    }
+  };
+
+  const handleConfirmReconciliationCandidate = async (
+    record,
+    comparisonRecordId = null,
+    action = "confirm",
+  ) => {
+    operationSession.startOperation("reconciliation");
+    try {
+      const { session, contextToken } = await requireOperationAccess();
+      const result = await confirmReconciliationMatch(
+        session.sessionId,
+        reconciliationReport?.report_id,
+        record.match_id,
+        {
+          ...operationSession.mutationContext,
+          comparison_record_id: comparisonRecordId,
+          action,
+        },
+        contextToken,
+      );
+      setReconciliationReport((current) => ({
+        ...current,
+        status: result.report_status || current?.status,
+        records: (current?.records || []).map((item) =>
+          item.match_id === result.match_id ? result : item,
+        ),
+        summary: result.report_summary || current?.summary || {},
+      }));
+      operationSession.finishOperation("reconciliation", result);
+    } catch (error) {
+      await handleOperationFailure("reconciliation", error, { optional: true });
+    }
+  };
+
+  const handleEvidenceNavigation = (evidence) => {
+    const target = evidence?.field || evidence?.target_field;
+    if (target && targetHeaders.includes(target)) {
+      focusTargetRow(target, evidence.message || "");
+    }
+  };
+
+  const handleAskAccountingQuestion = async (question) => {
+    operationSession.startOperation("assistant");
+    try {
+      const { session, contextToken } = await requireOperationAccess();
+      const result = await askAccountingQuestion(
+        session.sessionId,
+        buildAssistantQuestionPayload(
+          operationSession.mutationContext,
+          question,
+          capabilities.ai_explanation && aiOnline === true,
+        ),
+        contextToken,
+      );
+      operationSession.finishOperation("assistant", result);
+      return result;
+    } catch (error) {
+      await handleOperationFailure("assistant", error, { optional: true });
+      throw error;
+    }
   };
 
   return (
@@ -1614,6 +2005,90 @@ const ConvertPage = () => {
                       )}
                     </div>
                   )}
+
+                  <MisaImportRepairPanel
+                    capability={{ misa_import_repair: misaImportRepair }}
+                    userId={user?._id || user?.id}
+                    runId={
+                      analyzePayload?.runId ||
+                      analyzePayload?.conversionRunId ||
+                      conversionRunId
+                    }
+                    hasManifest={Boolean(
+                      analyzePayload?.runId ||
+                        analyzePayload?.conversionRunId ||
+                        conversionRunId,
+                    )}
+                    repairApi={{
+                      createImportRepair,
+                      submitImportResultSchema,
+                      getImportRepair,
+                      issueImportRepairConfirmation,
+                      confirmImportIssueMatch,
+                      setDocumentImportStatus,
+                      resolveImportIssue,
+                      simulateBulkRepair,
+                      applyBulkRepair,
+                      createRetryBatch,
+                      downloadRetryBatch,
+                    }}
+                  />
+
+                  {capabilities.anomaly_detection && operationsReady && analyzePayload && (
+                    <AnomalyWorkspace
+                      issues={anomalyIssues}
+                      loading={operationSession.operations.anomaly === "loading"}
+                      status={anomalyResult.status || "idle"}
+                      onDetect={handleDetectAnomalies}
+                      onReview={handleReviewAnomaly}
+                      onEvidence={handleEvidenceNavigation}
+                      onBulkCorrect={handleOpenBulkCorrection}
+                      bulkCorrectionEnabled={capabilities.bulk_correction}
+                    />
+                  )}
+
+                  {lastAppliedRevision && (
+                    <Alert
+                      variant="success"
+                      title={`Đã áp dụng thay đổi · Phiên bản ${lastAppliedRevision.revision}`}
+                      className="text-left"
+                    >
+                      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                        <span>Dữ liệu đã được kiểm tra lại trên phiên bản mới.</span>
+                        <button
+                          type="button"
+                          className="btn-secondary min-h-11 shrink-0"
+                          onClick={handleUndoCorrection}
+                        >
+                          Hoàn tác thay đổi
+                        </button>
+                      </div>
+                    </Alert>
+                  )}
+
+                  {capabilities.reconciliation &&
+                    operationsReady &&
+                    analyzePayload &&
+                    (readinessReport || previewRows.length > 0) && (
+                      <ReconciliationWorkspace
+                        primaryFile={selectedFile}
+                        comparisonFiles={comparisonFiles}
+                        maxFiles={capabilities.limits.comparison_files ?? 0}
+                        report={reconciliationReport}
+                        loading={
+                          operationSession.operations.reconciliation === "loading"
+                        }
+                        offline={
+                          operationSession.notice?.kind === "optional_service_offline"
+                        }
+                        onAddFile={handleAddComparisonFile}
+                        onRemoveFile={handleRemoveComparisonFile}
+                        onRun={handleRunReconciliation}
+                        onSkip={() => setReconciliationReport(null)}
+                        onEvidence={handleEvidenceNavigation}
+                        onConfirmCandidate={handleConfirmReconciliationCandidate}
+                      />
+                    )}
                 </div>
               </div>
             </div>
@@ -1623,6 +2098,30 @@ const ConvertPage = () => {
 
       <Footer />
       <ChatSupport initialMessages={[{ from: "bot", text: "Coming soon..." }]} />
+      {capabilities.bulk_correction && operationsReady && (
+        <BulkCorrectionDialog
+          open={correctionOpen}
+          onOpenChange={setCorrectionOpen}
+          patchSet={correctionPatchSet}
+          simulation={correctionSimulation}
+          loading={operationSession.operations.correction === "loading"}
+          error={correctionError}
+          stale={operationSession.notice?.kind === "stale_revision"}
+          latestRevision={lastAppliedRevision?.revision || null}
+          onSimulate={handleSimulateCorrections}
+          onApply={handleApplyCorrections}
+          onUndo={lastAppliedRevision ? handleUndoCorrection : undefined}
+        />
+      )}
+      {capabilities.accounting_assistant && operationsReady && (
+        <AccountingAssistantDrawer
+          session={operationSession.session}
+          fileName={selectedFile?.name}
+          aiOnline={capabilities.ai_explanation ? aiOnline : null}
+          onAsk={handleAskAccountingQuestion}
+          onEvidence={handleEvidenceNavigation}
+        />
+      )}
       {workspacesEnabled && (
         <>
           <WorkspaceSetupModal

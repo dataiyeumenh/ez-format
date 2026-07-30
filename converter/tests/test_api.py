@@ -721,7 +721,40 @@ def test_preview_endpoint_returns_json_rows(tmp_path):
     assert payload["rows"][0]["Số chứng từ (*)"] == "HD-MESS-001"
 
 
-def test_export_rows_endpoint_returns_xls(tmp_path):
+def test_export_rows_endpoint_rejects_legacy_rows_by_default(tmp_path, monkeypatch):
+    monkeypatch.delenv("ALLOW_LEGACY_ROW_EXPORT", raising=False)
+    input_path = _write_messy_sales_workbook(tmp_path / "messy.xlsx")
+    options = json.dumps({"column_mapping": MESSY_SALES_MAPPING})
+
+    with input_path.open("rb") as handle:
+        preview = client.post(
+            "/api/v1/conversions/preview",
+            data={"conversion_type": "bsn_sales", "options": options},
+            files={
+                "file": (
+                    "messy.xlsx",
+                    handle,
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                )
+            },
+        )
+
+    response = client.post(
+        "/api/v1/conversions/export",
+        json={
+            "conversion_type": "bsn_sales",
+            "rows": preview.json()["rows"],
+        },
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == (
+        "Legacy client-row export is disabled unless explicitly enabled."
+    )
+
+
+def test_export_rows_endpoint_returns_xls_when_explicitly_enabled(tmp_path, monkeypatch):
+    monkeypatch.setenv("ALLOW_LEGACY_ROW_EXPORT", "true")
     input_path = _write_messy_sales_workbook(tmp_path / "messy.xlsx")
     options = json.dumps({"column_mapping": MESSY_SALES_MAPPING})
 

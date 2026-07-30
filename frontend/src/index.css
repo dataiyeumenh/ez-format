@@ -93,7 +93,9 @@
   }
 
   @media (prefers-reduced-motion: reduce) {
-    .animate-fade-up-in {
+    .animate-fade-up-in,
+    .animate-fade-in,
+    .animate-slide-up {
       animation: none;
     }
   }
