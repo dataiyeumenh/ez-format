@@ -103,8 +103,9 @@ function auditedHandler(operation, handler) {
       thrown = error;
       throw error;
     } finally {
-      const statusCode = thrown
-        ? Number(thrown.statusCode) || 500
+      const failure = thrown || res.locals?.misaImportRepairFailure;
+      const statusCode = failure
+        ? Number(failure.statusCode) || 500
         : Number(res.statusCode) || 500;
       const outcome = statusCode >= 500
         ? "failed"
@@ -405,6 +406,11 @@ async function downloadMisaImportRetryBatch(req, res) {
     return res;
   } catch (error) {
     if (res.headersSent) {
+      res.locals = res.locals || {};
+      const streamStatus = Number(error?.statusCode);
+      res.locals.misaImportRepairFailure = {
+        statusCode: Number.isInteger(streamStatus) && streamStatus >= 500 ? streamStatus : 500,
+      };
       res.destroy?.(error);
       return res;
     }

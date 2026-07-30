@@ -29,6 +29,7 @@ const { userCanAccessWorkspace } = require("./masterDataService");
 
 const MAX_CANDIDATES = 5;
 const MAX_BULK_ISSUES = 500;
+const MAX_RETRY_DOCUMENT_GROUPS = 10_000;
 const MAX_SIMULATION_EXAMPLES = 20;
 const ISSUE_BATCH_SIZE = 100;
 const MAX_IDEMPOTENCY_KEY_LENGTH = 256;
@@ -1477,7 +1478,7 @@ function createMisaImportRepairService(overrides = {}) {
   }
 
   function normalizeRetryGroups(value) {
-    if (!Array.isArray(value) || value.length === 0 || value.length > MAX_BULK_ISSUES) {
+    if (!Array.isArray(value) || value.length === 0 || value.length > MAX_RETRY_DOCUMENT_GROUPS) {
       throw repairError(422, "document_group_ids không hợp lệ", "INVALID_RETRY_GROUPS");
     }
     const normalized = value.map((item) => strictText(item, 256, "document_group_id", "INVALID_RETRY_GROUPS"));

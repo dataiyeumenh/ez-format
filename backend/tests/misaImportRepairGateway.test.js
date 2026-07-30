@@ -2,7 +2,7 @@ const assert = require("node:assert/strict");
 const crypto = require("node:crypto");
 const http = require("node:http");
 const jwt = require("jsonwebtoken");
-const { Readable } = require("node:stream");
+const { Readable, Writable } = require("node:stream");
 const test = require("node:test");
 const mongoose = require("mongoose");
 
@@ -1826,4 +1826,72 @@ test("stale standalone schema mutation is cleaned before repair data becomes rea
   const loaded = await service.loadRepair(SESSION_ID, "user-1");
   assert.equal(loaded.pendingMutationId, undefined);
   assert.equal(deleted[0].schemaGenerationId, staleMutationId);
+});
+
+test("post-header retry download stream failure is audited as failed", async () => {
+  const repairService = require("../services/misaImportRepairService");
+  const controller = require("../controllers/misaImportRepairController");
+  const original = {
+    downloadRetryBatch: repairService.downloadRetryBatch,
+    emitAudit: repairService.emitMisaImportRepairAuditEvent,
+    emitMetric: repairService.emitMisaImportRepairMetric,
+    enabled: process.env.MISA_IMPORT_REPAIR_ENABLED,
+  };
+  const auditEvents = [];
+  const metrics = [];
+  const chunks = [];
+  const streamError = Object.assign(new Error("GridFS stream failed after headers"), {
+    statusCode: 409,
+  });
+  const response = new Writable({
+    write(chunk, _encoding, callback) {
+      response.headersSent = true;
+      chunks.push(Buffer.from(chunk));
+      callback();
+    },
+  });
+  response.locals = {};
+  response.headersSent = false;
+  response.statusCode = 200;
+  response.setHeader = () => response;
+  response.status = (statusCode) => {
+    response.statusCode = statusCode;
+    return response;
+  };
+  response.on("error", () => {});
+
+  try {
+    process.env.MISA_IMPORT_REPAIR_ENABLED = "true";
+    repairService.downloadRetryBatch = async () => ({
+      content: Readable.from((async function* failAfterHeaders() {
+        yield Buffer.from("partial");
+        throw streamError;
+      })()),
+      contentType: "application/vnd.ms-excel",
+      filename: "retry.xls",
+      batch: { _id: BATCH_ID },
+    });
+    repairService.emitMisaImportRepairAuditEvent = (event) => auditEvents.push(event);
+    repairService.emitMisaImportRepairMetric = (metric) => metrics.push(metric);
+
+    await controller.downloadMisaImportRetryBatch({
+      user: { _id: "user-1" },
+      params: { repairId: SESSION_ID, batchId: BATCH_ID },
+      body: {},
+    }, response);
+
+    assert.equal(Buffer.concat(chunks).toString(), "partial");
+    assert.equal(response.destroyed, true);
+    assert.equal(auditEvents.length, 1);
+    assert.equal(auditEvents[0].event, "misa_import_repair.retry_download.failed");
+    assert.equal(auditEvents[0].statusCode, 500);
+    assert.equal(metrics[0].outcome, "failed");
+    assert.equal(metrics[0].status, "server_error");
+  } finally {
+    repairService.downloadRetryBatch = original.downloadRetryBatch;
+    repairService.emitMisaImportRepairAuditEvent = original.emitAudit;
+    repairService.emitMisaImportRepairMetric = original.emitMetric;
+    if (original.enabled === undefined) delete process.env.MISA_IMPORT_REPAIR_ENABLED;
+    else process.env.MISA_IMPORT_REPAIR_ENABLED = original.enabled;
+  }
 });

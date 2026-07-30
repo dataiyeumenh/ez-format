@@ -488,6 +488,75 @@ test("mixed imported and failed groups preflight only the confirmed failed subse
   assert.notEqual(mixedWorkspace.readiness.hash, baselineWorkspace.readiness.hash);
 });
 
+test("readiness and retry confirmation preserve 501 complete failed document groups", async () => {
+  const { createMisaImportRepairService } = require("../services/misaImportRepairService");
+  const fake = fakeDependencies();
+  const groupIds = Array.from(
+    { length: 501 },
+    (_, index) => `group-${String(index + 1).padStart(4, "0")}`,
+  );
+  fake.currentRepair.documentGroupStatuses = groupIds.map((documentGroupId) => ({
+    documentGroupId,
+    status: "failed",
+    userConfirmed: true,
+    confirmedBy: "user-1",
+    confirmedAt: new Date(),
+  }));
+  fake.currentRepair.summary.failedDocumentGroups = groupIds.length;
+  const service = createMisaImportRepairService(fake.deps);
+
+  const workspace = await service.readWorkspace({
+    userId: "user-1",
+    repairId: REPAIR_ID,
+    groupLimit: 100,
+    requestId: "501-group-readiness",
+  });
+
+  assert.match(workspace.readiness.hash, /^[a-f0-9]{64}$/);
+  assert.deepEqual(fake.jsonCalls[0].body.selected_document_group_ids, groupIds);
+  assert.equal(Object.keys(fake.jsonCalls[0].body.document_group_statuses).length, 501);
+
+  await assert.rejects(
+    service.issueHumanConfirmation({
+      userId: "user-1",
+      repairId: REPAIR_ID,
+      action: "retry_export",
+      body: {
+        expected_version: 8,
+        document_group_ids: groupIds.slice(0, -1),
+        readiness_hash: workspace.readiness.hash,
+      },
+    }),
+    (error) => error.code === "RETRY_STATUS_BLOCKED",
+  );
+
+  const confirmation = await service.issueHumanConfirmation({
+    userId: "user-1",
+    repairId: REPAIR_ID,
+    action: "retry_export",
+    body: {
+      expected_version: 8,
+      document_group_ids: [...groupIds].reverse(),
+      readiness_hash: workspace.readiness.hash,
+    },
+  });
+  assert.ok(confirmation.token);
+
+  await assert.rejects(
+    service.issueHumanConfirmation({
+      userId: "user-1",
+      repairId: REPAIR_ID,
+      action: "retry_export",
+      body: {
+        expected_version: 8,
+        document_group_ids: Array.from({ length: 10_001 }, (_, index) => `abuse-${index}`),
+        readiness_hash: workspace.readiness.hash,
+      },
+    }),
+    (error) => error.code === "INVALID_RETRY_GROUPS",
+  );
+});
+
 test("readiness remains blocked until every document group is known and confirmed", async () => {
   const { createMisaImportRepairService } = require("../services/misaImportRepairService");
   const fake = fakeDependencies();
