@@ -387,24 +387,27 @@ if (SKIP_REASON) {
     );
     created.payments.push(settledPayment._id);
 
+    const rejectedOrderCode = Number(`${Date.now()}302`.slice(-12));
     await assert.rejects(
       synchronizer.createAndSettleZeroTotalPayment(
-        paymentData(Number(`${Date.now()}302`.slice(-12))),
+        paymentData(rejectedOrderCode),
         { amount: 0, status: "PAID" },
         { freeCheckout: true },
       ),
       /Bạn đã dùng hết số lần cho phép của mã này/,
     );
 
-    const [storedCoupon, storedUser, usages, settledPayments, zeroTotalPayments] = await Promise.all([
+    const [storedCoupon, storedUser, usages, storedSettledPayment, rejectedPayment, zeroTotalPayments] = await Promise.all([
       Coupon.findById(coupon._id),
       User.findById(user._id),
       CouponUsage.countDocuments({ coupon: coupon._id, user: user._id }),
-      Payment.countDocuments({ coupon: coupon._id, user: user._id, amount: 0, status: "paid" }),
+      Payment.findById(settledPayment._id),
+      Payment.findOne({ orderCode: rejectedOrderCode }),
       Payment.countDocuments({ coupon: coupon._id, user: user._id, amount: 0 }),
     ]);
 
-    assert.equal(settledPayments, 1);
+    assert.equal(storedSettledPayment.status, "paid");
+    assert.equal(rejectedPayment, null);
     assert.equal(zeroTotalPayments, 1);
     assert.equal(storedUser.fileCredits, 3);
     assert.equal(storedCoupon.usageCount, 1);

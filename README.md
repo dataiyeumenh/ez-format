@@ -56,6 +56,12 @@ npm run qa:watch        # lặp QA mỗi 60 phút (terminal nền)
 
 Chi tiết: [docs/QA_AUTOMATION.md](docs/QA_AUTOMATION.md)
 
+### QA gates
+
+- `npm run qa:release` is the only strict release gate. It requires the disposable replica-set test URI and runs the full release QA flow.
+- `npm run qa:main-integration` is non-release local/full QA. It may report the explicit replica-set suite as skipped when `PAYMENT_REPLICA_SET_TEST_URI` is unavailable.
+- `npm run qa:main-contracts` is the focused local contract check; replica-set coverage remains an honest skip unless its URI is configured.
+
 ### Cải tiến UI (sau QA)
 
 ```powershell

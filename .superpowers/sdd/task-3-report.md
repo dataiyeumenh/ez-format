@@ -119,3 +119,24 @@ Output: focused payment suite `6/6` passed. Main contracts: backend `42/42` pass
 ### Concern
 
 - Atomic settlement relies on MongoDB transaction support. Production PayOS processing must use a replica set or sharded MongoDB deployment; a standalone MongoDB instance rejects transactions instead of risking a partial credit grant.
+
+## Final P2 Closure (2026-07-30)
+
+### Scope and status
+
+Complete. Test/docs-only follow-up. Runtime payment code and generated review artifacts remain unchanged.
+
+- `backend/tests/paymentReplicaSet.integration.test.js`: captures the rejected zero-total `orderCode`, verifies the first payment remains `paid`, and verifies no payment row exists for the rejected order.
+- `backend/tests/releaseReplicaGate.test.js`: verifies the `qa:release` wrapper, not only the underlying contract script, enforces replica-set coverage.
+- `README.md`: documents `npm run qa:release` as the only strict release gate; `qa:main-integration` as non-release local/full QA.
+
+### Current local verification
+
+- Replica-set integration tests: **skipped** locally because `PAYMENT_REPLICA_SET_TEST_URI` is not set. No replica result is reported as passed.
+- Current explicit replica skip count: **9**; `npm run qa:main-contracts` reports 64 passed, 0 failed, 9 skipped, plus 2 frontend contract tests passed.
+
+### Verification evidence
+
+- Focused non-replica backend tests: 25 passed, 0 failed, 0 skipped.
+- `npm run qa:main-contracts`: backend 64 passed, 0 failed, 9 skipped; frontend 2 passed.
+- Replica-set tests were not executed because `PAYMENT_REPLICA_SET_TEST_URI` is not set.
