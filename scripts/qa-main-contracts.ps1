@@ -1,3 +1,7 @@
+param(
+    [switch]$CheckReplicaSet
+)
+
 $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent $PSScriptRoot
 $MissingPayOSConfigCount = @("PAYOS_CLIENT_ID", "PAYOS_API_KEY", "PAYOS_CHECKSUM_KEY") |
@@ -15,6 +19,10 @@ $ReplicaSetSkipReason = if ([string]::IsNullOrWhiteSpace($ReplicaSetTestUri)) {
     $null
 }
 
+if ([string]$env:REQUIRE_REPLICA_TESTS -eq "1" -and $ReplicaSetSkipReason) {
+    throw "REQUIRE_REPLICA_TESTS=1: the real replica-set payment suite is required: $ReplicaSetSkipReason"
+}
+
 if ($MissingPayOSConfigCount -eq 0 -and $ReplicaSetSkipReason) {
     throw "PayOS is configured; the real replica-set payment suite is required: $ReplicaSetSkipReason"
 }
@@ -25,14 +33,18 @@ if ($ReplicaSetSkipReason) {
     Write-Output "[QA] Replica-set payment suite: EXECUTED - PAYMENT_REPLICA_SET_TEST_URI is configured."
 }
 
+if ($CheckReplicaSet) { exit 0 }
+
 $backendTests = @(
     "tests/authContracts.test.js",
     "tests/adminContracts.test.js",
     "tests/plans.test.js",
     "tests/paymentPlans.test.js",
     "tests/paymentControllerZeroTotal.test.js",
+    "tests/paymentWebhookTransition.test.js",
     "tests/paymentStatusSync.test.js",
     "tests/paymentReplicaSet.integration.test.js",
+    "tests/releaseReplicaGate.test.js",
     "tests/paymentSettlementReadiness.test.js",
     "tests/serverStartupReadiness.test.js",
     "tests/dailyFileCredit.test.js",

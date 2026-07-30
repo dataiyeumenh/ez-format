@@ -1,0 +1,40 @@
+const assert = require("node:assert/strict");
+const path = require("node:path");
+const { spawnSync } = require("node:child_process");
+const test = require("node:test");
+
+const gateScript = path.resolve(__dirname, "../../scripts/qa-main-contracts.ps1");
+
+function runGate(env) {
+  return spawnSync(
+    "pwsh",
+    ["-NoProfile", "-File", gateScript, "-CheckReplicaSet"],
+    { encoding: "utf8", env: { ...process.env, ...env } },
+  );
+}
+
+test("release gate requires a replica-set URI without depending on PayOS secrets", () => {
+  const result = runGate({
+    REQUIRE_REPLICA_TESTS: "1",
+    PAYMENT_REPLICA_SET_TEST_URI: "",
+    PAYOS_CLIENT_ID: "",
+    PAYOS_API_KEY: "",
+    PAYOS_CHECKSUM_KEY: "",
+  });
+
+  assert.notEqual(result.status, 0);
+  assert.match(`${result.stdout}\n${result.stderr}`, /real replica-set payment suite is required/i);
+});
+
+test("local contract check may skip replica tests when release flag is absent", () => {
+  const result = runGate({
+    REQUIRE_REPLICA_TESTS: "",
+    PAYMENT_REPLICA_SET_TEST_URI: "",
+    PAYOS_CLIENT_ID: "",
+    PAYOS_API_KEY: "",
+    PAYOS_CHECKSUM_KEY: "",
+  });
+
+  assert.equal(result.status, 0);
+  assert.match(result.stdout, /Replica-set payment suite: SKIPPED/i);
+});

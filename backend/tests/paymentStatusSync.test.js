@@ -225,6 +225,36 @@ test("PayOS sync does not reapply credits from independent pending snapshots", a
   assert.equal(store.transactions, 2);
 });
 
+test("non-paid webhook status cannot downgrade a payment settled by a concurrent transaction", async () => {
+  const { createPendingSnapshot, store } = installPaymentStore();
+  store.payment.status = "paid";
+  store.payment.paidAt = new Date().toISOString();
+  store.user.fileCredits = 3;
+  const sync = createPaymentStatusSynchronizer({
+    PaymentModel: Payment,
+    UserModel: User,
+    assertPaymentSettlementReady: () => {},
+  });
+
+  const transitioned = await sync.applyNonPaidPaymentStatus(
+    createPendingSnapshot(),
+    "failed",
+    { amount: 10000, status: "FAILED" },
+    { webhook: { success: false } },
+  );
+
+  assert.equal(transitioned.status, "paid");
+  assert.equal(store.payment.status, "paid");
+
+  const retry = await sync.applyPaidPayment(
+    createPendingSnapshot(),
+    { amount: 10000, status: "PAID" },
+    {},
+  );
+  assert.equal(retry.status, "paid");
+  assert.equal(store.user.fileCredits, 3);
+});
+
 test("PayOS concurrent snapshots settle one coupon usage in the payment transaction", async () => {
   const { createPendingSnapshot, store } = installPaymentStore();
   store.payment.coupon = "coupon-id";

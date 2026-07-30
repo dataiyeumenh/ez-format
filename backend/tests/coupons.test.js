@@ -145,61 +145,126 @@ test("calculates percent discount with optional max cap", () => {
 
 test("records a payment coupon usage once when duplicate settlement snapshots arrive", async () => {
   const originalCreate = CouponUsage.create;
-  const originalUpdateOne = CouponUsage.updateOne;
-  const originalFindByIdAndUpdate = Coupon.findByIdAndUpdate;
+  const originalFindOne = CouponUsage.findOne;
+  const originalCountDocuments = CouponUsage.countDocuments;
+  const originalFindOneAndUpdate = Coupon.findOneAndUpdate;
   const session = { id: "payment-transaction" };
   let usageExists = false;
-  let couponIncrements = 0;
+  let couponReservations = 0;
 
-  CouponUsage.create = async () => {
-    throw new Error("recordCouponUsage must atomically upsert payment usage");
-  };
-  CouponUsage.updateOne = async (filter, update, options) => {
+  CouponUsage.findOne = async (filter, _projection, options) => {
     assert.deepEqual(filter, { payment: "payment-id" });
-    assert.deepEqual(update, {
-      $setOnInsert: {
-        coupon: "coupon-id",
-        user: "user-id",
-        payment: "payment-id",
-        discountAmount: 2500,
-      },
-    });
-    assert.equal(options.upsert, true);
     assert.equal(options.session, session);
-
-    if (usageExists) return { upsertedCount: 0 };
-    usageExists = true;
-    return { upsertedCount: 1 };
+    return usageExists ? { payment: "payment-id" } : null;
   };
-  Coupon.findByIdAndUpdate = async (couponId, update, options) => {
-    assert.equal(couponId, "coupon-id");
+  Coupon.findOneAndUpdate = async (filter, update, options) => {
+    assert.equal(filter._id, "coupon-id");
+    assert.ok(filter.$expr, "global coupon limit must be part of the atomic update filter");
     assert.deepEqual(update, { $inc: { usageCount: 1 } });
+    assert.equal(options.new, true);
     assert.equal(options.session, session);
-    couponIncrements += 1;
+    couponReservations += 1;
+    return { _id: "coupon-id", usageLimit: 10, limitPerUser: 1 };
+  };
+  CouponUsage.countDocuments = async (filter, options) => {
+    assert.deepEqual(filter, { coupon: "coupon-id", user: "user-id" });
+    assert.equal(options.session, session);
+    return 0;
+  };
+  CouponUsage.create = async (docs, options) => {
+    assert.equal(Array.isArray(docs), true);
+    assert.deepEqual(docs[0], {
+      coupon: "coupon-id",
+      user: "user-id",
+      payment: "payment-id",
+      discountAmount: 2500,
+      usedAt: docs[0].usedAt,
+    });
+    assert.equal(options.session, session);
+    usageExists = true;
   };
 
   try {
-    await Promise.all([
-      recordCouponUsage({
-        couponId: "coupon-id",
-        userId: "user-id",
-        paymentId: "payment-id",
-        discountAmount: 2500,
-        session,
-      }),
-      recordCouponUsage({
-        couponId: "coupon-id",
-        userId: "user-id",
-        paymentId: "payment-id",
-        discountAmount: 2500,
-        session,
-      }),
-    ]);
+    await recordCouponUsage({
+      couponId: "coupon-id",
+      userId: "user-id",
+      paymentId: "payment-id",
+      discountAmount: 2500,
+      session,
+    });
+    const duplicate = await recordCouponUsage({
+      couponId: "coupon-id",
+      userId: "user-id",
+      paymentId: "payment-id",
+      discountAmount: 2500,
+      session,
+    });
+    assert.equal(duplicate.recorded, false);
   } finally {
     CouponUsage.create = originalCreate;
-    CouponUsage.updateOne = originalUpdateOne;
-    Coupon.findByIdAndUpdate = originalFindByIdAndUpdate;
+    CouponUsage.findOne = originalFindOne;
+    CouponUsage.countDocuments = originalCountDocuments;
+    Coupon.findOneAndUpdate = originalFindOneAndUpdate;
   }
 
-  assert.equal(couponIncrements, 1);
+  assert.equal(couponReservations, 1);
+});
+
+test("rejects a coupon settlement when the per-user limit is already reached", async () => {
+  const originalFindOne = CouponUsage.findOne;
+  const originalCountDocuments = CouponUsage.countDocuments;
+  const originalFindOneAndUpdate = Coupon.findOneAndUpdate;
+  const session = { id: "payment-transaction" };
+
+  CouponUsage.findOne = async () => null;
+  Coupon.findOneAndUpdate = async (_filter, _update, options) => {
+    assert.equal(options.session, session);
+    return { _id: "coupon-id", usageLimit: 10, limitPerUser: 1 };
+  };
+  CouponUsage.countDocuments = async () => 1;
+
+  try {
+    await assert.rejects(
+      recordCouponUsage({
+        couponId: "coupon-id",
+        userId: "user-id",
+        paymentId: "payment-id",
+        discountAmount: 2500,
+        session,
+      }),
+      /hết số lần cho phép/,
+    );
+  } finally {
+    CouponUsage.findOne = originalFindOne;
+    CouponUsage.countDocuments = originalCountDocuments;
+    Coupon.findOneAndUpdate = originalFindOneAndUpdate;
+  }
+});
+
+test("rejects a coupon settlement when the global limit cannot be reserved", async () => {
+  const originalFindOne = CouponUsage.findOne;
+  const originalFindOneAndUpdate = Coupon.findOneAndUpdate;
+  const session = { id: "payment-transaction" };
+
+  CouponUsage.findOne = async () => null;
+  Coupon.findOneAndUpdate = async (_filter, _update, options) => {
+    assert.equal(options.session, session);
+    return null;
+  };
+
+  try {
+    await assert.rejects(
+      recordCouponUsage({
+        couponId: "coupon-id",
+        userId: "user-id",
+        paymentId: "payment-id",
+        discountAmount: 2500,
+        session,
+      }),
+      /hết lượt sử dụng/,
+    );
+  } finally {
+    CouponUsage.findOne = originalFindOne;
+    Coupon.findOneAndUpdate = originalFindOneAndUpdate;
+  }
 });

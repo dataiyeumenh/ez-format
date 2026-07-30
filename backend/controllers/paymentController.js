@@ -4,6 +4,7 @@ const { buildPaymentDescription } = require("../services/paymentPlans");
 const { findActivePlanByCodeOrId, serializePlan } = require("../services/planService");
 const {
   applyPaidPayment,
+  applyNonPaidPaymentStatus,
   normalizePayOSStatus,
   syncPaymentStatusFromPayOS,
 } = require("../services/paymentStatusSync");
@@ -294,20 +295,18 @@ async function handlePayOSWebhook(req, res) {
       return res.status(200).json({ success: true, message: "Already processed" });
     }
 
-    payment.payosData = {
-      ...(payment.payosData || {}),
-      webhook: req.body,
-      verifiedData: webhookData,
-    };
-
     if (
       Number(webhookData.amount) !== Number(payment.amount) ||
       (payment.paymentLinkId &&
         webhookData.paymentLinkId &&
         webhookData.paymentLinkId !== payment.paymentLinkId)
     ) {
-      payment.status = "failed";
-      await payment.save();
+      await applyNonPaidPaymentStatus(
+        payment,
+        "failed",
+        webhookData,
+        { webhook: req.body, verifiedData: webhookData },
+      );
       return res.status(200).json({
         success: true,
         message: "Webhook mismatch ignored",
@@ -318,8 +317,12 @@ async function handlePayOSWebhook(req, res) {
       try {
         await syncPaymentStatusFromPayOS(payment);
       } catch {
-        payment.status = webhookMappedStatus === "pending" ? "failed" : webhookMappedStatus;
-        await payment.save();
+        await applyNonPaidPaymentStatus(
+          payment,
+          webhookMappedStatus === "pending" ? "failed" : webhookMappedStatus,
+          webhookData,
+          { webhook: req.body, verifiedData: webhookData },
+        );
       }
       return res.status(200).json({ success: true });
     }

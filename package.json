@@ -15,6 +15,7 @@
     "qa": "pwsh -File scripts/qa-qc.ps1",
     "qa:main-integration": "pwsh -File scripts/qa-main-integration.ps1",
     "qa:main-contracts": "pwsh -File scripts/qa-main-contracts.ps1",
+    "qa:release": "pwsh -File scripts/qa-release.ps1",
     "qa:fast": "pwsh -File scripts/qa-qc.ps1 -SkipSlowTests",
     "qa:ci": "pwsh -File scripts/qa-qc.ps1 -SkipSlowTests",
     "qa:autopilot": "pwsh -File scripts/qa-autopilot.ps1 -Fast",

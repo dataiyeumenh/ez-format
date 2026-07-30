@@ -110,6 +110,24 @@ function createPaymentStatusSynchronizer({
     });
   }
 
+  async function applyNonPaidPaymentStatus(
+    payment,
+    nextStatus,
+    remotePaymentLink,
+    snapshotPayOSData,
+  ) {
+    return withPaymentTransaction(payment._id, async (storedPayment, session) => {
+      if (!storedPayment || storedPayment.status === "paid") {
+        return storedPayment || payment;
+      }
+
+      mergePayOSData(storedPayment, snapshotPayOSData, remotePaymentLink);
+      storedPayment.status = nextStatus;
+      await storedPayment.save({ session });
+      return storedPayment;
+    });
+  }
+
   async function syncPaymentStatusFromPayOS(payment) {
     if (!payment || payment.status === "paid") return payment;
 
@@ -124,17 +142,21 @@ function createPaymentStatusSynchronizer({
       return mirrorPaymentState(payment, settledPayment);
     }
 
-    const syncedPayment = await withPaymentTransaction(payment._id, async (storedPayment, session) => {
-      if (!storedPayment || storedPayment.status === "paid") return storedPayment || payment;
-      mergePayOSData(storedPayment, payment.payosData, remotePaymentLink);
-      storedPayment.status = nextStatus;
-      await storedPayment.save({ session });
-      return storedPayment;
-    });
+    const syncedPayment = await applyNonPaidPaymentStatus(
+      payment,
+      nextStatus,
+      remotePaymentLink,
+      payment.payosData,
+    );
     return mirrorPaymentState(payment, syncedPayment);
   }
 
-  return { applyPaidPayment, syncPaymentStatusFromPayOS, withPaymentTransaction };
+  return {
+    applyPaidPayment,
+    applyNonPaidPaymentStatus,
+    syncPaymentStatusFromPayOS,
+    withPaymentTransaction,
+  };
 }
 
 const defaultSynchronizer = createPaymentStatusSynchronizer();

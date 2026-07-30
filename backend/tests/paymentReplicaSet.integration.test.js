@@ -27,6 +27,8 @@ if (SKIP_REASON) {
     "replica-set transaction rolls back payment, entitlement, and coupon when coupon settlement fails",
     "replica-set concurrent settlement retries a write conflict without double credits",
     "replica-set concurrent coupon settlement records one usage",
+    "replica-set paid settlements enforce the global coupon limit",
+    "replica-set zero-total settlements enforce the per-user coupon limit",
   ]) {
     test(name, { skip: SKIP_REASON }, () => {});
   }
@@ -246,5 +248,118 @@ if (SKIP_REASON) {
     assert.equal(storedUser.fileCredits, 3);
     assert.equal(usages, 1);
     assert.equal(storedCoupon.usageCount, 1);
+  });
+
+  test("replica-set paid settlements enforce the global coupon limit", async () => {
+    const { coupon, payment: firstPayment, plan, user: firstUser } = await createFixture({ withCoupon: true });
+    await Coupon.updateOne({ _id: coupon._id }, { $set: { usageLimit: 1 } });
+    const suffix = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const secondUser = await User.create({
+      name: "PayOS Replica Test 2",
+      email: `payos-${suffix}@example.test`,
+      googleId: `payos-${suffix}`,
+      authProvider: "google",
+      fileCredits: 2,
+    });
+    const secondPayment = await Payment.create({
+      user: secondUser._id,
+      plan: plan._id,
+      orderCode: Number(`${Date.now()}${Math.floor(Math.random() * 1000)}`.slice(-12)),
+      planCode: plan.code,
+      planName: plan.name,
+      amount: firstPayment.amount,
+      coupon: coupon._id,
+      couponApplied: true,
+      discountAmount: 2500,
+      paymentLinkId: `payment-link-${suffix}`,
+    });
+    created.users.push(secondUser._id);
+    created.payments.push(secondPayment._id);
+
+    let arrivals = 0;
+    let releaseGate;
+    const gate = new Promise((resolve) => {
+      releaseGate = resolve;
+    });
+    const synchronizer = createPaymentStatusSynchronizer({
+      async beforeTransactionWork({ payment: attemptPayment }) {
+        if (attemptPayment.status === "paid") return;
+        arrivals += 1;
+        if (arrivals === 2) releaseGate();
+        await gate;
+      },
+    });
+
+    const results = await Promise.allSettled([
+      synchronizer.applyPaidPayment(firstPayment, { amount: firstPayment.amount, status: "PAID" }, {}),
+      synchronizer.applyPaidPayment(secondPayment, { amount: secondPayment.amount, status: "PAID" }, {}),
+    ]);
+    const [storedCoupon, storedFirstPayment, storedSecondPayment, storedFirstUser, storedSecondUser, usages] = await Promise.all([
+      Coupon.findById(coupon._id),
+      Payment.findById(firstPayment._id),
+      Payment.findById(secondPayment._id),
+      User.findById(firstUser._id),
+      User.findById(secondUser._id),
+      CouponUsage.countDocuments({ coupon: coupon._id }),
+    ]);
+
+    assert.equal(results.filter((result) => result.status === "fulfilled").length, 1);
+    assert.equal(results.filter((result) => result.status === "rejected").length, 1);
+    assert.equal([storedFirstPayment, storedSecondPayment].filter((paymentDoc) => paymentDoc.status === "paid").length, 1);
+    assert.equal(storedCoupon.usageCount, 1);
+    assert.equal(usages, 1);
+    assert.equal(storedFirstUser.fileCredits + storedSecondUser.fileCredits, 5);
+  });
+
+  test("replica-set zero-total settlements enforce the per-user coupon limit", async () => {
+    const { coupon, payment: firstPayment, plan, user } = await createFixture({ withCoupon: true });
+    await Payment.updateOne({ _id: firstPayment._id }, { $set: { amount: 0 } });
+    const suffix = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const secondPayment = await Payment.create({
+      user: user._id,
+      plan: plan._id,
+      orderCode: Number(`${Date.now()}${Math.floor(Math.random() * 1000)}`.slice(-12)),
+      planCode: plan.code,
+      planName: plan.name,
+      amount: 0,
+      coupon: coupon._id,
+      couponApplied: true,
+      discountAmount: 10000,
+      paymentLinkId: `payment-link-${suffix}`,
+    });
+    created.payments.push(secondPayment._id);
+
+    let arrivals = 0;
+    let releaseGate;
+    const gate = new Promise((resolve) => {
+      releaseGate = resolve;
+    });
+    const synchronizer = createPaymentStatusSynchronizer({
+      async beforeTransactionWork({ payment: attemptPayment }) {
+        if (attemptPayment.status === "paid") return;
+        arrivals += 1;
+        if (arrivals === 2) releaseGate();
+        await gate;
+      },
+    });
+
+    const results = await Promise.allSettled([
+      synchronizer.applyPaidPayment(firstPayment, { amount: 0, status: "PAID" }, { freeCheckout: true }),
+      synchronizer.applyPaidPayment(secondPayment, { amount: 0, status: "PAID" }, { freeCheckout: true }),
+    ]);
+    const [storedCoupon, storedFirstPayment, storedSecondPayment, storedUser, usages] = await Promise.all([
+      Coupon.findById(coupon._id),
+      Payment.findById(firstPayment._id),
+      Payment.findById(secondPayment._id),
+      User.findById(user._id),
+      CouponUsage.countDocuments({ coupon: coupon._id }),
+    ]);
+
+    assert.equal(results.filter((result) => result.status === "fulfilled").length, 1);
+    assert.equal(results.filter((result) => result.status === "rejected").length, 1);
+    assert.equal([storedFirstPayment, storedSecondPayment].filter((paymentDoc) => paymentDoc.status === "paid").length, 1);
+    assert.equal(storedUser.fileCredits, 3);
+    assert.equal(storedCoupon.usageCount, 1);
+    assert.equal(usages, 1);
   });
 }

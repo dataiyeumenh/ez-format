@@ -49,3 +49,12 @@ Pre-existing failures: none.
 - Startup explicitly calls `CouponUsage.collection.createIndex` for the unique partial `{ payment: 1 }` index. A migration error leaves payment settlement not ready and causes configured PayOS startup to fail closed.
 - Local `npm run qa:main-contracts`: backend 62 total, 57 passed, 0 failed, 5 skipped; frontend payment contract 1 passed. The five skipped tests are the explicit real-Mongo replica-set suite because `PAYMENT_REPLICA_SET_TEST_URI` is not set.
 - Replica-set status is printed as `SKIPPED` or `EXECUTED` by `qa:main-contracts`. When all PayOS credentials are configured, a missing or non-test `PAYMENT_REPLICA_SET_TEST_URI` fails the gate before contracts run; the local non-PayOS baseline may skip with the reason shown above.
+
+## Task 3 Remaining Findings Closure (2026-07-30)
+
+- Non-paid and mismatched PayOS webhook paths now use `applyNonPaidPaymentStatus` inside the payment transaction. The stored payment is re-read and a `paid` row is never downgraded; a later paid retry cannot re-grant entitlement. Unit coverage: `paymentStatusSync.test.js` and `paymentWebhookTransition.test.js`.
+- Coupon settlement now reserves `usageCount` with a conditional `$expr` update, checks `limitPerUser` in the same transaction, then creates the unique payment usage. Paid and zero-total settlements share this path; duplicate payment snapshots remain idempotent.
+- Coupon coverage adds unit global/per-user limit regressions plus replica-set concurrent paid-global and zero-total-per-user tests. Local run: real replica-set URI unavailable, so 7 replica tests were explicitly skipped; no replica result is reported as passed.
+- Payment UI coupon editing clears `appliedCoupon`; rendered contract coverage now has 2 passing tests.
+- `REQUIRE_REPLICA_TESTS=1` is independent of PayOS secrets. `qa:release`, the `release-gate` CI job, and `qa:main-integration` contract invocation enforce the replica URI; local `qa:main-contracts` skips only when the release flag is absent.
+- Focused result: backend 20/20 pass; frontend payment contract 2/2 pass. Latest `npm run qa:main-contracts`: backend 63 pass, 0 fail, 7 explicit replica skips; frontend 2/2 pass. `npm run qa:main-integration`: backend 167 pass, 0 fail, 7 explicit replica skips; converter 329 pass; frontend 48 pass, lint pass, build pass.

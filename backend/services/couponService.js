@@ -264,6 +264,11 @@ async function validateCouponForCheckout({
 }
 
 async function recordCouponUsage({ couponId, userId, paymentId, discountAmount, session }) {
+  const existingUsage = paymentId
+    ? await CouponUsage.findOne({ payment: paymentId }, null, { session })
+    : null;
+  if (existingUsage) return { recorded: false };
+
   const usage = {
     coupon: couponId,
     user: userId,
@@ -271,20 +276,29 @@ async function recordCouponUsage({ couponId, userId, paymentId, discountAmount, 
     discountAmount: Number(discountAmount || 0),
   };
 
-  if (!paymentId) {
-    await CouponUsage.create({ ...usage, usedAt: new Date() }, { session });
-    await Coupon.findByIdAndUpdate(couponId, { $inc: { usageCount: 1 } }, { session });
-    return { recorded: true };
+  const coupon = await Coupon.findOneAndUpdate(
+    {
+      _id: couponId,
+      $expr: {
+        $lt: [{ $ifNull: ["$usageCount", 0] }, "$usageLimit"],
+      },
+    },
+    { $inc: { usageCount: 1 } },
+    { new: true, session },
+  );
+  if (!coupon) {
+    throw new Error("Mã giảm giá đã hết lượt sử dụng");
   }
 
-  const result = await CouponUsage.updateOne(
-    { payment: paymentId },
-    { $setOnInsert: usage },
-    { upsert: true, session },
+  const userUses = await CouponUsage.countDocuments(
+    { coupon: couponId, user: userId },
+    { session },
   );
-  if (result.upsertedCount !== 1) return { recorded: false };
+  if (userUses >= Number(coupon.limitPerUser || 1)) {
+    throw new Error("Bạn đã dùng hết số lần cho phép của mã này");
+  }
 
-  await Coupon.findByIdAndUpdate(couponId, { $inc: { usageCount: 1 } }, { session });
+  await CouponUsage.create([{ ...usage, usedAt: new Date() }], { session });
   return { recorded: true };
 }
 

@@ -71,3 +71,26 @@ test("payment UI applies a coupon then sends it when creating payment", async ()
     });
   });
 });
+
+test("editing an applied coupon clears the applied discount before payment", async () => {
+  apiPost.mockResolvedValueOnce({
+    data: {
+      coupon: { code: "SAVE10", description: "Ten percent", discountPercent: 10 },
+      discountAmount: 1000,
+      finalAmount: 9000,
+      originalAmount: 10000,
+    },
+  });
+  const user = userEvent.setup();
+
+  render(createElement(PaymentPage));
+  const input = screen.getByPlaceholderText("Nhập mã coupon");
+  await user.type(input, "save10");
+  await user.click(screen.getByRole("button", { name: "Áp dụng" }));
+  await waitFor(() => expect(screen.getByRole("button", { name: "Gỡ" })).toBeTruthy());
+
+  await user.clear(input);
+
+  expect(screen.queryByRole("button", { name: "Gỡ" })).toBeNull();
+  expect(screen.getByRole("button", { name: "Áp dụng" })).toBeTruthy();
+});

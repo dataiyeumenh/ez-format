@@ -222,6 +222,7 @@ const PaymentPage = () => {
                       value={couponInput}
                       onChange={(event) => {
                         setCouponInput(event.target.value.toUpperCase());
+                        if (appliedCoupon) setAppliedCoupon(null);
                         setCouponError("");
                       }}
                       placeholder="Nhập mã coupon"
