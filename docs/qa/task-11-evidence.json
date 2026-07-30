@@ -1,0 +1,204 @@
+{
+  "schema_version": "1.0",
+  "subject": {
+    "revision": "9c27805a0df3d64c9cdd32887bfe3456d275584a",
+    "scope": "Task 11 merged main-first integration release QA; code matrix, release gate, conflict and storage scans",
+    "exclusions": [
+      "No live replica MongoDB execution",
+      "No live MongoDB/GridFS round-trip",
+      "No live gateway UI/API execution",
+      "No production deployment or merge into main"
+    ]
+  },
+  "environment": {
+    "os": "Windows",
+    "runtime": "PowerShell 7.6.4",
+    "configuration": "LocalIncomplete mode; mandatory external evidence variables unset",
+    "dependencies": [
+      {
+        "name": "node",
+        "version": "20.19.6"
+      },
+      {
+        "name": "python",
+        "version": "3.12.10"
+      },
+      {
+        "name": "npm",
+        "version": "10.8.2"
+      },
+      {
+        "name": "pwsh",
+        "version": "7.6.4"
+      }
+    ]
+  },
+  "oracles": [
+    {
+      "id": "O-ORIGIN",
+      "description": "The evaluated integration revision must record refreshed origin/main, merge-tree conflicts, and reconciliation evidence.",
+      "source": "docs/superpowers/plans/2026-07-30-main-experimental-production-integration.md Task 11",
+      "authoritative": true
+    },
+    {
+      "id": "O-LOCAL-MATRIX",
+      "description": "Backend, converter, frontend, Playwright, QA, and static scans must run without executable failures.",
+      "source": "docs/superpowers/plans/2026-07-30-main-experimental-production-integration.md Task 11 steps 2-6",
+      "authoritative": true
+    },
+    {
+      "id": "O-RELEASE-GATE",
+      "description": "Release mode must fail closed when replica MongoDB, real GridFS, or live gateway evidence is missing.",
+      "source": "scripts/qa-main-integration.ps1 and scripts/qa-main-integration-status.ps1",
+      "authoritative": true
+    }
+  ],
+  "risks": [
+    {
+      "id": "R-REPLICA",
+      "description": "Transactional payment and coupon behavior remains unverified without a disposable replica-set MongoDB URI.",
+      "severity": 5,
+      "likelihood": 4,
+      "detectability": 3,
+      "score": 60,
+      "disposition": "UNMITIGATED"
+    },
+    {
+      "id": "R-GRIDFS",
+      "description": "Artifact byte round-trip and cleanup remain unverified against real MongoDB/GridFS.",
+      "severity": 5,
+      "likelihood": 3,
+      "detectability": 3,
+      "score": 45,
+      "disposition": "UNMITIGATED"
+    },
+    {
+      "id": "R-LIVE",
+      "description": "Live browser and gateway API contracts remain unverified without release-scoped URLs and credentials.",
+      "severity": 5,
+      "likelihood": 4,
+      "detectability": 3,
+      "score": 60,
+      "disposition": "UNMITIGATED"
+    }
+  ],
+  "no_risks_rationale": null,
+  "traceability": [
+    {
+      "target_id": "O-ORIGIN",
+      "evidence_ids": [
+        "C-MERGE"
+      ],
+      "gap": ""
+    },
+    {
+      "target_id": "O-LOCAL-MATRIX",
+      "evidence_ids": [
+        "C-LOCAL"
+      ],
+      "gap": ""
+    },
+    {
+      "target_id": "O-RELEASE-GATE",
+      "evidence_ids": [
+        "C-RELEASE"
+      ],
+      "gap": ""
+    },
+    {
+      "target_id": "R-REPLICA",
+      "evidence_ids": [],
+      "gap": "PAYMENT_REPLICA_SET_TEST_URI is not set; nine replica payment tests skipped."
+    },
+    {
+      "target_id": "R-GRIDFS",
+      "evidence_ids": [],
+      "gap": "GRIDFS_INTEGRATION_TEST_URI is not set; real GridFS round-trip skipped."
+    },
+    {
+      "target_id": "R-LIVE",
+      "evidence_ids": [],
+      "gap": "QA_EXPECT_LIVE=true and required live gateway inputs are not set."
+    }
+  ],
+  "checks": [
+    {
+      "id": "C-LOCAL",
+      "kind": "executable",
+      "required": true,
+      "started_at": "2026-07-30T20:53:03+07:00",
+      "ended_at": "2026-07-30T20:56:58+07:00",
+      "command": "npm run qa:main-integration:local-incomplete",
+      "exit_code": 0,
+      "status": "PASS",
+      "evidence": [
+        {
+          "path": "qa/task11-local-incomplete-20260730-v2.log",
+          "sha256": "4143d2459bea28f3b9519f48ae1b153a6c815c533646aa60f0ae98ffebd96a87",
+          "size": 134701
+        }
+      ]
+    },
+    {
+      "id": "C-RELEASE",
+      "kind": "release-gate",
+      "required": true,
+      "started_at": "2026-07-30T21:08:00+07:00",
+      "ended_at": "2026-07-30T21:08:02+07:00",
+      "command": "pwsh -NoProfile -File scripts/qa-main-integration.ps1 -Mode Release",
+      "exit_code": 2,
+      "status": "BLOCKED",
+      "reason": "RELEASE_BLOCKED: replica_mongo, gridfs, and live_gateway evidence are missing.",
+      "evidence": [
+        {
+          "path": "qa/task11-release-preflight-final.log",
+          "sha256": "4af435fefc207343f2d5ff39d49020ca9af7faa806bb15e5b6ab61379b792106",
+          "size": 709
+        }
+      ]
+    },
+    {
+      "id": "C-CONTRACT",
+      "kind": "executable",
+      "required": true,
+      "started_at": "2026-07-30T21:08:04+07:00",
+      "ended_at": "2026-07-30T21:08:08+07:00",
+      "command": "node --test tests/mainIntegrationReleaseGate.test.js tests/releaseReplicaGate.test.js",
+      "exit_code": 0,
+      "status": "PASS",
+      "evidence": [
+        {
+          "path": "qa/task11-release-contract-final.log",
+          "sha256": "fcc0b2db0d82dbed8b068198a018e2b6f96ce09ad17e928629155651a956c795",
+          "size": 1079
+        }
+      ]
+    },
+    {
+      "id": "C-MERGE",
+      "kind": "review",
+      "required": true,
+      "started_at": "2026-07-30T20:57:00+07:00",
+      "ended_at": "2026-07-30T20:57:10+07:00",
+      "procedure": "Review merge-tree conflict output and origin delta before evaluating the merged integration revision.",
+      "exit_code": 0,
+      "status": "INCONCLUSIVE",
+      "reason": "Origin moved from the plan base and the merge-tree identified three known conflicts; conflicts were resolved in the normal merge before QA.",
+      "evidence": [
+        {
+          "path": "task11-review-pre-merge/merge-tree-origin-main.txt",
+          "sha256": "70ac9005e8b22bb2f2e5396b4b5a3d95e2c1cdb9a93432addcd2a0fceb4be3b9",
+          "size": 2464
+        }
+      ]
+    }
+  ],
+  "defects": [],
+  "residual_risks": [],
+  "evidence_valid_until": null,
+  "verdict": "INCOMPLETE",
+  "verdict_reasons": [
+    "Release prerequisites are absent: replica MongoDB, real GridFS, and live gateway evidence.",
+    "Local code matrix passed, but skipped external gates cannot be converted to PASS."
+  ]
+}

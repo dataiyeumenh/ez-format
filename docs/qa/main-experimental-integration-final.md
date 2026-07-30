@@ -32,7 +32,7 @@ refs/heads/rollback/main-pre-task11-reconcile-20260730-203721 at 2250102293021a5
 
 ## Release Gate Modes
 
-- npm run qa:main-integration: exit 1. Machine status: RELEASE_BLOCKED; missing replica_mongo, gridfs, live_gateway.
+- npm run qa:main-integration: exit 2. Machine status: RELEASE_BLOCKED; missing replica_mongo, gridfs, live_gateway.
 - npm run qa:main-integration:local-incomplete: exit 0. Machine status: LOCAL_INCOMPLETE; runs the local code matrix only and cannot certify release.
 - npm run qa:main-integration:local-incomplete sets REQUIRE_REPLICA_TESTS off only for explicit local skip reporting. Release mode fails before the matrix when mandatory evidence is missing.
 
@@ -62,6 +62,12 @@ Final local-incomplete run completed after the release-gate and stale-contract f
 - Playwright live suites require QA_EXPECT_LIVE=true, QA_FRONTEND_URL, QA_GATEWAY_URL, QA_CONVERTER_URL, owner credentials/JWT, release ID, and an existing QA_RAW_FIXTURE.
 - No real replica MongoDB, real GridFS round-trip, live gateway UI journey, or live gateway API journey ran. These are release blockers, not PASS results.
 - No S3, R2, MinIO, or other object-storage provider was introduced; the scanned storage contract remains MongoDB/GridFS.
+
+## Evidence Validation
+
+- Machine-readable evidence: docs/qa/task-11-evidence.json.
+- Validator: pwsh $HOME/.agents/skills/extreme-qa-qc/scripts/qa-evidence.ps1 validate docs/qa/task-11-evidence.json --root .artifacts --json.
+- Validator result: exit 0, status PASS, verdict INCOMPLETE.
 
 ## Task 11 Ownership
 

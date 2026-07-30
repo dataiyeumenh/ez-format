@@ -314,6 +314,6 @@
 - **Scope:** qa:fast generated summary plus full main-integration local-incomplete matrix.
 - **Code matrix:** backend 407 tests (395 passed, 0 failed, 12 skipped); converter 550 passed, 2 skipped, 1 warning; frontend 109 passed; lint/build exit 0; Playwright MISA 8 passed.
 - **Explicit skips:** 9 replica payment tests (PAYMENT_REPLICA_SET_TEST_URI absent), 1 GridFS integration test (GRIDFS_INTEGRATION_TEST_URI absent), 2 real-Mongo MISA tests (MISA_IMPORT_REPAIR_TEST_MONGO_URI and MONGO_URI absent), 3 live gateway tests (QA_EXPECT_LIVE=true and live inputs absent), plus 2 converter skips documented in the Task 11 receipt.
-- **Release gate:** RELEASE_BLOCKED; npm run qa:main-integration exit 1 because replica_mongo, gridfs, and live_gateway evidence are missing.
+- **Release gate:** RELEASE_BLOCKED; npm run qa:main-integration exit 2 because replica_mongo, gridfs, and live_gateway evidence are missing.
 - **Scans:** conflict markers, frontend production URLs, forbidden object-storage providers clean; no S3.
 - **Evidence revision:** 9c27805a0df3d64c9cdd32887bfe3456d275584a.

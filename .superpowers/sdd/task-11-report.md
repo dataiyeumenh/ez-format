@@ -23,7 +23,7 @@ INCOMPLETE. Full local code QA passed with zero failures. Release is not certifi
 
 ## Machine Gate
 
-- Release command: npm run qa:main-integration, exit 1, status RELEASE_BLOCKED, missing replica_mongo, gridfs, live_gateway.
+- Release command: npm run qa:main-integration, exit 2, status RELEASE_BLOCKED, missing replica_mongo, gridfs, live_gateway.
 - Local command: npm run qa:main-integration:local-incomplete, exit 0, status LOCAL_INCOMPLETE.
 - The release gate is fail-closed. The local mode is explicitly non-release.
 
@@ -37,6 +37,7 @@ INCOMPLETE. Full local code QA passed with zero failures. Release is not certifi
 - npm run qa:fast: 9/9 steps passed.
 - Conflict, frontend production URL, and forbidden object-storage scans: clean.
 - No test/process exceeded the 10-minute stop limit.
+- Machine-readable evidence docs/qa/task-11-evidence.json validated with qa-evidence.ps1: exit 0, status PASS, verdict INCOMPLETE.
 
 ## Skip Reasons
 
