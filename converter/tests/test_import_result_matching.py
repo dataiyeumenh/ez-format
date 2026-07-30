@@ -47,6 +47,42 @@ def test_duplicate_business_key_is_ambiguous():
     assert all(candidate.document_group_id == manifest.rows[0].document_group_id for candidate in result.candidates)
 
 
+def test_invoice_symbol_disambiguates_same_supplier_and_invoice_number():
+    manifest = _manifest(
+        output_rows=[
+            {
+                "Số chứng từ (*)": "BH0001",
+                "Mã khách hàng": "KH01",
+                "Số hóa đơn": "000123",
+                "Ký hiệu HĐ": "AA/26E",
+            },
+            {
+                "Số chứng từ (*)": "BH0002",
+                "Mã khách hàng": "KH01",
+                "Số hóa đơn": "000123",
+                "Ký hiệu HĐ": "BB/26E",
+            },
+        ]
+    )
+
+    result = suggest_issue_matches(
+        _issue({
+            "invoice_number": "000123",
+            "invoice_symbol": "BB/26E",
+            "partner_code": "KH01",
+        }),
+        manifest,
+    )
+
+    assert result.status == "suggested"
+    assert result.candidates[0].document_group_id == manifest.rows[1].document_group_id
+    assert result.candidates[0].matched_fields == [
+        "invoice_number",
+        "invoice_symbol",
+        "partner_code",
+    ]
+
+
 def test_unique_fingerprint_is_still_only_suggested_in_phase_one():
     manifest = _manifest(output_rows=[{"Số chứng từ (*)": "BH0001", "Mã hàng (*)": "HH01"}])
     issue = _issue({"line_fingerprint": manifest.rows[0].line_fingerprint})
@@ -98,6 +134,7 @@ def test_exact_business_key_preserves_leading_zeroes_and_returns_minimal_evidenc
     assert result.candidates[0].locator == {
         "document_number": "0007",
         "invoice_number": None,
+        "invoice_symbol": None,
         "document_date": None,
         "invoice_date": None,
         "partner_code": None,

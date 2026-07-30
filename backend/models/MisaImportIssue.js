@@ -10,6 +10,7 @@ const normalizedLocatorSchema = new mongoose.Schema(
     sourceRowNumber: { type: Number, min: 1, default: null },
     documentNumber: { type: String, trim: true, default: "" },
     invoiceNumber: { type: String, trim: true, default: "" },
+    invoiceSymbol: { type: String, trim: true, default: "" },
     documentDate: { type: String, trim: true, default: "" },
     partnerCode: { type: String, trim: true, default: "" },
     itemCode: { type: String, trim: true, default: "" },

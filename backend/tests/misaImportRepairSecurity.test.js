@@ -1,5 +1,6 @@
 const assert = require("node:assert/strict");
 const crypto = require("node:crypto");
+const { PassThrough, Readable } = require("node:stream");
 const test = require("node:test");
 const mongoose = require("mongoose");
 
@@ -368,6 +369,8 @@ test("retry artifact download rejects metadata from another workspace", async ()
     expiresAt: new Date(Date.now() + 60_000),
     version: 1,
   };
+  const retryBytes = Buffer.from("private-retry");
+  const retrySha256 = crypto.createHash("sha256").update(retryBytes).digest("hex");
   const service = createMisaImportRepairService({
     RepairSession: { findOne: async () => repair },
     Workspace: {
@@ -394,20 +397,29 @@ test("retry artifact download rejects metadata from another workspace", async ()
         status: "completed",
         readinessSummary: { sequence: 1 },
         outputArtifactKey: "retry-key",
-        outputSha256: "b".repeat(64),
+        outputSha256: retrySha256,
       }),
     },
     artifacts: {
-      getArtifact: async () => ({
+      getArtifact: async (input) => ({
         metadata: {
-          storageKey: "retry-key",
-          sha256: "b".repeat(64),
+          gridFsObjectId: "retry-key",
+          sha256: retrySha256,
+          sizeBytes: retryBytes.length,
           userId: String(userId),
           workspaceId: String(wrongWorkspaceId),
           ownerScope: `workspace:${workspaceId}`,
-          contentType: "application/vnd.ms-excel",
+          runId: String(runId),
+          sessionId: String(repairId),
+          uploadId: "upload-1",
+          targetTemplateId: "bsn_sales",
+          kind: "retry_output",
+          revision: input.revision,
+          mime: "application/vnd.ms-excel",
+          status: "available",
+          expiresAt: new Date(Date.now() + 60_000),
         },
-        content: Buffer.from("private-retry"),
+        content: Readable.from([retryBytes]),
       }),
     },
     now: () => new Date(),
@@ -577,6 +589,41 @@ function responseRecorder() {
     setHeader(name, value) { this.headers[name.toLowerCase()] = value; },
   };
 }
+
+test("retry download pipelines the verified artifact stream to the response", async () => {
+  const previous = process.env.MISA_IMPORT_REPAIR_ENABLED;
+  process.env.MISA_IMPORT_REPAIR_ENABLED = "true";
+  const repairService = require("../services/misaImportRepairService");
+  const originalDownload = repairService.downloadRetryBatch;
+  repairService.downloadRetryBatch = async () => ({
+    content: Readable.from([Buffer.from("retry-"), Buffer.from("workbook")]),
+    contentType: "application/vnd.ms-excel",
+    filename: "retry.xls",
+    batch: { _id: "batch-1" },
+  });
+  const response = new PassThrough();
+  const headers = {};
+  response.status = (code) => { response.statusCode = code; return response; };
+  response.setHeader = (name, value) => { headers[name.toLowerCase()] = value; };
+  response.json = (body) => { response.errorBody = body; return response; };
+  const chunks = [];
+  response.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
+  try {
+    const controller = require("../controllers/misaImportRepairController");
+    await controller.downloadMisaImportRetryBatch({
+      user: { _id: "user-1" },
+      params: { repairId: "repair-1", batchId: "batch-1" },
+      requestId: "download-stream",
+    }, response);
+    assert.equal(Buffer.concat(chunks).toString(), "retry-workbook");
+    assert.equal(headers["content-type"], "application/vnd.ms-excel");
+    assert.equal(response.errorBody, undefined);
+  } finally {
+    repairService.downloadRetryBatch = originalDownload;
+    if (previous === undefined) delete process.env.MISA_IMPORT_REPAIR_ENABLED;
+    else process.env.MISA_IMPORT_REPAIR_ENABLED = previous;
+  }
+});
 
 test("disabled repair capability rejects create and retry consistently", async () => {
   const previous = process.env.MISA_IMPORT_REPAIR_ENABLED;

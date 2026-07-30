@@ -2,6 +2,7 @@ const assert = require("node:assert/strict");
 const crypto = require("node:crypto");
 const http = require("node:http");
 const jwt = require("jsonwebtoken");
+const { Readable } = require("node:stream");
 const test = require("node:test");
 const mongoose = require("mongoose");
 
@@ -13,6 +14,35 @@ const RUN_ID = "507f1f77bcf86cd799439011";
 const SESSION_ID = "507f1f77bcf86cd799439012";
 const ISSUE_ID = "507f1f77bcf86cd799439013";
 const BATCH_ID = "507f1f77bcf86cd799439014";
+
+function contentSha256(content) {
+  return crypto.createHash("sha256").update(content).digest("hex");
+}
+
+function storedArtifact(input, key, content, mime = "application/octet-stream", overrides = {}) {
+  const bytes = Buffer.from(content);
+  return {
+    metadata: {
+      gridFsObjectId: key,
+      ownerScope: input.ownerScope,
+      userId: String(input.userId),
+      workspaceId: input.workspaceId ?? null,
+      runId: input.runId,
+      sessionId: input.sessionId,
+      uploadId: input.uploadId,
+      targetTemplateId: input.targetTemplateId,
+      kind: input.kind,
+      revision: input.revision,
+      sha256: contentSha256(bytes),
+      sizeBytes: bytes.length,
+      mime,
+      status: "available",
+      expiresAt: new Date(Date.now() + 60_000),
+      ...overrides,
+    },
+    content: Readable.from([bytes]),
+  };
+}
 
 function validAnalyzePayload(overrides = {}) {
   return {
@@ -86,19 +116,17 @@ function fakeCreateDependencies({
   const manifest = repairManifest();
   const manifestBytes = Buffer.from(JSON.stringify(manifest));
   const artifacts = {
-    async getArtifact({ kind }) {
-      if (kind === "manifest") return {
-        metadata: { storageKey: "manifest-key", sha256: require("crypto").createHash("sha256").update(manifestBytes).digest("hex") },
-        content: manifestBytes,
-      };
-      if (kind === "import_result") {
-        return { metadata: { storageKey: "import-key", sha256: "e".repeat(64), contentType: "application/vnd.ms-excel" }, content: Buffer.from("secret-workbook") };
+    async getArtifact(input) {
+      if (input.kind === "manifest") return storedArtifact(input, "manifest-key", manifestBytes, "application/json");
+      if (input.kind === "import_result") {
+        return storedArtifact(input, "import-key", "secret-workbook", "application/vnd.ms-excel");
       }
-      return { metadata: { storageKey: "output-key", sha256: "d".repeat(64) }, content: Buffer.from("output") };
+      return storedArtifact(input, "output-key", "output", "application/vnd.ms-excel");
     },
     async putArtifact(input) {
       putCalls.push(input);
-      return { storageKey: "import-key", sha256: "e".repeat(64) };
+      const bytes = Buffer.from(input.bytes || input.content);
+      return storedArtifact(input, "import-key", bytes, input.mime).metadata;
     },
     async deleteArtifact() {},
   };
@@ -111,10 +139,10 @@ function fakeCreateDependencies({
         user: "user-1",
         status: "completed",
         exportArtifactKey: "output-key",
-        outputSha256: "d".repeat(64),
+        outputSha256: contentSha256(Buffer.from("output")),
         manifestSchemaVersion: 1,
         manifestArtifactKey: "manifest-key",
-        manifestSha256: artifacts.getArtifact ? require("crypto").createHash("sha256").update(manifestBytes).digest("hex") : "",
+        manifestSha256: contentSha256(manifestBytes),
         operationSessionId: "operation-1",
         converterUploadId: "upload-1",
         targetTemplateId: "bsn_sales",
@@ -132,7 +160,7 @@ function fakeCreateDependencies({
 }
 
 function fakeSchemaDependencies({
-  artifactMetadata = { storageKey: "import-key", sha256: "e".repeat(64), contentType: "application/vnd.ms-excel" },
+  artifactMetadata = {},
   casSucceeds = true,
   normalizeData = {
     issues: [{
@@ -156,7 +184,7 @@ function fakeSchemaDependencies({
     ownerScope: "user:user-1",
     conversionRun: RUN_ID,
     errorArtifactKey: "import-key",
-    errorSha256: "e".repeat(64),
+    errorSha256: contentSha256(Buffer.from("secret-workbook")),
     status: "needs_schema_mapping",
     version: 1,
     expiresAt: new Date(Date.now() + 60_000),
@@ -202,7 +230,13 @@ function fakeSchemaDependencies({
   const originalGetArtifact = create.deps.artifacts.getArtifact;
   create.deps.artifacts.getArtifact = async (input) => {
     if (input.kind === "import_result") {
-      return { metadata: artifactMetadata, content: Buffer.from("secret-workbook") };
+      return storedArtifact(
+        input,
+        "import-key",
+        "secret-workbook",
+        "application/vnd.ms-excel",
+        artifactMetadata,
+      );
     }
     return originalGetArtifact(input);
   };
@@ -239,7 +273,7 @@ function fakeRetryHttpDependencies({ finalSessionUpdateError = null } = {}) {
     templateHash: "a".repeat(64),
     rawFileHash: "b".repeat(64),
     manifestArtifactKey: "manifest-key",
-    manifestSha256: "f".repeat(64),
+    manifestSha256: contentSha256(manifestBytes),
     activeSchemaGenerationId: "generation-1",
     status: "ready_for_repair",
     version: 8,
@@ -337,10 +371,10 @@ function fakeRetryHttpDependencies({ finalSessionUpdateError = null } = {}) {
   const artifacts = {
     async getArtifact(input) {
       if (input.kind === "manifest") {
-        return { metadata: { storageKey: "manifest-key", sha256: "f".repeat(64) }, content: manifestBytes };
+        return storedArtifact(input, "manifest-key", manifestBytes, "application/json");
       }
       if (input.kind === "output") {
-        return { metadata: { storageKey: "output-key", sha256: "9".repeat(64) }, content: Buffer.from("output") };
+        return storedArtifact(input, "output-key", "output", "application/vnd.ms-excel");
       }
       if (input.kind === "retry_output") {
         const stored = retryArtifacts.get(input.revision);
@@ -349,15 +383,20 @@ function fakeRetryHttpDependencies({ finalSessionUpdateError = null } = {}) {
           error.statusCode = 404;
           throw error;
         }
-        return stored;
+        return { metadata: stored.metadata, content: Readable.from([stored.bytes]) };
       }
       throw new Error(`unexpected artifact kind ${input.kind}`);
     },
     async putArtifact(input) {
-      const sha = crypto.createHash("sha256").update(input.content).digest("hex");
+      const bytes = Buffer.from(input.bytes || input.content);
       const stored = {
-        metadata: { storageKey: `retry-key-${input.revision}`, sha256: sha, contentType: input.contentType },
-        content: Buffer.from(input.content),
+        metadata: storedArtifact(
+          input,
+          `retry-key-${input.revision}`,
+          bytes,
+          input.mime,
+        ).metadata,
+        bytes,
       };
       retryArtifacts.set(input.revision, stored);
       return stored.metadata;
@@ -379,10 +418,10 @@ function fakeRetryHttpDependencies({ finalSessionUpdateError = null } = {}) {
         workspace: null,
         status: "completed",
         exportArtifactKey: "output-key",
-        outputSha256: "9".repeat(64),
+        outputSha256: contentSha256(Buffer.from("output")),
         manifestSchemaVersion: 1,
         manifestArtifactKey: "manifest-key",
-        manifestSha256: "f".repeat(64),
+        manifestSha256: contentSha256(manifestBytes),
         manifestRawFileSha256: "b".repeat(64),
         manifestMappingProfileId: "profile-1",
         manifestMappingProfileVersion: 1,
@@ -989,8 +1028,8 @@ test("repair create rejects malformed successful analyze payload and removes art
 test("schema submit rejects exact import artifact key or checksum mismatch", async () => {
   const { createMisaImportRepairService } = require("../services/misaImportRepairService");
   for (const metadata of [
-    { storageKey: "other-key", sha256: "e".repeat(64), contentType: "application/vnd.ms-excel" },
-    { storageKey: "import-key", sha256: "f".repeat(64), contentType: "application/vnd.ms-excel" },
+    { gridFsObjectId: "other-key" },
+    { sha256: "f".repeat(64) },
   ]) {
     const fake = fakeSchemaDependencies({ artifactMetadata: metadata });
     await assert.rejects(
@@ -1031,6 +1070,31 @@ test("schema submit rejects malformed successful normalize payload without persi
       (error) => error.statusCode === 502 && error.code === "INVALID_CONVERTER_RESPONSE",
     );
     assert.equal(fake.sessionUpdates.length, 0);
+    assert.equal(fake.issueDocuments.length, 0);
+  }
+});
+
+test("schema submit rejects unknown or nested converter column roles", async () => {
+  const { createMisaImportRepairService } = require("../services/misaImportRepairService");
+  for (const columns of [
+    { technical_message: "Message", unexpected_role: "Hidden" },
+    { technical_message: "Message", invoice_symbol: { header: "Ký hiệu HĐ" } },
+  ]) {
+    const fake = fakeSchemaDependencies();
+    await assert.rejects(
+      createMisaImportRepairService(fake.deps).submitSchema({
+        userId: "user-1",
+        repairId: SESSION_ID,
+        body: {
+          expected_version: 1,
+          sheet_name: "Sheet1",
+          header_row: 1,
+          columns,
+        },
+        requestId: "schema-role-validation",
+      }),
+      (error) => error.statusCode === 422 && error.code === "INVALID_SCHEMA_MAPPING",
+    );
     assert.equal(fake.issueDocuments.length, 0);
   }
 });
@@ -1374,7 +1438,7 @@ test("unmatched issue accepts a token-bound manual group from the trusted manife
     workspace: null,
     status: "completed",
     exportArtifactKey: "output-key",
-    outputSha256: "d".repeat(64),
+    outputSha256: contentSha256(Buffer.from("output")),
     manifestArtifactKey: "manifest-key",
     manifestSha256,
     manifestSchemaVersion: 1,
@@ -1407,9 +1471,9 @@ test("unmatched issue accepts a token-bound manual group from the trusted manife
       },
     },
     artifacts: {
-      async getArtifact({ kind }) {
-        if (kind === "manifest") return { metadata: { storageKey: "manifest-key", sha256: manifestSha256 }, content: manifestBytes };
-        return { metadata: { storageKey: "output-key", sha256: "d".repeat(64) }, content: Buffer.from("output") };
+      async getArtifact(input) {
+        if (input.kind === "manifest") return storedArtifact(input, "manifest-key", manifestBytes, "application/json");
+        return storedArtifact(input, "output-key", "output", "application/vnd.ms-excel");
       },
     },
     createToken: () => "signed-context",

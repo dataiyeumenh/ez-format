@@ -11,6 +11,7 @@ const groupEvidenceText = (group) => {
   const parts = [];
   if (evidence.documentNumber) parts.push(`Số CT ${evidence.documentNumber}`);
   if (evidence.invoiceNumber) parts.push(`Hóa đơn ${evidence.invoiceNumber}`);
+  if (evidence.invoiceSymbol) parts.push(`Ký hiệu ${evidence.invoiceSymbol}`);
   if (evidence.documentDate) parts.push(`Ngày ${evidence.documentDate}`);
   if (evidence.partnerCode) parts.push(`Đối tượng ${evidence.partnerCode}`);
   if (Number(evidence.lineCount) > 0) parts.push(`${evidence.lineCount} dòng`);

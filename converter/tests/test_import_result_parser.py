@@ -127,6 +127,29 @@ def test_normalizer_preserves_user_selected_values_without_matching_or_repairing
     assert issues[0].retry_blocked is True
 
 
+def test_normalizer_preserves_invoice_symbol_for_document_identity():
+    content = build_import_result_xlsx(
+        headers=["Message", "So hoa don", "Ky hieu HD", "Ma NCC"],
+        rows=[["Rejected", "000123", "AA/26E", "NCC01"]],
+    )
+
+    issues = normalize_import_result(
+        content,
+        {
+            "sheet_name": "Import result",
+            "header_row": 1,
+            "columns": {
+                "technical_message": "Message",
+                "invoice_number": "So hoa don",
+                "invoice_symbol": "Ky hieu HD",
+                "partner_code": "Ma NCC",
+            },
+        },
+    )
+
+    assert issues[0].locator["invoice_symbol"] == "AA/26E"
+
+
 def test_normalizer_bounds_oversized_technical_message():
     content = build_import_result_xlsx(
         headers=["Message"],

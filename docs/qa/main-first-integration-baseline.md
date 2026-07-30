@@ -58,3 +58,10 @@ Pre-existing failures: none.
 - Payment UI coupon editing clears `appliedCoupon`; rendered contract coverage now has 2 passing tests.
 - `REQUIRE_REPLICA_TESTS=1` is independent of PayOS secrets. Only `qa:release` and the `release-gate` CI job enforce the replica URI; `qa:main-integration` is non-release local/full QA and may report explicit replica skips. Local `qa:main-contracts` skips when the release flag is absent.
 - Focused result: backend 20/20 pass; frontend payment contract 2/2 pass. Latest `npm run qa:main-contracts`: backend 64 pass, 0 fail, 9 explicit replica skips; frontend 2/2 pass. `qa:main-integration` remains the non-release local/full QA flow.
+
+## Task 8 Review Findings Closure (2026-07-30)
+
+- Backend focused command (`misaImportRepairGateway`, models, security, retry, and conversion artifacts): 124 total, 121 passed, 0 failed, 3 explicit Mongo-dependent skips.
+- Frontend utility/contract command (`importRepairUx` and `converterGatewayContract`): 14 passed, 0 failed, 0 skipped.
+- Converter focused command: 76 total, 66 passed, 1 skipped, 9 expected integration failures. The failures are two missing internal repair exports plus seven import-result endpoint/parse-slot checks because `converter/app/main.py` composition is owned by Task 9 and is intentionally unchanged in Task 8.
+- Task 8 converter unit coverage for manifest identity, import-result matching, and parser normalization: 46 passed, 1 Task 9 composition-dependent endpoint test skipped.

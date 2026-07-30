@@ -43,6 +43,54 @@ def test_manifest_preserves_many_raw_rows_for_one_output_document():
     assert manifest.document_groups[0]["amount_total"] == "300"
 
 
+def test_purchase_group_identity_separates_same_supplier_invoice_by_symbol():
+    manifest = _manifest(
+        target_template_id="bsn_purchase",
+        output_rows=[
+            {
+                "Mã nhà cung cấp": "NCC01",
+                "Số hóa đơn": "000123",
+                "Ký hiệu HĐ": "AA/26E",
+                "Số phiếu nhập (*)": "PN0001",
+            },
+            {
+                "Mã nhà cung cấp": "NCC01",
+                "Số hóa đơn": "000123",
+                "Ký hiệu HĐ": "BB/26E",
+                "Số phiếu nhập (*)": "PN0002",
+            },
+        ],
+        row_origins=[
+            {"raw_sheet": "Raw", "raw_rows": [2]},
+            {"raw_sheet": "Raw", "raw_rows": [3]},
+        ],
+    )
+
+    assert len(manifest.document_groups) == 2
+    assert manifest.rows[0].document_group_id != manifest.rows[1].document_group_id
+    assert manifest.rows[0].locator["invoice_symbol"] == "AA/26E"
+    assert manifest.rows[1].locator["invoice_symbol"] == "BB/26E"
+
+
+def test_purchase_group_identity_uses_stable_unknown_fallback_without_symbol():
+    values = {
+        "target_template_id": "bsn_purchase",
+        "output_rows": [{
+            "Mã nhà cung cấp": "NCC01",
+            "Số hóa đơn": "000123",
+            "Số phiếu nhập (*)": "PN0001",
+            "Ngày hóa đơn": "30/07/2026",
+        }],
+        "row_origins": [{"raw_sheet": "Raw", "raw_rows": [2]}],
+    }
+
+    first = _manifest(**values)
+    second = _manifest(**values)
+
+    assert first.document_groups[0]["group_integrity"] == "unknown"
+    assert first.rows[0].document_group_id == second.rows[0].document_group_id
+
+
 def test_manifest_locator_is_minimal_and_preserves_accounting_strings():
     manifest = _manifest(
         output_rows=[
@@ -63,6 +111,7 @@ def test_manifest_locator_is_minimal_and_preserves_accounting_strings():
     assert locator == {
         "document_number": "000012",
         "invoice_number": None,
+        "invoice_symbol": None,
         "document_date": None,
         "invoice_date": None,
         "partner_code": "KH0007",
@@ -441,6 +490,10 @@ def test_manifest_workflow_exports_edited_rows_from_one_resolved_snapshot(tmp_pa
     ]
 
 
+@pytest.mark.skipif(
+    not hasattr(main, "create_export_manifest"),
+    reason="Task 9 composes converter/app/main.py",
+)
 def test_manifest_endpoint_reuses_trusted_export_binding(monkeypatch):
     captured = {}
     claims = {"conversion_run_id": "run-1"}

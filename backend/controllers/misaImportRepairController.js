@@ -400,8 +400,14 @@ async function downloadMisaImportRetryBatch(req, res) {
     setAuditMetrics(res, { retryBatchId: result.batch?._id });
     res.setHeader("Content-Type", result.contentType);
     res.setHeader("Content-Disposition", `attachment; filename="${result.filename}"`);
-    return res.status(200).send(result.content);
+    res.status(200);
+    await pipeline(result.content, res);
+    return res;
   } catch (error) {
+    if (res.headersSent) {
+      res.destroy?.(error);
+      return res;
+    }
     return sendGatewayError(req, res, error);
   }
 }
@@ -420,3 +426,4 @@ module.exports = {
   submitMisaImportRepairSchema: auditedHandler("schema", submitMisaImportRepairSchema),
   extractMisaImportRepairAuditMetrics,
 };
+const { pipeline } = require("node:stream/promises");

@@ -1,4 +1,5 @@
 const crypto = require("node:crypto");
+const { compose, Transform } = require("node:stream");
 const mongoose = require("mongoose");
 const AccountingWorkspace = require("../models/AccountingWorkspace");
 const ConversionRun = require("../models/ConversionRun");
@@ -32,6 +33,9 @@ const MAX_SIMULATION_EXAMPLES = 20;
 const ISSUE_BATCH_SIZE = 100;
 const MAX_IDEMPOTENCY_KEY_LENGTH = 256;
 const HUMAN_CONFIRMATION_TTL_MS = 2 * 60 * 1000;
+const DEFAULT_IMPORT_ARTIFACT_MAX_BYTES = 20 * 1024 * 1024;
+const DEFAULT_OUTPUT_ARTIFACT_MAX_BYTES = 64 * 1024 * 1024;
+const DEFAULT_MANIFEST_ARTIFACT_MAX_BYTES = 4 * 1024 * 1024;
 const RETRY_CONFIRMATION_STATEMENT = "Toàn bộ chứng từ này chưa được MISA nhập";
 const ALLOWED_TRANSFORMS = new Set([
   "set_value",
@@ -43,6 +47,7 @@ const ALLOWED_TRANSFORMS = new Set([
 const LOCATOR_FIELDS = [
   "document_number",
   "invoice_number",
+  "invoice_symbol",
   "document_date",
   "partner_code",
   "item_code",
@@ -58,6 +63,17 @@ const SUMMARY_FIELDS = [
   "failedDocumentGroups",
 ];
 const IMPORT_STATUS_VALUES = new Set(["unknown", "failed", "imported"]);
+const IMPORT_RESULT_COLUMN_ROLES = new Set([
+  "technical_message",
+  "source_row_number",
+  "document_number",
+  "invoice_number",
+  "invoice_symbol",
+  "document_date",
+  "partner_code",
+  "item_code",
+  "amount",
+]);
 const FORBIDDEN_RESPONSE_TOKENS = [
   "base64",
   "binary",
@@ -682,20 +698,108 @@ function manifestBinding(run, targetTemplateId) {
   };
 }
 
-async function getBoundArtifact({ artifacts, run, ownerScope, kind, repairId = null }) {
-  try {
-    return await artifacts.getArtifact({
-      sessionId: repairId || text(run.operationSessionId, 256),
-      runId: String(run._id),
-      ownerScope,
-      uploadId: text(run.converterUploadId, 256),
-      targetTemplateId: text(run.targetTemplateId, 256),
-      kind,
-      revision: 1,
-    });
-  } catch (error) {
-    throw error;
+function positiveByteLimit(name, fallback) {
+  const value = Number(process.env[name] || fallback);
+  return Number.isSafeInteger(value) && value > 0 ? value : fallback;
+}
+
+function artifactObjectId(metadata) {
+  return text(metadata?.gridFsObjectId, 512);
+}
+
+function validateStoredArtifact(stored, binding, maxBytes, now = () => new Date()) {
+  const metadata = stored?.metadata;
+  const expiresAt = new Date(metadata?.expiresAt);
+  if (
+    !metadata ||
+    !artifactObjectId(metadata) ||
+    !/^[a-f0-9]{64}$/.test(text(metadata.sha256, 64).toLowerCase()) ||
+    !Number.isSafeInteger(metadata.sizeBytes) ||
+    metadata.sizeBytes < 0 ||
+    metadata.sizeBytes > maxBytes ||
+    !text(metadata.mime, 256) ||
+    metadata.status !== "available" ||
+    !Number.isFinite(expiresAt.getTime()) ||
+    expiresAt <= now()
+  ) {
+    throw repairError(409, "Artifact metadata không hợp lệ", "ARTIFACT_METADATA_INVALID");
   }
+  for (const field of ["ownerScope", "userId", "runId", "sessionId", "uploadId", "targetTemplateId"]) {
+    if (String(metadata[field] ?? "") !== String(binding[field] ?? "")) {
+      throw repairError(409, "Artifact binding không khớp", "ARTIFACT_BINDING_MISMATCH");
+    }
+  }
+  if (
+    Object.hasOwn(binding, "workspaceId") &&
+    String(metadata.workspaceId ?? "") !== String(binding.workspaceId ?? "")
+  ) {
+    throw repairError(409, "Artifact binding không khớp", "ARTIFACT_BINDING_MISMATCH");
+  }
+  if (metadata.kind && metadata.kind !== binding.kind) {
+    throw repairError(409, "Artifact binding không khớp", "ARTIFACT_BINDING_MISMATCH");
+  }
+  if (!stored.content || typeof stored.content.pipe !== "function") {
+    throw repairError(503, "Artifact stream không khả dụng", "ARTIFACT_STREAM_UNAVAILABLE");
+  }
+  return metadata;
+}
+
+function boundedVerifiedArtifactStream(stored, binding, maxBytes, now) {
+  const metadata = validateStoredArtifact(stored, binding, maxBytes, now);
+  const digest = crypto.createHash("sha256");
+  let sizeBytes = 0;
+  const verifier = new Transform({
+    transform(chunk, _encoding, callback) {
+      const bytes = Buffer.from(chunk);
+      sizeBytes += bytes.length;
+      if (sizeBytes > metadata.sizeBytes || sizeBytes > maxBytes) {
+        callback(repairError(413, "Artifact vượt giới hạn kích thước", "ARTIFACT_TOO_LARGE"));
+        return;
+      }
+      digest.update(bytes);
+      callback(null, bytes);
+    },
+    flush(callback) {
+      if (sizeBytes !== metadata.sizeBytes || digest.digest("hex") !== metadata.sha256) {
+        callback(repairError(409, "Artifact checksum không khớp", "ARTIFACT_CHECKSUM_MISMATCH"));
+        return;
+      }
+      callback();
+    },
+  });
+  return compose(stored.content, verifier);
+}
+
+async function readArtifactBuffer(stored, binding, maxBytes, now) {
+  const chunks = [];
+  let sizeBytes = 0;
+  for await (const chunk of boundedVerifiedArtifactStream(stored, binding, maxBytes, now)) {
+    const bytes = Buffer.from(chunk);
+    sizeBytes += bytes.length;
+    chunks.push(bytes);
+  }
+  return Buffer.concat(chunks, sizeBytes);
+}
+
+async function verifyArtifactStream(stored, binding, maxBytes, now) {
+  for await (const _chunk of boundedVerifiedArtifactStream(stored, binding, maxBytes, now)) {
+    // Full consumption verifies the GridFS stream without retaining artifact bytes.
+  }
+}
+
+async function getBoundArtifact({ artifacts, run, ownerScope, userId, kind, repairId = null }) {
+  const binding = {
+    sessionId: repairId || text(run.operationSessionId, 256),
+    runId: String(run._id),
+    ownerScope,
+    userId: String(userId),
+    uploadId: text(run.converterUploadId, 256),
+    targetTemplateId: text(run.targetTemplateId, 256),
+    kind,
+    revision: 1,
+  };
+  const stored = await artifacts.getArtifact(binding);
+  return { stored, binding };
 }
 
 async function loadOwnedRun({ Run, Workspace, runId, userId }) {
@@ -718,11 +822,14 @@ async function loadOwnedRun({ Run, Workspace, runId, userId }) {
   return { run, workspace, workspaceId, ownerScope };
 }
 
-async function loadManifest({ artifacts, run, ownerScope }) {
+async function loadManifest({ artifacts, run, ownerScope, userId, now }) {
   const binding = manifestBinding(run, text(run.targetTemplateId, 256));
   let stored;
+  let artifactBinding;
   try {
-    stored = await getBoundArtifact({ artifacts, run, ownerScope, kind: "manifest" });
+    ({ stored, binding: artifactBinding } = await getBoundArtifact({
+      artifacts, run, ownerScope, userId, kind: "manifest",
+    }));
   } catch (error) {
     if (Number(error?.statusCode) === 410) {
       throw repairError(410, "Manifest conversion không còn khả dụng", "MANIFEST_EXPIRED");
@@ -733,14 +840,20 @@ async function loadManifest({ artifacts, run, ownerScope }) {
     throw error;
   }
   if (
-    stored.metadata.storageKey !== run.manifestArtifactKey ||
+    artifactObjectId(stored.metadata) !== String(run.manifestArtifactKey) ||
     stored.metadata.sha256 !== run.manifestSha256
   ) {
     throw repairError(409, "Manifest conversion không khớp conversion run", "MANIFEST_BINDING_MISMATCH");
   }
   let manifest;
   try {
-    manifest = JSON.parse(stored.content.toString("utf8"));
+    const content = await readArtifactBuffer(
+      stored,
+      artifactBinding,
+      positiveByteLimit("CONVERTER_MAX_MANIFEST_BYTES", DEFAULT_MANIFEST_ARTIFACT_MAX_BYTES),
+      now,
+    );
+    manifest = JSON.parse(content.toString("utf8"));
     validateManifestBinding(manifest, binding);
   } catch (error) {
     if (error?.statusCode === 409) throw error;
@@ -749,15 +862,23 @@ async function loadManifest({ artifacts, run, ownerScope }) {
   return { manifest, stored, binding };
 }
 
-async function assertOutputArtifact({ artifacts, run, ownerScope }) {
+async function assertOutputArtifact({ artifacts, run, ownerScope, userId, now }) {
   try {
-    const stored = await getBoundArtifact({ artifacts, run, ownerScope, kind: "output" });
+    const { stored, binding } = await getBoundArtifact({
+      artifacts, run, ownerScope, userId, kind: "output",
+    });
     if (
-      stored.metadata.storageKey !== run.exportArtifactKey ||
+      artifactObjectId(stored.metadata) !== String(run.exportArtifactKey) ||
       stored.metadata.sha256 !== run.outputSha256
     ) {
       throw repairError(410, "Artifact conversion không còn khả dụng", "OUTPUT_EXPIRED");
     }
+    await verifyArtifactStream(
+      stored,
+      binding,
+      positiveByteLimit("CONVERTER_MAX_OUTPUT_BYTES", DEFAULT_OUTPUT_ARTIFACT_MAX_BYTES),
+      now,
+    );
     return stored;
   } catch (error) {
     if ([404, 410].includes(Number(error?.statusCode))) {
@@ -804,6 +925,7 @@ function normalizeLocator(locator = {}) {
     sourceRowNumber: normalizedSourceRowNumber(source.source_row_number),
     documentNumber: normalizedValue(source.document_number),
     invoiceNumber: normalizedValue(source.invoice_number),
+    invoiceSymbol: normalizedValue(source.invoice_symbol),
     documentDate: normalizedValue(source.document_date),
     partnerCode: normalizedValue(source.partner_code),
     itemCode: normalizedValue(source.item_code),
@@ -864,6 +986,7 @@ function manifestGroupEvidence(group, manifest) {
   return {
     documentNumber: text(locator.document_number, 256),
     invoiceNumber: text(locator.invoice_number, 256),
+    invoiceSymbol: text(locator.invoice_symbol, 256),
     documentDate: text(locator.document_date, 64),
     partnerCode: text(locator.partner_code, 256),
     lineCount: Math.min(Math.max(Number(group?.line_count) || rowNumbers.length, 0), 10_000),
@@ -919,6 +1042,7 @@ function documentGroupResponse(group) {
   const normalizedEvidence = {
     documentNumber: primitiveCell(evidence.documentNumber, 256) || "",
     invoiceNumber: primitiveCell(evidence.invoiceNumber, 256) || "",
+    invoiceSymbol: primitiveCell(evidence.invoiceSymbol, 256) || "",
     documentDate: primitiveCell(evidence.documentDate, 64) || "",
     partnerCode: primitiveCell(evidence.partnerCode, 256) || "",
     lineCount: Number.isSafeInteger(evidence.lineCount) && evidence.lineCount >= 0
@@ -929,6 +1053,7 @@ function documentGroupResponse(group) {
       : [],
   };
   const hasEvidence = normalizedEvidence.documentNumber || normalizedEvidence.invoiceNumber ||
+    normalizedEvidence.invoiceSymbol ||
     normalizedEvidence.documentDate || normalizedEvidence.partnerCode ||
     normalizedEvidence.lineCount > 0 || normalizedEvidence.outputRowNumbers.length > 0;
   return {
@@ -981,6 +1106,7 @@ function issueResponse(issue) {
         : null,
       documentNumber: primitiveCell(locator.documentNumber, 256) || "",
       invoiceNumber: primitiveCell(locator.invoiceNumber, 256) || "",
+      invoiceSymbol: primitiveCell(locator.invoiceSymbol, 256) || "",
       documentDate: primitiveCell(locator.documentDate, 64) || "",
       partnerCode: primitiveCell(locator.partnerCode, 256) || "",
       itemCode: primitiveCell(locator.itemCode, 256) || "",
@@ -1076,6 +1202,30 @@ function validateNormalizedIssuesPayload(payload) {
     throw invalidConverterResponse();
   }
   return payload.issues;
+}
+
+function normalizeImportResultColumns(columns) {
+  if (!columns || typeof columns !== "object" || Array.isArray(columns)) {
+    throw repairError(422, "Schema mapping không hợp lệ", "INVALID_SCHEMA_MAPPING");
+  }
+  const normalized = {};
+  const selectedHeaders = new Set();
+  for (const [role, header] of Object.entries(columns)) {
+    if (!IMPORT_RESULT_COLUMN_ROLES.has(role) || (header != null && typeof header !== "string")) {
+      throw repairError(422, "Schema mapping không hợp lệ", "INVALID_SCHEMA_MAPPING");
+    }
+    const value = strictText(header, 256, role, "INVALID_SCHEMA_MAPPING");
+    if (!value) continue;
+    if (selectedHeaders.has(value)) {
+      throw repairError(422, "Mỗi cột chỉ được map cho một vai trò", "INVALID_SCHEMA_MAPPING");
+    }
+    selectedHeaders.add(value);
+    normalized[role] = value;
+  }
+  if (!normalized.technical_message) {
+    throw repairError(422, "Schema mapping bắt buộc technical_message", "INVALID_SCHEMA_MAPPING");
+  }
+  return normalized;
 }
 
 function parseInspection(payload) {
@@ -1378,7 +1528,27 @@ function createMisaImportRepairService(overrides = {}) {
     }
     const acknowledgeWarnings = snakeAcknowledgement ?? camelAcknowledgement ?? false;
     const readinessHash = retryReadinessHash(body);
-    const statusByGroup = new Map((repair.documentGroupStatuses || []).map((item) => [String(item.documentGroupId), plain(item)]));
+    const completeGroups = (repair.documentGroupStatuses || [])
+      .map(plain)
+      .sort((left, right) => String(left.documentGroupId).localeCompare(String(right.documentGroupId)));
+    if (
+      completeGroups.length === 0 ||
+      completeGroups.some((group) =>
+        !["failed", "imported"].includes(String(group.status)) || group.userConfirmed !== true)
+    ) {
+      throw repairError(409, "Còn document group chưa xác nhận trạng thái", "RETRY_STATUS_BLOCKED");
+    }
+    const failedGroupIds = completeGroups
+      .filter((group) => group.status === "failed")
+      .map((group) => String(group.documentGroupId))
+      .sort();
+    if (canonicalJson(normalizedGroups) !== canonicalJson(failedGroupIds)) {
+      throw repairError(409, "Retry phải gồm đúng các document group thất bại", "RETRY_STATUS_BLOCKED");
+    }
+    const documentGroupStatuses = Object.fromEntries(
+      completeGroups.map((group) => [String(group.documentGroupId), String(group.status)]),
+    );
+    const statusByGroup = new Map(completeGroups.map((item) => [String(item.documentGroupId), item]));
     const groups = normalizedGroups.map((groupId) => {
       const group = statusByGroup.get(groupId);
       if (!group) throw repairError(409, "Document group bị thiếu trạng thái", "RETRY_STATUS_BLOCKED");
@@ -1405,6 +1575,7 @@ function createMisaImportRepairService(overrides = {}) {
       action: "retry_export",
       expected_version: expected,
       selected_document_group_ids: normalizedGroups,
+      document_group_statuses: documentGroupStatuses,
       acknowledge_warnings: acknowledgeWarnings,
       ...(readinessHash ? { readiness_hash: readinessHash } : {}),
       effective_resolutions: effectiveResolutions,
@@ -1697,11 +1868,19 @@ function createMisaImportRepairService(overrides = {}) {
       throw repairError(422, "artifactType không hợp lệ", "INVALID_ARTIFACT_TYPE");
     }
     const scope = await loadOwnedRun({ Run: deps.Run, Workspace: deps.Workspace, runId, userId });
-    const manifestResult = await loadManifest({ artifacts: deps.artifacts, run: scope.run, ownerScope: scope.ownerScope });
+    const manifestResult = await loadManifest({
+      artifacts: deps.artifacts,
+      run: scope.run,
+      ownerScope: scope.ownerScope,
+      userId,
+      now: deps.now,
+    });
     const outputArtifact = await assertOutputArtifact({
       artifacts: deps.artifacts,
       run: scope.run,
       ownerScope: scope.ownerScope,
+      userId,
+      now: deps.now,
     });
 
     const normalizedKey = text(idempotencyKey, 256) || undefined;
@@ -1760,7 +1939,7 @@ function createMisaImportRepairService(overrides = {}) {
       misaVersion: text(manifestResult.manifest.misa_version, 128),
       templateHash: text(manifestResult.manifest.template_hash, 64),
       rawFileHash: text(manifestResult.manifest.raw_file_hash, 64),
-      manifestArtifactKey: manifestResult.stored.metadata.storageKey,
+      manifestArtifactKey: artifactObjectId(manifestResult.stored.metadata),
       manifestSha256: manifestResult.stored.metadata.sha256,
       artifactType,
       status: "uploaded",
@@ -1779,11 +1958,13 @@ function createMisaImportRepairService(overrides = {}) {
       targetTemplateId: text(scope.run.targetTemplateId, 256),
       kind: "import_result",
       revision: 1,
-      content: file.buffer,
-      contentType: file.mimetype || "application/octet-stream",
+      bytes: file.buffer,
+      sha256: uploadSha256,
+      sizeBytes: file.buffer.length,
+      mime: file.mimetype || "application/octet-stream",
       expiresAt,
     });
-    session.errorArtifactKey = artifact.storageKey;
+    session.errorArtifactKey = artifactObjectId(artifact);
     session.errorSha256 = artifact.sha256;
 
     async function cleanupImportArtifact() {
@@ -1792,6 +1973,8 @@ function createMisaImportRepairService(overrides = {}) {
           sessionId: String(session._id),
           runId: String(scope.run._id),
           ownerScope: scope.ownerScope,
+          userId,
+          workspaceId: scope.workspaceId,
           uploadId: text(scope.run.converterUploadId, 256),
           targetTemplateId: text(scope.run.targetTemplateId, 256),
           kind: "import_result",
@@ -1868,13 +2051,10 @@ function createMisaImportRepairService(overrides = {}) {
     if (repair.version !== version) throw repairError(409, "Repair session đã được cập nhật ở tab khác", "STALE_REPAIR_VERSION");
     const sheetName = text(body?.sheet_name, 128);
     const headerRow = Number(body?.header_row);
-    const columns = body?.columns;
-    if (!sheetName || !Number.isSafeInteger(headerRow) || headerRow < 1 || !columns || typeof columns !== "object") {
+    if (!sheetName || !Number.isSafeInteger(headerRow) || headerRow < 1) {
       throw repairError(422, "Schema mapping không hợp lệ", "INVALID_SCHEMA_MAPPING");
     }
-    if (!text(columns.technical_message, 256)) {
-      throw repairError(422, "Schema mapping bắt buộc technical_message", "INVALID_SCHEMA_MAPPING");
-    }
+    const columns = normalizeImportResultColumns(body?.columns);
     const scope = await loadOwnedRun({ Run: deps.Run, Workspace: deps.Workspace, runId: repair.conversionRun, userId });
     if (
       String(scope.run._id) !== String(repair.conversionRun) ||
@@ -1883,16 +2063,23 @@ function createMisaImportRepairService(overrides = {}) {
     ) {
       throw repairError(404, "Repair session không tồn tại", "REPAIR_NOT_FOUND");
     }
-    const manifestResult = await loadManifest({ artifacts: deps.artifacts, run: scope.run, ownerScope: repair.ownerScope });
-    const artifact = await getBoundArtifact({
+    const manifestResult = await loadManifest({
+      artifacts: deps.artifacts,
+      run: scope.run,
+      ownerScope: repair.ownerScope,
+      userId,
+      now: deps.now,
+    });
+    const { stored: artifact, binding: artifactBinding } = await getBoundArtifact({
       artifacts: deps.artifacts,
       run: { ...plain(scope.run), _id: scope.run._id, operationSessionId: String(repair._id) },
       ownerScope: repair.ownerScope,
+      userId,
       kind: "import_result",
       repairId: String(repair._id),
     });
     if (
-      artifact.metadata.storageKey !== repair.errorArtifactKey ||
+      artifactObjectId(artifact.metadata) !== String(repair.errorArtifactKey) ||
       artifact.metadata.sha256 !== repair.errorSha256
     ) {
       throw repairError(
@@ -1901,6 +2088,12 @@ function createMisaImportRepairService(overrides = {}) {
         "IMPORT_ARTIFACT_BINDING_MISMATCH",
       );
     }
+    const artifactContent = await readArtifactBuffer(
+      artifact,
+      artifactBinding,
+      positiveByteLimit("CONVERTER_MAX_FILE_BYTES", DEFAULT_IMPORT_ARTIFACT_MAX_BYTES),
+      deps.now,
+    );
     const contextToken = createContextToken({
       createToken: deps.createToken,
       run: scope.run,
@@ -1914,9 +2107,9 @@ function createMisaImportRepairService(overrides = {}) {
       result = await deps.forwardMultipart({
         path: "/api/v1/import-results/normalize",
         file: {
-          buffer: artifact.content,
-          originalname: `import-result.${String(artifact.metadata.contentType).includes("spreadsheet") ? "xlsx" : "xls"}`,
-          mimetype: artifact.metadata.contentType,
+          buffer: artifactContent,
+          originalname: `import-result.${String(artifact.metadata.mime).includes("openxmlformats") ? "xlsx" : "xls"}`,
+          mimetype: artifact.metadata.mime,
         },
         fields: { mapping_json: JSON.stringify({ sheet_name: sheetName, header_row: headerRow, columns }) },
         contextToken,
@@ -2119,19 +2312,20 @@ function createMisaImportRepairService(overrides = {}) {
     const visibleGroups = groupPage.slice(0, boundedGroupLimit);
     const groupsReady = allGroups.length > 0 &&
       allGroups.every((group) =>
-        group.status === "failed" && group.userConfirmed === true);
+        ["failed", "imported"].includes(group.status) && group.userConfirmed === true);
+    const failedGroups = allGroups.filter((group) => group.status === "failed");
     const issuesReady = Number(repair.summary?.unknownDocumentGroups || 0) === 0 &&
       Number(repair.summary?.ambiguousIssues || 0) === 0 &&
       Number(repair.summary?.unmatchedIssues || 0) === 0 &&
       Number(repair.summary?.unresolvedIssues || 0) === 0;
     let readiness = null;
-    if (groupsReady && issuesReady && !cursor && !groupCursor) {
+    if (groupsReady && failedGroups.length > 0 && issuesReady && !cursor && !groupCursor) {
       const canonical = await canonicalRetryRequest({
         repair,
         userId,
         body: {
           expected_version: repair.version,
-          document_group_ids: allGroups.map((group) => String(group.documentGroupId)),
+          document_group_ids: failedGroups.map((group) => String(group.documentGroupId)),
           acknowledge_warnings: false,
         },
         expected: repair.version,
@@ -2156,9 +2350,11 @@ function createMisaImportRepairService(overrides = {}) {
         : null,
       readiness,
       retryGate: {
-        allowed: groupsReady && issuesReady && !readinessBlocked,
+        allowed: groupsReady && failedGroups.length > 0 && issuesReady && !readinessBlocked,
         reason: !groupsReady
-          ? "Còn document group chưa xác nhận failed"
+          ? "Còn document group chưa xác nhận trạng thái import"
+          : failedGroups.length === 0
+            ? "Không có document group thất bại để retry"
           : !issuesReady
             ? "Còn issue chưa match hoặc chưa resolved"
             : readinessBlocked
@@ -2433,8 +2629,16 @@ function createMisaImportRepairService(overrides = {}) {
       artifacts: deps.artifacts,
       run: scope.run,
       ownerScope: repair.ownerScope,
+      userId,
+      now: deps.now,
     });
-    await assertOutputArtifact({ artifacts: deps.artifacts, run: scope.run, ownerScope: repair.ownerScope });
+    await assertOutputArtifact({
+      artifacts: deps.artifacts,
+      run: scope.run,
+      ownerScope: repair.ownerScope,
+      userId,
+      now: deps.now,
+    });
     const contextToken = createContextToken({
       createToken: deps.createToken,
       run: scope.run,
@@ -2451,7 +2655,7 @@ function createMisaImportRepairService(overrides = {}) {
     return Array.isArray(issues) ? issues : [];
   }
 
-  function retryConverterBody({ repair, scope, manifest, groups, patches, acknowledgeWarnings }) {
+  function retryConverterBody({ repair, scope, manifest, groups, documentGroupStatuses, patches, acknowledgeWarnings }) {
     const selectedIds = groups.map((group) => String(group.documentGroupId));
     return {
       upload_id: text(scope.run.converterUploadId, 256),
@@ -2464,7 +2668,7 @@ function createMisaImportRepairService(overrides = {}) {
       manifest,
       selected_document_group_ids: selectedIds,
       confirmed_failed_group_ids: selectedIds,
-      document_group_statuses: Object.fromEntries(selectedIds.map((id) => [id, "failed"])),
+      document_group_statuses: documentGroupStatuses,
       patches,
       acknowledge_warnings: acknowledgeWarnings === true,
     };
@@ -2494,6 +2698,7 @@ function createMisaImportRepairService(overrides = {}) {
     const commitment = {
       version: Number(repair.version),
       selected_document_group_ids: canonical.canonical.selected_document_group_ids,
+      document_group_statuses: canonical.canonical.document_group_statuses,
       effective_resolutions: canonical.canonical.effective_resolutions,
       trusted_state_hash: canonical.canonical.trusted_state_hash,
       status: readiness.status,
@@ -2519,6 +2724,7 @@ function createMisaImportRepairService(overrides = {}) {
       scope: canonical.trusted,
       manifest: canonical.trusted.manifestResult.manifest,
       groups: canonical.groups,
+      documentGroupStatuses: canonical.canonical.document_group_statuses,
       patches: canonical.patches,
       acknowledgeWarnings,
     });
@@ -2998,7 +3204,7 @@ function createMisaImportRepairService(overrides = {}) {
   async function persistRetryBatch({ repair, userId, version, mutationId, batch, artifact }) {
     function completeBatch() {
       batch.status = "completed";
-      batch.outputArtifactKey = artifact.storageKey;
+      batch.outputArtifactKey = artifactObjectId(artifact);
       batch.outputSha256 = artifact.sha256;
       batch.completedAt = deps.now();
     }
@@ -3224,8 +3430,10 @@ function createMisaImportRepairService(overrides = {}) {
         targetTemplateId: text(repair.targetTemplateId, 256),
         kind: "retry_output",
         revision: sequence,
-        content: exported.data,
-        contentType: "application/vnd.ms-excel",
+        bytes: exported.data,
+        sha256: sha256(exported.data),
+        sizeBytes: exported.data.length,
+        mime: "application/vnd.ms-excel",
         expiresAt: new Date(repair.expiresAt),
       });
       artifact = {
@@ -3305,19 +3513,20 @@ function createMisaImportRepairService(overrides = {}) {
     if (!Number.isSafeInteger(sequence) || sequence < 1) {
       throw repairError(409, "Retry artifact binding không hợp lệ", "RETRY_ARTIFACT_MISMATCH");
     }
+    const artifactBinding = {
+      sessionId: String(repair._id),
+      runId: String(scope.run._id),
+      ownerScope: repair.ownerScope,
+      userId: String(userId),
+      workspaceId: scope.workspaceId,
+      uploadId: text(scope.run.converterUploadId, 256),
+      targetTemplateId: text(repair.targetTemplateId, 256),
+      kind: "retry_output",
+      revision: sequence,
+    };
     let stored;
     try {
-      stored = await deps.artifacts.getArtifact({
-        sessionId: String(repair._id),
-        runId: String(scope.run._id),
-        ownerScope: repair.ownerScope,
-        userId: String(userId),
-        workspaceId: scope.workspaceId,
-        uploadId: text(scope.run.converterUploadId, 256),
-        targetTemplateId: text(repair.targetTemplateId, 256),
-        kind: "retry_output",
-        revision: sequence,
-      });
+      stored = await deps.artifacts.getArtifact(artifactBinding);
     } catch (error) {
       if ([404, 410].includes(Number(error?.statusCode))) {
         throw repairError(410, "Retry artifact đã hết hạn", "RETRY_ARTIFACT_EXPIRED");
@@ -3325,22 +3534,33 @@ function createMisaImportRepairService(overrides = {}) {
       throw error;
     }
     if (
-      stored.metadata.ownerScope && stored.metadata.ownerScope !== repair.ownerScope ||
-      stored.metadata.userId && String(stored.metadata.userId) !== String(userId) ||
-      stored.metadata.workspaceId != null &&
-        String(stored.metadata.workspaceId || "") !== String(scope.workspaceId || "")
+      stored.metadata?.ownerScope !== repair.ownerScope ||
+      String(stored.metadata?.userId || "") !== String(userId) ||
+      String(stored.metadata?.workspaceId || "") !== String(scope.workspaceId || "")
     ) {
       throw repairError(404, "Retry artifact không tồn tại", "RETRY_ARTIFACT_NOT_FOUND");
     }
+    validateStoredArtifact(
+      stored,
+      artifactBinding,
+      positiveByteLimit("CONVERTER_MAX_OUTPUT_BYTES", DEFAULT_OUTPUT_ARTIFACT_MAX_BYTES),
+      deps.now,
+    );
     if (
-      stored.metadata.storageKey !== batch.outputArtifactKey ||
+      artifactObjectId(stored.metadata) !== String(batch.outputArtifactKey) ||
       stored.metadata.sha256 !== batch.outputSha256
     ) {
       throw repairError(409, "Retry artifact checksum/binding không khớp", "RETRY_ARTIFACT_MISMATCH");
     }
+    const content = boundedVerifiedArtifactStream(
+      stored,
+      artifactBinding,
+      positiveByteLimit("CONVERTER_MAX_OUTPUT_BYTES", DEFAULT_OUTPUT_ARTIFACT_MAX_BYTES),
+      deps.now,
+    );
     return {
-      content: stored.content,
-      contentType: stored.metadata.contentType || "application/vnd.ms-excel",
+      content,
+      contentType: stored.metadata.mime,
       filename: `MISA retry ${String(batch._id)}.xls`,
       batch,
     };

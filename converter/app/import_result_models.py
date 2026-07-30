@@ -19,6 +19,7 @@ class ImportResultColumnRoles(BaseModel):
     source_row_number: str | None = Field(default=None, max_length=256)
     document_number: str | None = Field(default=None, max_length=256)
     invoice_number: str | None = Field(default=None, max_length=256)
+    invoice_symbol: str | None = Field(default=None, max_length=256)
     document_date: str | None = Field(default=None, max_length=256)
     partner_code: str | None = Field(default=None, max_length=256)
     item_code: str | None = Field(default=None, max_length=256)

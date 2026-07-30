@@ -160,7 +160,7 @@ def document_group_key(
             or values.get("customer_code")
         )
 
-    if invoice and counterparty:
+    if invoice and counterparty and (direction != "purchase" or symbol):
         return f"strong:{direction}:{counterparty}:{symbol}:{invoice}", False
 
     receipt = _text(values.get("purchase_receipt"))

@@ -177,6 +177,10 @@ test("artifact service binds metadata, validates checksum, and compensates stora
     service.getArtifact({ ...binding, ownerScope: "user:other" }),
     (error) => error.code === "ARTIFACT_OWNER_MISMATCH",
   );
+  await assert.rejects(
+    service.getArtifact({ ...binding, userId: "user-2" }),
+    (error) => error.code === "ARTIFACT_USER_MISMATCH",
+  );
 
   const failingRepo = repository();
   failingRepo.create = async () => {

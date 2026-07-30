@@ -16,6 +16,12 @@ export function getRetryGate({
     return { enabled: false, reason: "Còn chứng từ chưa xác nhận đã import hay thất bại." };
   }
   if (
+    Object.hasOwn(summary, "failedDocumentGroups") &&
+    Number(summary.failedDocumentGroups) === 0
+  ) {
+    return { enabled: false, reason: "Không có chứng từ thất bại để xuất lại." };
+  }
+  if (
     Number(summary.unresolvedIssues || 0) > 0 ||
     Number(summary.unmatchedIssues || 0) > 0 ||
     Number(summary.ambiguousIssues || 0) > 0

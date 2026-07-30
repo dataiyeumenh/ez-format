@@ -19,6 +19,43 @@ test("unknown document status disables retry", () => {
   assert.match(gate.reason, /chưa xác nhận/i);
 });
 
+test("mixed imported and failed document groups are complete for retry", () => {
+  const gate = getRetryGate({
+    summary: {
+      unknownDocumentGroups: 0,
+      failedDocumentGroups: 1,
+      unresolvedIssues: 0,
+      unmatchedIssues: 0,
+      ambiguousIssues: 0,
+    },
+    readiness: { fatal: 0, blocker: 0, warning: 0 },
+    readinessHash: "a".repeat(64),
+    readinessVersion: 8,
+    sessionVersion: 8,
+  });
+
+  assert.equal(gate.enabled, true);
+});
+
+test("all imported document groups have nothing to retry", () => {
+  const gate = getRetryGate({
+    summary: {
+      unknownDocumentGroups: 0,
+      failedDocumentGroups: 0,
+      unresolvedIssues: 0,
+      unmatchedIssues: 0,
+      ambiguousIssues: 0,
+    },
+    readiness: { fatal: 0, blocker: 0, warning: 0 },
+    readinessHash: "a".repeat(64),
+    readinessVersion: 8,
+    sessionVersion: 8,
+  });
+
+  assert.equal(gate.enabled, false);
+  assert.match(gate.reason, /không có.*thất bại/i);
+});
+
 test("first-time guide contains complete MISA handoff", () => {
   assert.deepEqual(MISA_IMPORT_GUIDE.map((step) => step.id), [
     "choose-document-type",

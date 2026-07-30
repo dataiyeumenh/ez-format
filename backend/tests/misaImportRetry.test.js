@@ -1,5 +1,6 @@
 const assert = require("node:assert/strict");
 const crypto = require("node:crypto");
+const { Readable } = require("node:stream");
 const test = require("node:test");
 
 const RUN_ID = "507f1f77bcf86cd799439011";
@@ -52,6 +53,14 @@ function manifest() {
   };
 }
 
+function digest(content) {
+  return crypto.createHash("sha256").update(content).digest("hex");
+}
+
+function manifestDigest() {
+  return digest(Buffer.from(JSON.stringify(manifest())));
+}
+
 function repair(overrides = {}) {
   return {
     _id: REPAIR_ID,
@@ -64,7 +73,7 @@ function repair(overrides = {}) {
     templateHash: "a".repeat(64),
     rawFileHash: "b".repeat(64),
     manifestArtifactKey: "manifest-key",
-    manifestSha256: "f".repeat(64),
+    manifestSha256: manifestDigest(),
     activeSchemaGenerationId: "generation-1",
     status: "ready_for_repair",
     version: 8,
@@ -124,10 +133,10 @@ function run() {
     workspace: null,
     status: "completed",
     exportArtifactKey: "output-key",
-    outputSha256: "9".repeat(64),
+    outputSha256: digest(Buffer.from("original-output")),
     manifestSchemaVersion: 1,
     manifestArtifactKey: "manifest-key",
-    manifestSha256: "f".repeat(64),
+    manifestSha256: manifestDigest(),
     manifestRawFileSha256: "b".repeat(64),
     manifestMappingProfileId: "profile-1",
     manifestMappingProfileVersion: 1,
@@ -158,7 +167,37 @@ function fakeDependencies({
   const confirmations = [];
   const batchSaveOptions = [];
   const sessionUpdateOptions = [];
+  const getCalls = [];
   let chargeCalls = 0;
+
+  function storedArtifact({ key, content, mime = "application/octet-stream", streamError = null }) {
+    const bytes = Buffer.from(content);
+    const digest = crypto.createHash("sha256").update(bytes).digest("hex");
+    const contentStream = streamError
+      ? Readable.from((async function* failAfterFirstChunk() {
+          yield bytes.subarray(0, 1);
+          throw streamError;
+        })())
+      : Readable.from([bytes]);
+    return {
+      metadata: {
+        gridFsObjectId: key,
+        ownerScope: "user:user-1",
+        userId: "user-1",
+        workspaceId: null,
+        runId: RUN_ID,
+        sessionId: key === "import-key" ? REPAIR_ID : "operation-1",
+        uploadId: "upload-1",
+        targetTemplateId: "bsn_sales",
+        sha256: digest,
+        sizeBytes: bytes.length,
+        mime,
+        status: "available",
+        expiresAt: new Date(Date.now() + 60_000),
+      },
+      content: contentStream,
+    };
+  }
 
   class RetryBatch {
     static async findOne(query) {
@@ -223,37 +262,52 @@ function fakeDependencies({
   const issueRows = issues || [resolvedIssue()];
   const artifacts = {
     async getArtifact(input) {
+      getCalls.push(input);
+      for (const field of ["userId", "ownerScope", "runId", "sessionId", "uploadId", "targetTemplateId"]) {
+        assert.ok(input[field], `artifact ${input.kind} requires ${field}`);
+      }
       if (input.kind === "manifest") {
-        return {
-          metadata: { storageKey: "manifest-key", sha256: "f".repeat(64) },
-          content: storedManifest,
-        };
+        const stored = storedArtifact({ key: "manifest-key", content: storedManifest, mime: "application/json" });
+        return stored;
       }
       if (input.kind === "output") {
-        return {
-          metadata: { storageKey: "output-key", sha256: "9".repeat(64) },
-          content: Buffer.from("original-output"),
-        };
+        const stored = storedArtifact({ key: "output-key", content: "original-output", mime: "application/vnd.ms-excel" });
+        return stored;
       }
       if (input.kind === "retry_output") {
         if (batch?.artifactError) throw batch.artifactError;
-        return {
-          metadata: {
-            storageKey: batch?.outputArtifactKey || "retry-key",
-            sha256: batch?.outputSha256 || crypto.createHash("sha256").update("retry-workbook").digest("hex"),
-            contentType: "application/vnd.ms-excel",
-          },
-          content: Buffer.from("retry-workbook"),
-        };
+        const stored = storedArtifact({
+          key: batch?.outputArtifactKey || "retry-key",
+          content: "retry-workbook",
+          mime: "application/vnd.ms-excel",
+          streamError: batch?.artifactStreamError || null,
+        });
+        stored.metadata.sha256 = batch?.outputSha256 || stored.metadata.sha256;
+        stored.metadata.sessionId = REPAIR_ID;
+        return stored;
       }
       throw new Error(`unexpected artifact kind ${input.kind}`);
     },
     async putArtifact(input) {
       putCalls.push(input);
       if (artifactPutError) throw artifactPutError;
+      const bytes = Buffer.from(input.bytes || input.content);
       return {
-        storageKey: "retry-key",
-        sha256: crypto.createHash("sha256").update(input.content).digest("hex"),
+        gridFsObjectId: "retry-key",
+        ownerScope: input.ownerScope,
+        userId: String(input.userId),
+        workspaceId: input.workspaceId,
+        runId: input.runId,
+        sessionId: input.sessionId,
+        uploadId: input.uploadId,
+        targetTemplateId: input.targetTemplateId,
+        kind: input.kind,
+        revision: input.revision,
+        sha256: crypto.createHash("sha256").update(bytes).digest("hex"),
+        sizeBytes: bytes.length,
+        mime: input.mime,
+        status: "available",
+        expiresAt: input.expiresAt,
       };
     },
     async deleteArtifact(input) {
@@ -269,6 +323,7 @@ function fakeDependencies({
     confirmations,
     currentRepair,
     get chargeCalls() { return chargeCalls; },
+    getCalls,
     jsonCalls,
     putCalls,
     sessionUpdateOptions,
@@ -403,6 +458,53 @@ test("retry gate blocks unknown, mixed, ambiguous, unresolved, and unacknowledge
     () => assertRetryGate({ groups: [goodGroup], issues: [goodIssue], readiness: { summary: { fatal: 0, blocker: 0, warning: 1 } } }),
     (error) => error.statusCode === 409,
   );
+});
+
+test("mixed imported and failed groups preflight only the confirmed failed subset", async () => {
+  const { createMisaImportRepairService } = require("../services/misaImportRepairService");
+  const baseline = fakeDependencies();
+  const mixed = fakeDependencies();
+  mixed.currentRepair.documentGroupStatuses.push({
+    documentGroupId: "group-imported",
+    status: "imported",
+    userConfirmed: true,
+    confirmedBy: "user-1",
+    confirmedAt: new Date(),
+  });
+
+  const baselineWorkspace = await createMisaImportRepairService(baseline.deps).readWorkspace({
+    userId: "user-1", repairId: REPAIR_ID, requestId: "baseline-preflight",
+  });
+  const mixedWorkspace = await createMisaImportRepairService(mixed.deps).readWorkspace({
+    userId: "user-1", repairId: REPAIR_ID, requestId: "mixed-preflight",
+  });
+
+  assert.deepEqual(mixed.jsonCalls[0].body.selected_document_group_ids, ["group-1"]);
+  assert.deepEqual(mixed.jsonCalls[0].body.document_group_statuses, {
+    "group-1": "failed",
+    "group-imported": "imported",
+  });
+  assert.equal(mixedWorkspace.retryGate.allowed, true);
+  assert.notEqual(mixedWorkspace.readiness.hash, baselineWorkspace.readiness.hash);
+});
+
+test("readiness remains blocked until every document group is known and confirmed", async () => {
+  const { createMisaImportRepairService } = require("../services/misaImportRepairService");
+  const fake = fakeDependencies();
+  fake.currentRepair.documentGroupStatuses.push({
+    documentGroupId: "group-unknown",
+    status: "unknown",
+    userConfirmed: false,
+  });
+  fake.currentRepair.summary.unknownDocumentGroups = 1;
+
+  const workspace = await createMisaImportRepairService(fake.deps).readWorkspace({
+    userId: "user-1", repairId: REPAIR_ID, requestId: "blocked-preflight",
+  });
+
+  assert.equal(workspace.readiness, null);
+  assert.equal(workspace.retryGate.allowed, false);
+  assert.equal(fake.jsonCalls.length, 0);
 });
 
 test("resolution patch rejects AI, formulas, nested values, and arbitrary transforms", () => {
@@ -1322,7 +1424,10 @@ test("retry download enforces ownership binding, checksum binding, and artifact 
     repairId: REPAIR_ID,
     batchId: BATCH_ID,
   });
-  assert.equal(download.content.toString(), "retry-workbook");
+  const chunks = [];
+  for await (const chunk of download.content) chunks.push(Buffer.from(chunk));
+  assert.equal(Buffer.concat(chunks).toString(), "retry-workbook");
+  assert.equal(download.contentType, "application/vnd.ms-excel");
 
   const wrongOwner = fakeDependencies({ batch: { ...completed, ownerScope: "user:other" } });
   await assert.rejects(
@@ -1341,4 +1446,17 @@ test("retry download enforces ownership binding, checksum binding, and artifact 
     }),
     (error) => error.statusCode === 410,
   );
+
+  const streamFailure = new Error("gridfs stream interrupted");
+  const failedStream = fakeDependencies({
+    batch: { ...completed, artifactStreamError: streamFailure },
+  });
+  const failedDownload = await createMisaImportRepairService(failedStream.deps).downloadRetryBatch({
+    userId: "user-1", repairId: REPAIR_ID, batchId: BATCH_ID,
+  });
+  await assert.rejects(async () => {
+    for await (const _chunk of failedDownload.content) {
+      // Drain the production-shaped stream so GridFS failures surface.
+    }
+  }, streamFailure);
 });

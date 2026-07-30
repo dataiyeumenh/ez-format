@@ -21,6 +21,7 @@ LOCATOR_ALIASES = {
         "Số phiếu nhập",
     ),
     "invoice_number": ("Số hóa đơn", "Số HĐ", "Số hóa đơn (*)"),
+    "invoice_symbol": ("Ký hiệu HĐ", "Ký hiệu hóa đơn", "Ký hiệu mẫu số hóa đơn"),
     "document_date": ("Ngày chứng từ (*)", "Ngày chứng từ", "Ngày hạch toán (*)"),
     "invoice_date": ("Ngày hóa đơn", "Ngày HĐ", "Ngày hóa đơn (*)"),
     "partner_code": ("Mã khách hàng", "Mã nhà cung cấp", "Mã đối tượng"),
@@ -215,6 +216,7 @@ def _grouping_values(locator: dict[str, str | None], direction: str) -> dict[str
     document_number = locator.get("document_number")
     values: dict[str, Any] = {
         "invoice": locator.get("invoice_number") or (document_number if direction == "sales" else None),
+        "invoice_symbol": locator.get("invoice_symbol"),
         "invoice_date": locator.get("invoice_date"),
         "date": locator.get("document_date"),
     }

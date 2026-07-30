@@ -87,6 +87,7 @@ function normalizeBinding(input) {
 
 function assertBinding(metadata, input) {
   if (metadata.ownerScope !== normalizeOwnerScope(input.ownerScope)) throw storageError(403, "Artifact belongs to another owner", "ARTIFACT_OWNER_MISMATCH");
+  if (metadata.userId !== normalizeIdentifier(input.userId, "User id")) throw storageError(403, "Artifact belongs to another user", "ARTIFACT_USER_MISMATCH");
   for (const [field, label] of [["runId", "run"], ["sessionId", "session"], ["uploadId", "upload"], ["targetTemplateId", "template"]]) {
     const expected = normalizeIdentifier(input[field], `${label[0].toUpperCase()}${label.slice(1)} id`);
     if (metadata[field] !== expected) throw storageError(403, "Artifact binding does not match this conversion", "ARTIFACT_BINDING_MISMATCH");

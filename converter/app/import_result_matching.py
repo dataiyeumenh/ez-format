@@ -11,6 +11,7 @@ from app.models import ExportManifestRow, ExportManifestV1
 _BUSINESS_FIELDS = (
     "document_number",
     "invoice_number",
+    "invoice_symbol",
     "document_date",
     "partner_code",
     "item_code",

@@ -40,6 +40,7 @@ _COLUMN_ROLES = (
     "source_row_number",
     "document_number",
     "invoice_number",
+    "invoice_symbol",
     "document_date",
     "partner_code",
     "item_code",

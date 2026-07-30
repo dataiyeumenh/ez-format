@@ -28,6 +28,7 @@ const documentGroupStatusSchema = new mongoose.Schema(
     evidence: {
       documentNumber: { type: String, trim: true, default: "", immutable: true },
       invoiceNumber: { type: String, trim: true, default: "", immutable: true },
+      invoiceSymbol: { type: String, trim: true, default: "", immutable: true },
       documentDate: { type: String, trim: true, default: "", immutable: true },
       partnerCode: { type: String, trim: true, default: "", immutable: true },
       lineCount: { type: Number, min: 0, default: 0, immutable: true },
