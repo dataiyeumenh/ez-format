@@ -268,3 +268,17 @@ test("rejects a coupon settlement when the global limit cannot be reserved", asy
     Coupon.findOneAndUpdate = originalFindOneAndUpdate;
   }
 });
+
+test("pending payments must not count toward limit_per_user logic contract", () => {
+  // Contract: countUserCouponUses only reads CouponUsage (paid success),
+  // never Payment status=pending. Apply-coupon / cancelled checkout must not consume quota.
+  const countUserCouponUsesSource = require("node:fs").readFileSync(
+    require("node:path").join(__dirname, "../services/couponService.js"),
+    "utf8",
+  );
+  assert.match(countUserCouponUsesSource, /CouponUsage\.countDocuments/);
+  assert.doesNotMatch(
+    countUserCouponUsesSource,
+    /Payment\.countDocuments\([\s\S]*status:\s*"pending"/,
+  );
+});

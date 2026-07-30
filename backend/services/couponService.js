@@ -1,7 +1,6 @@
 const Plan = require("../models/Plan");
 const Coupon = require("../models/Coupon");
 const CouponUsage = require("../models/CouponUsage");
-const Payment = require("../models/Payment");
 
 const ADMIN_EDITABLE_STATUSES = new Set(["active", "inactive"]);
 const FILTER_STATUSES = new Set(["active", "inactive", "expired", "exhausted"]);
@@ -200,15 +199,9 @@ function matchesStatusFilter(coupon, statusFilter) {
 }
 
 async function countUserCouponUses(couponId, userId) {
-  const [used, pending] = await Promise.all([
-    CouponUsage.countDocuments({ coupon: couponId, user: userId }),
-    Payment.countDocuments({
-      coupon: couponId,
-      user: userId,
-      status: "pending",
-    }),
-  ]);
-  return used + pending;
+  // Chỉ đếm lượt đã thanh toán thành công (CouponUsage).
+  // Áp mã / tạo link pending / huỷ giao dịch KHÔNG trừ limit_per_user.
+  return CouponUsage.countDocuments({ coupon: couponId, user: userId });
 }
 
 async function validateCouponForCheckout({

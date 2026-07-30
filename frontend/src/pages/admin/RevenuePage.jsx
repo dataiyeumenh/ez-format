@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Download, Loader2, MoreVertical, RefreshCw } from "lucide-react";
+import { Download, Loader2, RefreshCw } from "lucide-react";
 import {
   BarChart,
   Bar,
@@ -63,6 +63,17 @@ function formatDateTime(dateValue) {
   }).format(date);
 }
 
+function formatDate(dateValue) {
+  if (!dateValue) return "—";
+  const date = new Date(dateValue);
+  if (Number.isNaN(date.getTime())) return "—";
+  return new Intl.DateTimeFormat("vi-VN", {
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric",
+  }).format(date);
+}
+
 function initials(name = "?") {
   return name
     .split(" ")
@@ -75,6 +86,7 @@ function initials(name = "?") {
 
 const RevenuePage = () => {
   const [range, setRange] = useState("30d");
+  const [filterStatus, setFilterStatus] = useState("");
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [errorMsg, setErrorMsg] = useState("");
@@ -104,6 +116,11 @@ const RevenuePage = () => {
   const chart = data?.chart || [];
   const planRevenue = useMemo(() => data?.planRevenue || [], [data]);
   const transactions = data?.transactions || [];
+
+  const filteredTransactions = useMemo(() => {
+    if (!filterStatus) return transactions;
+    return transactions.filter((item) => item.status === filterStatus);
+  }, [transactions, filterStatus]);
 
   const bestPlan = useMemo(
     () => [...planRevenue].sort((a, b) => b.amount - a.amount)[0],
@@ -283,26 +300,56 @@ const RevenuePage = () => {
             </div>
 
             <div className="bg-white rounded-xl border border-gray-100">
-              <div className="flex items-center justify-between px-5 py-4 border-b border-gray-100">
-                <h3 className="text-sm font-semibold text-gray-900">
-                  Giao dịch gần đây
-                </h3>
-                <span className="text-sm text-gray-500">
-                  {transactions.length} giao dịch mới nhất
-                </span>
+              <div className="flex flex-col gap-3 px-5 py-4 border-b border-gray-100 sm:flex-row sm:items-center sm:justify-between">
+                <div>
+                  <h3 className="text-sm font-semibold text-gray-900">
+                    Giao dịch gần đây
+                  </h3>
+                  <p className="mt-0.5 text-sm text-gray-500">
+                    {filteredTransactions.length}
+                    {filterStatus ? ` / ${transactions.length}` : ""} giao dịch
+                    {filterStatus ? ` · ${statusLabels[filterStatus] || filterStatus}` : " mới nhất"}
+                  </p>
+                </div>
+                <div className="flex items-center gap-2">
+                  <span className="text-sm font-medium text-gray-500">Bộ lọc:</span>
+                  <select
+                    aria-label="Lọc giao dịch theo trạng thái"
+                    value={filterStatus}
+                    onChange={(event) => setFilterStatus(event.target.value)}
+                    className="rounded-lg border border-gray-200 px-3 py-1.5 text-sm text-gray-600 focus:outline-none focus:ring-2 focus:ring-blue-500/20"
+                  >
+                    <option value="">Tất cả trạng thái</option>
+                    <option value="paid">Thành công</option>
+                    <option value="pending">Đang xử lý</option>
+                    <option value="cancelled">Đã huỷ</option>
+                    <option value="expired">Hết hạn</option>
+                    <option value="failed">Thất bại</option>
+                  </select>
+                  {filterStatus && (
+                    <button
+                      type="button"
+                      onClick={() => setFilterStatus("")}
+                      className="text-sm text-gray-400 transition-colors hover:text-gray-600"
+                    >
+                      Reset
+                    </button>
+                  )}
+                </div>
               </div>
               <div className="overflow-x-auto">
                 <table className="w-full">
                   <thead>
                     <tr className="border-b border-gray-50">
                       {[
-                        "DATE",
+                        "NGÀY",
                         "USER",
-                        "PLAN",
-                        "ORDER",
-                        "AMOUNT",
-                        "STATUS",
-                        "ACTION",
+                        "GÓI",
+                        "ĐƠN HÀNG",
+                        "MÃ GIẢM",
+                        "GIÁ GỐC",
+                        "GIÁ SAU GIẢM",
+                        "TRẠNG THÁI",
                       ].map((h) => (
                         <th
                           key={h}
@@ -314,17 +361,17 @@ const RevenuePage = () => {
                     </tr>
                   </thead>
                   <tbody>
-                    {transactions.length === 0 ? (
+                    {filteredTransactions.length === 0 ? (
                       <tr>
                         <td
-                          colSpan={7}
+                          colSpan={8}
                           className="px-5 py-10 text-center text-sm text-gray-500"
                         >
                           Chưa có giao dịch thanh toán nào.
                         </td>
                       </tr>
                     ) : (
-                      transactions.map((t) => (
+                      filteredTransactions.map((t) => (
                         <tr
                           key={t.id}
                           className="border-b border-gray-50 last:border-0 hover:bg-gray-50/50 transition-colors"
@@ -349,7 +396,7 @@ const RevenuePage = () => {
                           </td>
                           <td className="px-5 py-4">
                             <span
-                              className={`text-xs font-semibold px-2.5 py-1 rounded-full ${planColors[t.planType] || "bg-gray-100 text-gray-700"}`}
+                              className={`text-xs font-semibold px-2.5 py-1 rounded-full ${planColors[t.planType] || planColors[t.planCode] || "bg-gray-100 text-gray-700"}`}
                             >
                               {t.planName}
                             </span>
@@ -362,7 +409,19 @@ const RevenuePage = () => {
                               {t.paymentLinkId || "—"}
                             </div>
                           </td>
-                          <td className="px-5 py-4 text-sm font-semibold text-gray-900">
+                          <td className="px-5 py-4 text-sm">
+                            {t.couponCode ? (
+                              <span className="inline-flex rounded-full bg-amber-50 px-2.5 py-1 font-mono text-xs font-semibold text-amber-700">
+                                {t.couponCode}
+                              </span>
+                            ) : (
+                              <span className="text-xs text-gray-400">Không dùng</span>
+                            )}
+                          </td>
+                          <td className="px-5 py-4 text-sm text-gray-600 whitespace-nowrap">
+                            {formatVnd(t.originalAmount ?? t.amount)}
+                          </td>
+                          <td className="px-5 py-4 text-sm font-semibold text-gray-900 whitespace-nowrap">
                             {formatVnd(t.amount)}
                           </td>
                           <td className="px-5 py-4">
@@ -373,11 +432,7 @@ const RevenuePage = () => {
                               {statusLabels[t.status] || t.status}
                             </span>
                           </td>
-                          <td className="px-5 py-4">
-                            <button className="text-gray-400 hover:text-gray-600">
-                              <MoreVertical size={16} />
-                            </button>
-                          </td>
+
                         </tr>
                       ))
                     )}
