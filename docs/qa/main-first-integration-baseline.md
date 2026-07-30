@@ -35,3 +35,10 @@ Pre-existing failures: none.
 - `node --test tests/paymentStatusSync.test.js tests/paymentSettlementReadiness.test.js tests/serverStartupReadiness.test.js tests/paymentReplicaSet.integration.test.js`: 14 passed, 0 failed; 3 real-Mongo tests skipped because `PAYMENT_REPLICA_SET_TEST_URI` is not set.
 - `npm run qa:main-contracts`: 51 passed, 0 failed, including payment transaction readiness and startup preflight checks.
 - The opt-in Mongo tests require a disposable replica-set URI ending in `-test` or `_test`; they exercise duplicate webhooks, transaction rollback, and a forced concurrent write-conflict retry.
+
+## Task 3 P1 Coupon Webhook Settlement (2026-07-30)
+
+- `CouponUsage.payment` now has a unique partial index for non-null payment IDs; duplicate PayOS settlement snapshots upsert one usage and increment the coupon once.
+- Coupon usage runs inside the same PayOS payment transaction as the user credit and payment status update; non-coupon payments remain unchanged.
+- `qa:main-contracts` includes the replica-set coupon settlement regression. Without `PAYMENT_REPLICA_SET_TEST_URI`, that real-Mongo coverage is explicitly skipped rather than reported as passed.
+- Latest `npm run qa:main-contracts`: 52 passed, 0 failed, 4 replica-set tests skipped because `PAYMENT_REPLICA_SET_TEST_URI` is not set; the frontend payment contract passed (1 test).

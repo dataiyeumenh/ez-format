@@ -18,7 +18,6 @@ const couponUsageSchema = new mongoose.Schema(
       type: mongoose.Schema.Types.ObjectId,
       ref: "Payment",
       default: null,
-      index: true,
     },
     discountAmount: {
       type: Number,
@@ -34,5 +33,12 @@ const couponUsageSchema = new mongoose.Schema(
 );
 
 couponUsageSchema.index({ coupon: 1, user: 1 });
+couponUsageSchema.index(
+  { payment: 1 },
+  {
+    unique: true,
+    partialFilterExpression: { payment: { $type: "objectId" } },
+  },
+);
 
 module.exports = mongoose.model("CouponUsage", couponUsageSchema);

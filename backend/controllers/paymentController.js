@@ -344,23 +344,6 @@ async function handlePayOSWebhook(req, res) {
       return res.status(200).json({ success: true, message: "User missing" });
     }
 
-    if (settledPayment.coupon && !settledPayment.couponApplied) {
-      // legacy safety
-    }
-    if (settledPayment.coupon) {
-      const already = await require("../models/CouponUsage").exists({
-        payment: settledPayment._id,
-      });
-      if (!already) {
-        await recordCouponUsage({
-          couponId: settledPayment.coupon,
-          userId: settledPayment.user,
-          paymentId: settledPayment._id,
-          discountAmount: settledPayment.discountAmount || 0,
-        });
-      }
-    }
-
     return res.status(200).json({ success: true });
   } catch (error) {
     return res.status(400).json({

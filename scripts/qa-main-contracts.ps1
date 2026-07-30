@@ -7,6 +7,7 @@ $backendTests = @(
     "tests/plans.test.js",
     "tests/paymentPlans.test.js",
     "tests/paymentStatusSync.test.js",
+    "tests/paymentReplicaSet.integration.test.js",
     "tests/paymentSettlementReadiness.test.js",
     "tests/serverStartupReadiness.test.js",
     "tests/dailyFileCredit.test.js",

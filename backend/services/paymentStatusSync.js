@@ -2,6 +2,7 @@ const Payment = require("../models/Payment");
 const User = require("../models/User");
 const { assertPaymentSettlementReady } = require("../config/db");
 const { getPayOSClient } = require("./payosClient");
+const { recordCouponUsage } = require("./couponService");
 const { applyPaidPlanToUser } = require("./subscriptionService");
 
 const PAYOS_STATUS_TO_PAYMENT_STATUS = {
@@ -43,6 +44,7 @@ function createPaymentStatusSynchronizer({
   getPayOSClient: getPayOSClientForSync = getPayOSClient,
   assertPaymentSettlementReady: assertReady = assertPaymentSettlementReady,
   beforeTransactionWork = async () => {},
+  recordCouponUsage: recordCouponUsageForSettlement = recordCouponUsage,
 } = {}) {
   async function withPaymentTransaction(paymentId, work) {
     assertReady();
@@ -62,7 +64,19 @@ function createPaymentStatusSynchronizer({
 
   async function applyPaidPayment(payment, remotePaymentLink, snapshotPayOSData) {
     return withPaymentTransaction(payment._id, async (storedPayment, session) => {
-      if (!storedPayment || storedPayment.status === "paid") return storedPayment || payment;
+      if (!storedPayment) return payment;
+      if (storedPayment.status === "paid") {
+        if (storedPayment.coupon) {
+          await recordCouponUsageForSettlement({
+            couponId: storedPayment.coupon,
+            userId: storedPayment.user,
+            paymentId: storedPayment._id,
+            discountAmount: storedPayment.discountAmount || 0,
+            session,
+          });
+        }
+        return storedPayment;
+      }
 
       mergePayOSData(storedPayment, snapshotPayOSData, remotePaymentLink);
       if (Number(remotePaymentLink.amount) !== Number(storedPayment.amount)) {
@@ -81,6 +95,15 @@ function createPaymentStatusSynchronizer({
       storedPayment.paidAt = storedPayment.paidAt || new Date();
       applyPaidPlanToUser(user, storedPayment.plan, storedPayment.paidAt);
       storedPayment.status = "paid";
+      if (storedPayment.coupon) {
+        await recordCouponUsageForSettlement({
+          couponId: storedPayment.coupon,
+          userId: storedPayment.user,
+          paymentId: storedPayment._id,
+          discountAmount: storedPayment.discountAmount || 0,
+          session,
+        });
+      }
       await user.save({ session });
       await storedPayment.save({ session });
       return storedPayment;

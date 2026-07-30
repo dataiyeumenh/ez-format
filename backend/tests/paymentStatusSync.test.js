@@ -225,6 +225,41 @@ test("PayOS sync does not reapply credits from independent pending snapshots", a
   assert.equal(store.transactions, 2);
 });
 
+test("PayOS concurrent snapshots settle one coupon usage in the payment transaction", async () => {
+  const { createPendingSnapshot, store } = installPaymentStore();
+  store.payment.coupon = "coupon-id";
+  store.payment.discountAmount = 2500;
+  const recordedPayments = new Set();
+  let couponSettlements = 0;
+
+  const sync = createPaymentStatusSynchronizer({
+    PaymentModel: Payment,
+    UserModel: User,
+    getPayOSClient: () => payosClient.getPayOSClient(),
+    assertPaymentSettlementReady: () => {},
+    async recordCouponUsage({ couponId, userId, paymentId, discountAmount, session }) {
+      assert.equal(couponId, "coupon-id");
+      assert.equal(userId, "user-id");
+      assert.equal(paymentId, "payment-id");
+      assert.equal(discountAmount, 2500);
+      assert.ok(session?.state, "coupon settlement must receive the active transaction session");
+      if (!recordedPayments.has(paymentId)) {
+        recordedPayments.add(paymentId);
+        couponSettlements += 1;
+      }
+    },
+  });
+
+  await Promise.all([
+    sync.applyPaidPayment(createPendingSnapshot(), { amount: 10000, status: "PAID" }, {}),
+    sync.applyPaidPayment(createPendingSnapshot(), { amount: 10000, status: "PAID" }, {}),
+  ]);
+
+  assert.equal(store.payment.status, "paid");
+  assert.equal(store.user.fileCredits, 3);
+  assert.equal(couponSettlements, 1);
+});
+
 test("PayOS sync rolls back credits when payment persistence fails", async () => {
   const { createPendingSnapshot, store } = installPaymentStore({ failNextPaymentSave: true });
 

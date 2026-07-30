@@ -263,15 +263,29 @@ async function validateCouponForCheckout({
   };
 }
 
-async function recordCouponUsage({ couponId, userId, paymentId, discountAmount }) {
-  await CouponUsage.create({
+async function recordCouponUsage({ couponId, userId, paymentId, discountAmount, session }) {
+  const usage = {
     coupon: couponId,
     user: userId,
     payment: paymentId || null,
     discountAmount: Number(discountAmount || 0),
-    usedAt: new Date(),
-  });
-  await Coupon.findByIdAndUpdate(couponId, { $inc: { usageCount: 1 } });
+  };
+
+  if (!paymentId) {
+    await CouponUsage.create({ ...usage, usedAt: new Date() }, { session });
+    await Coupon.findByIdAndUpdate(couponId, { $inc: { usageCount: 1 } }, { session });
+    return { recorded: true };
+  }
+
+  const result = await CouponUsage.updateOne(
+    { payment: paymentId },
+    { $setOnInsert: usage },
+    { upsert: true, session },
+  );
+  if (result.upsertedCount !== 1) return { recorded: false };
+
+  await Coupon.findByIdAndUpdate(couponId, { $inc: { usageCount: 1 } }, { session });
+  return { recorded: true };
 }
 
 module.exports = {

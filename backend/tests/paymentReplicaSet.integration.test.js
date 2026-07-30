@@ -3,6 +3,8 @@ const test = require("node:test");
 
 const mongoose = require("mongoose");
 const connectDB = require("../config/db");
+const Coupon = require("../models/Coupon");
+const CouponUsage = require("../models/CouponUsage");
 const Payment = require("../models/Payment");
 const Plan = require("../models/Plan");
 const User = require("../models/User");
@@ -23,13 +25,14 @@ if (SKIP_REASON) {
     "replica-set duplicate PayOS webhooks settle once",
     "replica-set transaction rolls back user credits when payment persistence fails",
     "replica-set concurrent settlement retries a write conflict without double credits",
+    "replica-set concurrent coupon settlement records one usage",
   ]) {
     test(name, { skip: SKIP_REASON }, () => {});
   }
 } else {
-  const created = { payments: [], plans: [], users: [] };
+  const created = { coupons: [], payments: [], plans: [], users: [] };
 
-  async function createFixture() {
+  async function createFixture({ withCoupon = false } = {}) {
     const suffix = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
     const plan = await Plan.create({
       code: `payos-${suffix}`,
@@ -45,6 +48,18 @@ if (SKIP_REASON) {
       authProvider: "google",
       fileCredits: 2,
     });
+    const coupon = withCoupon
+      ? await Coupon.create({
+        code: `PAYOS${suffix.replace(/[^a-z0-9]/gi, "").slice(-16)}`.toUpperCase(),
+        description: "Replica-set coupon settlement test",
+        discountPercent: 25,
+        applicablePlans: [plan._id],
+        usageLimit: 10,
+        limitPerUser: 1,
+        startDate: new Date(Date.now() - 60_000),
+        endDate: new Date(Date.now() + 60_000),
+      })
+      : null;
     const payment = await Payment.create({
       user: user._id,
       plan: plan._id,
@@ -52,12 +67,16 @@ if (SKIP_REASON) {
       planCode: plan.code,
       planName: plan.name,
       amount: 10000,
+      coupon: coupon?._id || null,
+      couponApplied: Boolean(coupon),
+      discountAmount: coupon ? 2500 : 0,
       paymentLinkId: `payment-link-${suffix}`,
     });
     created.plans.push(plan._id);
     created.users.push(user._id);
     created.payments.push(payment._id);
-    return { payment, plan, user };
+    if (coupon) created.coupons.push(coupon._id);
+    return { coupon, payment, plan, user };
   }
 
   test.before(async () => {
@@ -68,7 +87,9 @@ if (SKIP_REASON) {
   });
 
   test.after(async () => {
+    await CouponUsage.deleteMany({ payment: { $in: created.payments } });
     await Payment.deleteMany({ _id: { $in: created.payments } });
+    await Coupon.deleteMany({ _id: { $in: created.coupons } });
     await User.deleteMany({ _id: { $in: created.users } });
     await Plan.deleteMany({ _id: { $in: created.plans } });
     await mongoose.disconnect();
@@ -163,5 +184,38 @@ if (SKIP_REASON) {
     assert.equal(storedPayment.status, "paid");
     assert.equal(storedUser.fileCredits, 3);
     assert.ok(arrivals >= 3, `Expected a retried transaction attempt; saw ${arrivals}.`);
+  });
+
+  test("replica-set concurrent coupon settlement records one usage", async () => {
+    const { coupon, payment, user } = await createFixture({ withCoupon: true });
+    let arrivals = 0;
+    let releaseGate;
+    const gate = new Promise((resolve) => {
+      releaseGate = resolve;
+    });
+    const synchronizer = createPaymentStatusSynchronizer({
+      async beforeTransactionWork({ payment: attemptPayment }) {
+        if (attemptPayment.status === "paid") return;
+        arrivals += 1;
+        if (arrivals === 2) releaseGate();
+        await gate;
+      },
+    });
+
+    await Promise.all([
+      synchronizer.applyPaidPayment(payment, { amount: payment.amount, status: "PAID" }, {}),
+      synchronizer.applyPaidPayment(payment, { amount: payment.amount, status: "PAID" }, {}),
+    ]);
+
+    const [storedCoupon, storedPayment, storedUser, usages] = await Promise.all([
+      Coupon.findById(coupon._id),
+      Payment.findById(payment._id),
+      User.findById(user._id),
+      CouponUsage.countDocuments({ payment: payment._id }),
+    ]);
+    assert.equal(storedPayment.status, "paid");
+    assert.equal(storedUser.fileCredits, 3);
+    assert.equal(usages, 1);
+    assert.equal(storedCoupon.usageCount, 1);
   });
 }
