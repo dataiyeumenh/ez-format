@@ -71,6 +71,7 @@ function serializeConversionRun(run) {
     status: run.status,
     targetTemplateId: run.targetTemplateId || "",
     converterUploadId: run.converterUploadId || "",
+    operationSessionId: run.operationSessionId || "",
     mode: run.mode || "mapping",
     reconstructionRunId: run.reconstructionRun
       ? String(run.reconstructionRun?._id || run.reconstructionRun)

@@ -65,7 +65,9 @@ $steps = @()
         "backend\controllers\authController.js",
         "backend\controllers\convertController.js",
         "backend\controllers\studentSessionController.js",
+        "backend\models\StudentAttempt.js",
         "backend\models\StudentActivity.js",
+        "backend\models\StudentSkillProgress.js",
         "backend\routes\student.js",
         "backend\routes\internal.js",
         "backend\seed.js"
@@ -79,7 +81,7 @@ $steps = @()
 })
 
 [void]($steps += Step "Backend student tests" {
-    node --test backend/tests/studentSessions.test.js backend/tests/studentQuestions.test.js backend/tests/studentActivities.test.js
+    node --test backend/tests/studentSessions.test.js backend/tests/studentQuestions.test.js backend/tests/studentActivities.test.js backend/tests/studentAttempts.test.js
     if ($LASTEXITCODE -ne 0) { throw "Backend student tests failed" }
 })
 
@@ -111,12 +113,15 @@ $steps = @()
     Pop-Location
 })
 
-if ($SkipSlowTests) {
-    [void]($steps += Step "MISA import repair Task 9 gate" {
-        & (Join-Path $RepoRoot "scripts\qa-misa-import-repair.ps1") -RepoRoot $RepoRoot -SkipSlowTests
-        if ($LASTEXITCODE -ne 0) { throw "Task 9 focused QA failed" }
-    })
-}
+[void]($steps += Step "MISA import repair Task 9 gate" {
+    $repairGate = Join-Path $RepoRoot "scripts\qa-misa-import-repair.ps1"
+    if ($SkipSlowTests) {
+        & $repairGate -RepoRoot $RepoRoot -SkipSlowTests
+    } else {
+        & $repairGate -RepoRoot $RepoRoot
+    }
+    if ($LASTEXITCODE -ne 0) { throw "Task 9 focused QA failed" }
+})
 
 if (-not $SkipSlowTests) {
     [void]($steps += Step "Converter full tests" {

@@ -430,6 +430,7 @@ async def analyze_raw_upload(
     target_template_id: Annotated[str | None, Form()] = None,
     conversion_run_id: Annotated[str | None, Form()] = None,
     operation_session_id: Annotated[str | None, Form()] = None,
+    upload_id: Annotated[str | None, Form()] = None,
     conversion_context_token: Annotated[str | None, Form()] = None,
     student_context_token: Annotated[str | None, Form()] = None,
     use_ai: Annotated[bool, Form()] = False,
@@ -446,6 +447,7 @@ async def analyze_raw_upload(
             x_conversion_context,
             conversion_context_token,
             required_scope="analyze",
+            upload_id=upload_id,
             session_id=operation_session_id,
             target_template_id=target_template_id,
             conversion_run_id=conversion_run_id,
@@ -461,6 +463,8 @@ async def analyze_raw_upload(
             )
         claimed_run_id = str((claims or {}).get("conversion_run_id") or "").strip()
         supplied_run_id = str(conversion_run_id or "").strip()
+        claimed_upload_id = str((claims or {}).get("upload_id") or "").strip()
+        supplied_upload_id = str(upload_id or "").strip()
         if bool(claimed_session_id) != bool(supplied_session_id) or (
             claimed_session_id
             and not hmac.compare_digest(claimed_session_id, supplied_session_id)
@@ -477,6 +481,14 @@ async def analyze_raw_upload(
                 status_code=409,
                 detail="conversion_run_id không khớp conversion context",
             )
+        if claimed_session_id and (
+            not supplied_upload_id
+            or not hmac.compare_digest(claimed_upload_id, supplied_upload_id)
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="upload_id không khớp conversion context",
+            )
         effective_target_template_id = target_template_id or (
             str((claims or {}).get("target_template_id") or "") or None
         )
@@ -489,6 +501,7 @@ async def analyze_raw_upload(
             conversion_context_token=context_token,
             operation_session_id=supplied_session_id or None,
             conversion_run_id=supplied_run_id or None,
+            preallocated_upload_id=supplied_upload_id or None,
             student_context_token=None,
             use_ai=use_ai,
             ai_mapping_opt_in=ai_mapping_opt_in

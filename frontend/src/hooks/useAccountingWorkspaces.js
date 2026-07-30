@@ -156,10 +156,11 @@ export function useAccountingWorkspaces() {
     [loadWorkspaces],
   );
 
-  const createConversionContext = useCallback(async (workspaceId) => {
+  const createConversionContext = useCallback(async (workspaceId, conversionRunId) => {
     if (!workspaceId) return null;
     const { data } = await api.post(
       `/accounting-workspaces/${workspaceId}/conversion-context`,
+      { conversion_run_id: conversionRunId },
     );
     return data;
   }, []);

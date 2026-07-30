@@ -1063,6 +1063,7 @@ test("concurrent server lifecycles own independent repair sweepers", async () =>
     delete require.cache[serverPath];
     const { createStartServer } = require("../server");
     const startServer = createStartServer({
+      repairEnabled: true,
       migrateQuestionEvents: async () => ({ purged: 0 }),
       listen: () => {
       const server = {

@@ -32,6 +32,30 @@ rules:
   - path: frontend/src/index.css
     owner: compose
     reason: Task 9 reduced-motion behavior composition
+  - path: backend/models/ConversionRun.js
+    owner: compose
+    reason: Task 9 production conversion binding composition
+  - path: backend/services/conversionContextBindingService.js
+    owner: compose
+    reason: Task 9 owned run context issuance contract
+  - path: backend/services/conversionRunService.js
+    owner: compose
+    reason: Task 9 conversion binding serialization contract
+  - path: backend/tests/conversionContextIssuance.test.js
+    owner: compose
+    reason: Task 9 production context handshake regression
+  - path: backend/tests/conversionRuns.test.js
+    owner: compose
+    reason: Task 9 preallocated conversion binding regression
+  - path: backend/tests/converterGatewayComposition.test.js
+    owner: compose
+    reason: Task 9 gateway path and header security regressions
+  - path: backend/tests/qaComposition.test.js
+    owner: compose
+    reason: Task 9 default and fast QA composition regressions
+  - path: frontend/src/hooks/useAccountingWorkspaces.js
+    owner: compose
+    reason: Task 9 bound workspace context handshake
   - path: frontend/src/hooks/useConversionSession.js
     owner: source
     reason: accounting operation session contract
@@ -723,8 +747,8 @@ rules:
     owner: source
     reason: Task 8 final-reviewed MISA import repair
   - path: frontend/tests/misa-import-repair.integration.spec.mjs
-    owner: source
-    reason: Task 8 final-reviewed MISA import repair
+    owner: compose
+    reason: Task 8 MISA journeys composed with Task 9 production handshake and QA wiring
   - path: backend/controllers/misaImportRepairController.js
     owner: compose
     reason: Task 8 final-reviewed MISA import repair

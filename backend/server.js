@@ -61,6 +61,9 @@ const voucherReconstructionEnabled =
   "true";
 const studentAssistantEnabled =
   String(process.env.STUDENT_ASSISTANT_ENABLED || "false").toLowerCase() === "true";
+const misaImportRepairEnabled =
+  String(process.env.MISA_IMPORT_REPAIR_ENABLED || "false").trim().toLowerCase() ===
+  "true";
 const runtimeCapabilities = getRuntimeCapabilities();
 const mappingProfileV2Enabled = runtimeCapabilities.mapping_profile_v2;
 const converterGatewayUsageReady = isConverterGatewayUsageReady();
@@ -142,7 +145,14 @@ app.get("/admin/revenue", requireDb, protect, adminOnly, getRevenue);
 
 if (!converterGatewayUsageReady) {
   app.get("/api/converter/capabilities", requireDb, protect, (_req, res) => {
-    res.json(mergeGatewayCapabilities(runtimeCapabilities));
+    res.status(503).json(
+      mergeGatewayCapabilities(
+        {},
+        process.env,
+        {},
+        { gatewayAvailable: false },
+      ),
+    );
   });
 }
 
@@ -156,7 +166,7 @@ app.get("/api/health", (req, res) => {
       voucherReconstruction: voucherReconstructionEnabled,
       converterGateway: converterGatewayUsageReady,
       studentAssistant: studentAssistantEnabled,
-      operations: runtimeCapabilities,
+      operations: converterGatewayUsageReady ? runtimeCapabilities : {},
       paymentSettlement: getPaymentSettlementReadiness().ready,
     },
   });
@@ -171,6 +181,7 @@ function createStartServer({
   migrateMappingProfilesV2 = migrateMappingProfilesV1ToV2,
   migrateQuestionEvents = migrateStudentQuestionEventPrivacy,
   questionEventModel = StudentQuestionEvent,
+  repairEnabled = misaImportRepairEnabled,
   ensureRepairIndexes = ensureMisaImportRepairIndexes,
   startArtifactSweeper = startConversionArtifactSweeper,
   startRepairSweeper = startMisaImportRepairSweeper,
@@ -189,11 +200,13 @@ function createStartServer({
       await assertArtifactStorageReachable({ connection: mongoConnection });
       await ensureConversionArtifactIndexes();
     }
-    const repairIndexes = await ensureRepairIndexes();
-    if (repairIndexes.droppedIndexes.length || repairIndexes.unsetNullKeys) {
-      logger.log(
-        `[DB] MisaImportRepair indexes: ${repairIndexes.droppedIndexes.length} legacy index(es) dropped, ${repairIndexes.unsetNullKeys} null key(s) unset`,
-      );
+    if (repairEnabled) {
+      const repairIndexes = await ensureRepairIndexes();
+      if (repairIndexes.droppedIndexes.length || repairIndexes.unsetNullKeys) {
+        logger.log(
+          `[DB] MisaImportRepair indexes: ${repairIndexes.droppedIndexes.length} legacy index(es) dropped, ${repairIndexes.unsetNullKeys} null key(s) unset`,
+        );
+      }
     }
     const migration = await migrateMappingProfiles();
     if (!migration.skipped) {
@@ -229,10 +242,12 @@ function createStartServer({
     const server = listen(PORT, () => {
       logger.log(`Server running on port ${PORT}`);
     });
-    const repairSweeper = startRepairSweeper({ owner: server });
+    const repairSweeper = repairEnabled
+      ? startRepairSweeper({ owner: server })
+      : null;
     server.once("close", () => {
       artifactSweeper?.stop();
-      repairSweeper.stop();
+      repairSweeper?.stop();
     });
     return server;
   };

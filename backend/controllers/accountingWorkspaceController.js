@@ -17,10 +17,12 @@ const {
   userCanEditWorkspace,
 } = require("../services/masterDataService");
 const {
-  createConversionContextToken,
   verifyConversionContextToken,
   verifyStudentContextToken,
 } = require("../services/conversionContextService");
+const {
+  issueConversionContextForRun,
+} = require("../services/conversionContextBindingService");
 const { parseMasterDataFile } = require("../services/converterClient");
 const {
   cleanMappingProfilePayload,
@@ -634,33 +636,26 @@ async function saveAlias(req, res) {
 }
 
 async function createConversionContext(req, res) {
-  const workspace = await findWorkspaceForUser(req.params.id, req.user._id);
-  if (!workspace)
+  const context = await issueConversionContextForRun({
+    conversionRunId: req.body?.conversion_run_id,
+    userId: req.user._id,
+    expectedWorkspaceId: req.params.id,
+  });
+  if (!context) {
     return res
       .status(404)
-      .json({ success: false, message: "Không tìm thấy doanh nghiệp" });
-  const snapshotIds = (workspace.activeSnapshots || []).map(
-    (item) => item.snapshot,
-  );
-  const snapshots = await MasterDataSnapshot.find({
-    _id: { $in: snapshotIds },
-    workspace: workspace._id,
-    status: "active",
-  });
-  const snapshotSetHash = buildSnapshotSetHash(snapshots);
-  const token = createConversionContextToken({
-    userId: req.user._id,
-    workspaceId: workspace._id,
-    snapshotSetHash,
-    snapshotIds: snapshots.map((item) => item._id),
-    masterDataRevision: workspace.masterDataRevision,
-  });
+      .json({ success: false, message: "Không tìm thấy phiên chuyển đổi" });
+  }
   res.json({
     success: true,
-    contextToken: token,
-    snapshotSetHash,
-    workspace: serializeWorkspace(workspace),
-    snapshots: snapshots.map(serializeSnapshot),
+    contextToken: context.contextToken,
+    conversionRunId: context.conversionRunId,
+    operationSessionId: context.operationSessionId,
+    uploadId: context.uploadId,
+    targetTemplateId: context.targetTemplateId,
+    snapshotSetHash: context.snapshotSetHash,
+    workspace: serializeWorkspace(context.workspace),
+    snapshots: context.snapshots.map(serializeSnapshot),
   });
 }
 

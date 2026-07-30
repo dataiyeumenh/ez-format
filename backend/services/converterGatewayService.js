@@ -3,6 +3,11 @@ const SERVICE_TOKEN_PLACEHOLDER = "replace-with-a-long-random-secret";
 const MIN_SERVICE_TOKEN_CHARS = 32;
 const SAFE_RESPONSE_HEADERS = new Set(["content-disposition", "content-type", "retry-after"]);
 const PROTECTED_HEADERS = new Set(["content-type", "x-conversion-context", "x-converter-service-token", "x-request-id"]);
+const TRUSTED_EXTRA_HEADERS = new Set([
+  "idempotency-key",
+  "x-reconstruction-context",
+  "x-student-context",
+]);
 
 function gatewayError(statusCode, message, code) {
   const error = new Error(message);
@@ -69,7 +74,14 @@ function internalHeaders({ contextToken, requestId, contentType, extraHeaders = 
   if (contentType) headers["content-type"] = contentType;
   for (const [name, value] of Object.entries(extraHeaders)) {
     const normalized = String(name).toLowerCase();
-    if (normalized && !PROTECTED_HEADERS.has(normalized) && String(value).trim()) headers[normalized] = String(value).trim();
+    if (
+      normalized &&
+      TRUSTED_EXTRA_HEADERS.has(normalized) &&
+      !PROTECTED_HEADERS.has(normalized) &&
+      String(value).trim()
+    ) {
+      headers[normalized] = String(value).trim();
+    }
   }
   return headers;
 }

@@ -33,6 +33,71 @@ def _context_token(payload: dict, secret: str = "test-secret") -> str:
     return f"{header}.{body}.{encoded_signature}"
 
 
+def test_production_analyze_forwards_preallocated_run_session_and_upload_bindings(
+    tmp_path, monkeypatch
+):
+    import app.main as main_module
+
+    monkeypatch.setenv("CONVERSION_CONTEXT_SECRET", "test-secret")
+    monkeypatch.setenv("OPERATION_STORE_PROVIDER", "node")
+    captured = {}
+
+    def fake_analyze_upload(**kwargs):
+        captured.update(kwargs)
+        return {
+            "upload_id": kwargs.get("preallocated_upload_id"),
+            "target_template_id": "bsn_sales",
+            "session": {"session_id": kwargs["operation_session_id"]},
+        }
+
+    monkeypatch.setattr(main_module, "analyze_upload", fake_analyze_upload)
+    run_id = "507f1f77bcf86cd799439011"
+    session_id = "a52a3c60-df68-46e5-a6a5-4a7bb44828c5"
+    upload_id = "e7270428-d19f-4fd9-bd86-1b4a5a632e0a"
+    token = _context_token(
+        {
+            "purpose": "misa_conversion",
+            "user_id": "user-1",
+            "owner_scope": "user:user-1",
+            "workspace_id": None,
+            "snapshot_set_hash": None,
+            "conversion_run_id": run_id,
+            "operation_session_id": session_id,
+            "upload_id": upload_id,
+                "target_template_id": "bsn_sales",
+                "max_file_bytes": 20 * 1024 * 1024,
+                "scopes": ["analyze"],
+            "exp": int(time.time()) + 60,
+        }
+    )
+    input_path = _workbook(tmp_path / "production.xlsx")
+
+    with input_path.open("rb") as handle:
+        response = client.post(
+            "/api/v1/uploads/analyze",
+            files={
+                "file": (
+                    "production.xlsx",
+                    handle,
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                )
+            },
+            data={
+                "target_template_id": "bsn_sales",
+                "conversion_context_token": token,
+                "conversion_run_id": run_id,
+                "operation_session_id": session_id,
+                "upload_id": upload_id,
+            },
+            headers={"x-conversion-context": token},
+        )
+
+    assert response.status_code == 200
+    assert captured["conversion_run_id"] == run_id
+    assert captured["operation_session_id"] == session_id
+    assert captured["preallocated_upload_id"] == upload_id
+
+
 def test_health_capabilities_are_fixed_booleans():
     payload = client.get("/healthz").json()
 

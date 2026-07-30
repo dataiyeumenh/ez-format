@@ -17,10 +17,6 @@ foreach ($marker in @("package.json", "frontend\package.json", "backend\package.
     }
 }
 
-if (-not $SkipSlowTests) {
-    throw "Task 9 focused gate requires -SkipSlowTests; use npm run qa:fast."
-}
-
 $artifactRoot = Join-Path $resolvedRepoRoot ".artifacts\qa\misa-import-repair\$(Get-Date -Format 'yyyyMMdd-HHmmss')"
 New-Item -ItemType Directory -Path $artifactRoot -Force | Out-Null
 $failures = [System.Collections.Generic.List[string]]::new()

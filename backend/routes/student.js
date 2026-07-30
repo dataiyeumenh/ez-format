@@ -9,6 +9,8 @@ const {
   deleteStudentActivities,
   deleteStudentSession,
   getStudentActivities,
+  getStudentAttempts,
+  getStudentProgress,
   getStudentSession,
   refreshStudentContext,
   sessionIsExpired,
@@ -212,7 +214,9 @@ async function proxyStudentOperation(req, res, requestedOperation) {
 router.use(requireDb, protect);
 router.post("/sessions", asyncRoute(createStudentSession));
 router.get("/sessions/:id", asyncRoute(getStudentSession));
+router.get("/sessions/:id/attempts", asyncRoute(getStudentAttempts));
 router.get("/sessions/:id/activity", asyncRoute(getStudentActivities));
+router.get("/progress", asyncRoute(getStudentProgress));
 router.delete("/sessions/:id/activity", asyncRoute(deleteStudentActivities));
 router.delete("/sessions/:id", asyncRoute(deleteStudentSession));
 router.post("/sessions/:id/context", asyncRoute(refreshStudentContext));

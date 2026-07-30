@@ -140,17 +140,25 @@ def save_upload(
     filename: str,
     content: bytes,
     *,
+    preallocated_upload_id: str | None = None,
     student_claims: StudentContextClaims | None = None,
     student_ttl_seconds: int | None = None,
 ) -> tuple[str, Path]:
     suffix = Path(filename or "").suffix.lower()
     if suffix not in {".xls", ".xlsx"}:
         raise ValueError("Only .xls and .xlsx files are supported.")
-    upload_id = str(uuid.uuid4())
+    supplied_upload_id = str(preallocated_upload_id or "").strip()
+    if supplied_upload_id:
+        try:
+            upload_id = str(uuid.UUID(supplied_upload_id))
+        except ValueError as exc:
+            raise ValueError("Preallocated upload id không hợp lệ") from exc
+    else:
+        upload_id = str(uuid.uuid4())
     now = int(time.time())
     directory = _upload_dir(upload_id)
     with _UPLOAD_CACHE_LOCK:
-        directory.mkdir(parents=True, exist_ok=True)
+        directory.mkdir(parents=True, exist_ok=False)
         if student_claims is not None:
             if student_ttl_seconds is None:
                 raise ValueError("Student upload TTL là bắt buộc")
@@ -178,6 +186,7 @@ def analyze_upload(
     conversion_context_token: str | None = None,
     operation_session_id: str | None = None,
     conversion_run_id: str | None = None,
+    preallocated_upload_id: str | None = None,
     student_context_token: str | None = None,
     use_ai: bool = False,
     ai_mapping_opt_in: bool = False,
@@ -193,6 +202,7 @@ def analyze_upload(
     upload_id, input_path = save_upload(
         filename,
         content,
+        preallocated_upload_id=preallocated_upload_id,
         student_claims=student_claims,
         student_ttl_seconds=student_ttl,
     )

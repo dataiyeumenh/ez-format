@@ -97,7 +97,6 @@ async function createConversionRun(req, res) {
       outputFormat: "MISA",
       status: "processing",
       targetTemplateId: req.body.targetTemplateId || "",
-      converterUploadId: req.body.converterUploadId || "",
       workspace: workspace?._id || null,
       workspaceNameSnapshot: workspace?.name || "",
       snapshotSetHash,

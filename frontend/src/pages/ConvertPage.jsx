@@ -525,23 +525,37 @@ const ConvertPage = () => {
     operationSession.resetSession();
   };
 
-  const createConversionRunLog = async (file, templateId, context = null) => {
-    if (!localStorage.getItem("token")) return null;
-    try {
-      const { data } = await api.post("/conversion-runs", {
-        fileName: file.name,
-        fileSizeBytes: file.size,
-        targetTemplateId: templateId,
-        workspaceId: context?.workspace?.id || "",
-        snapshotSetHash: context?.snapshotSetHash || "",
-      });
-      const runId = data.run?.id || null;
-      setConversionRunId(runId);
-      return runId;
-    } catch (err) {
-      console.warn("[ConvertPage] Cannot create conversion run log:", err);
-      return null;
+  const createConversionRunLog = async (file, templateId) => {
+    if (!localStorage.getItem("token")) {
+      throw new Error("Bạn cần đăng nhập để chuyển đổi file.");
     }
+    const { data } = await api.post("/conversion-runs", {
+      fileName: file.name,
+      fileSizeBytes: file.size,
+      targetTemplateId: templateId,
+      workspaceId: selectedWorkspaceId || "",
+    });
+    const run = data.run;
+    if (
+      !run?.id ||
+      !run.operationSessionId ||
+      !run.converterUploadId
+    ) {
+      throw new Error("Backend chưa cấp đủ production conversion binding.");
+    }
+    setConversionRunId(run.id);
+    return run;
+  };
+
+  const issueBoundConversionContext = async (runId = conversionRunId) => {
+    if (!runId) throw new Error("Thiếu conversion run để cấp context.");
+    if (selectedWorkspaceId) {
+      return createConversionContext(selectedWorkspaceId, runId);
+    }
+    const { data } = await api.post("/converter/context", {
+      conversion_run_id: runId,
+    });
+    return data;
   };
 
   const updateConversionRunLog = async (
@@ -652,12 +666,21 @@ const ConvertPage = () => {
     resetAnalysis();
     let runId = null;
     try {
-      const context = selectedWorkspaceId
-        ? await createConversionContext(selectedWorkspaceId)
-        : null;
+      const run = await createConversionRunLog(file, templateId);
+      runId = run.id;
+      const context = await issueBoundConversionContext(run.id);
       setConversionContext(context);
-      runId = await createConversionRunLog(file, templateId, context);
-      const result = await analyzeFile(file, templateId, context?.contextToken || null);
+      const result = await analyzeFile(
+        file,
+        templateId,
+        context?.contextToken || null,
+        {
+          conversionRunId: context?.conversionRunId || run.id,
+          operationSessionId:
+            context?.operationSessionId || run.operationSessionId,
+          uploadId: context?.uploadId || run.converterUploadId,
+        },
+      );
       const suggestion = result.mapping_suggestion || {};
       setAnalyzePayload({ ...result, conversionRunId: runId });
       setTargetTemplateId(result.target_template_id || templateId);
@@ -929,7 +952,7 @@ const ConvertPage = () => {
       targetCode,
       sourceSystem: analyzePayload?.detected?.source_signature_hash || "default",
     });
-    const refreshedContext = await createConversionContext(selectedWorkspaceId);
+    const refreshedContext = await issueBoundConversionContext();
     setConversionContext(refreshedContext);
     const payload = {
       ...buildMappingPayload(),
@@ -984,12 +1007,7 @@ const ConvertPage = () => {
   };
 
   const refreshConversionContext = async () => {
-    if (!selectedWorkspaceId) {
-      const token = conversionContext?.contextToken;
-      if (!token) throw new Error("Thiếu conversion context cho thao tác mở rộng.");
-      return token;
-    }
-    const context = await createConversionContext(selectedWorkspaceId);
+    const context = await issueBoundConversionContext();
     setConversionContext(context);
     return context?.contextToken || null;
   };

@@ -43,7 +43,7 @@ const {
 
 process.env.CONVERSION_CONTEXT_SECRET = "test-student-session-secret";
 
-test("student router exposes support endpoints only", () => {
+test("student router composes support, attempt-history, and progress endpoints", () => {
   const routes = studentRouter.stack
     .filter((layer) => layer.route)
     .map((layer) => ({
@@ -52,7 +52,8 @@ test("student router exposes support endpoints only", () => {
     }));
   const routePaths = routes.map(({ path }) => path);
 
-  assert.equal(routePaths.some((path) => path.includes("attempt")), false);
+  assert.ok(routePaths.includes("/sessions/:id/attempts"));
+  assert.ok(routePaths.includes("/progress"));
   assert.equal(routePaths.some((path) => path.includes("score")), false);
   assert.equal(routePaths.some((path) => path.includes("grade")), false);
 
@@ -72,12 +73,13 @@ test("student router exposes support endpoints only", () => {
   );
 });
 
-test("internal student routes expose no grading or attempt state", () => {
+test("internal student routes expose deterministic attempts without grading routes", () => {
   const routePaths = internalRouter.stack
     .map((layer) => layer.route?.path)
     .filter((routePath) => routePath?.startsWith("/student/"));
 
-  assert.equal(routePaths.some((routePath) => routePath.includes("attempt")), false);
+  assert.ok(routePaths.includes("/student/sessions/:id/attempts"));
+  assert.ok(routePaths.includes("/student/sessions/:id/attempts/:attemptId/hints"));
   assert.equal(routePaths.some((routePath) => routePath.includes("score")), false);
   assert.ok(routePaths.includes("/student/sessions/:id/events"));
   assert.equal(
@@ -103,6 +105,7 @@ test("converter capability response preserves the student backend gate", () => {
         auto_match: false,
         retry_unit: "document_group",
       },
+      available: true,
       gateway: true,
       artifactStorage: "mongodb-gridfs",
     },
@@ -340,7 +343,7 @@ test("student context rejects non-HS256 tokens", () => {
   );
 });
 
-test("student context scopes never include grading or attempt capabilities", () => {
+test("student context scopes include attempts only behind the check-work gate", () => {
   const flags = {
     STUDENT_ASSISTANT_ENABLED: "true",
     STUDENT_FILE_EXPLAIN_ENABLED: "true",
@@ -364,7 +367,7 @@ test("student context scopes never include grading or attempt capabilities", () 
       STUDENT_ACCOUNTING_MAP_ENABLED: "true",
       STUDENT_RECONCILIATION_ENABLED: "true",
     }),
-    ["analyze", "explain", "ask", "accounting_map", "reconcile"],
+    ["analyze", "explain", "ask", "attempt", "accounting_map", "reconcile"],
   );
   assert.deepEqual(
     studentContextScopesFromFlags({ ...flags, STUDENT_INTERNSHIP_ENABLED: "true" }),

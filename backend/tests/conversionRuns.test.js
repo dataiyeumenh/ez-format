@@ -28,6 +28,9 @@ test("conversion run model stores metadata only and defaults to MISA processing"
   assert.equal(run.fileSizeBytes, 1234567);
   assert.equal(run.uploadBlob, undefined);
   assert.equal(run.workspaceNameSnapshot, "BAE Foods");
+  assert.match(run.operationSessionId, /^[0-9a-f-]{36}$/i);
+  assert.match(run.converterUploadId, /^[0-9a-f-]{36}$/i);
+  assert.notEqual(run.operationSessionId, run.converterUploadId);
   assert.equal(run.validateSync(), undefined);
 });
 
@@ -59,6 +62,7 @@ test("conversion run serializer formats admin row", () => {
     workspace: new mongoose.Types.ObjectId(),
     workspaceNameSnapshot: "BAE Foods",
     snapshotSetHash: "snapshot-hash",
+    operationSessionId: "a52a3c60-df68-46e5-a6a5-4a7bb44828c5",
   };
 
   const payload = serializeConversionRun(run);
@@ -71,6 +75,7 @@ test("conversion run serializer formats admin row", () => {
   assert.equal(payload.status, "completed");
   assert.equal(payload.workspace.name, "BAE Foods");
   assert.equal(payload.snapshotSetHash, "snapshot-hash");
+  assert.equal(payload.operationSessionId, run.operationSessionId);
 });
 
 test("conversion run stats count statuses", () => {

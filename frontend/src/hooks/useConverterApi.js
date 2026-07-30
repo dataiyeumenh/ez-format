@@ -59,12 +59,27 @@ function withExpectedVersion(payload = {}) {
   };
 }
 
-function buildUploadFormData(file, targetTemplateId, conversionContextToken = null) {
+export function buildUploadFormData(
+  file,
+  targetTemplateId,
+  conversionContextToken = null,
+  binding = {},
+) {
   const formData = new FormData();
   formData.append("file", file);
   if (targetTemplateId) formData.append("target_template_id", targetTemplateId);
   if (conversionContextToken) {
     formData.append("conversion_context_token", conversionContextToken);
+    const required = {
+      conversion_run_id: binding.conversionRunId,
+      operation_session_id: binding.operationSessionId,
+      upload_id: binding.uploadId,
+    };
+    for (const [name, value] of Object.entries(required)) {
+      const normalized = String(value || "").trim();
+      if (!normalized) throw new Error(`Thiếu ${name} cho production analyze.`);
+      formData.append(name, normalized);
+    }
   }
   return formData;
 }
@@ -185,25 +200,29 @@ export async function fetchConverterStatus(client = api) {
       ? (usesFetchFunction ? templatesResult.value : templatesResult.value.data)
       : null;
 
-  const serviceOnline = Boolean(health || templatesData);
+  const gatewayAvailable =
+    health?.available !== false &&
+    health?.gateway !== false &&
+    backend?.capabilities?.converterGateway !== false;
+  const serviceOnline = gatewayAvailable && Boolean(health || templatesData);
   const nodeCapabilities = normalizeOperationCapabilities(
     backend?.capabilities?.operations,
   );
-  const converterCapabilities = normalizeOperationCapabilities(
-    health?.capabilities || health,
-  );
+  const converterCapabilities = gatewayAvailable
+    ? normalizeOperationCapabilities(health?.capabilities || health)
+    : DEFAULT_OPERATION_CAPABILITIES;
 
   return {
     serviceOnline,
-    aiOnline: health ? aiStatusFromHealth(health) : null,
+    aiOnline: gatewayAvailable && health ? aiStatusFromHealth(health) : null,
     backendCapabilities: backend?.capabilities || null,
     capabilities: intersectOperationCapabilities(
       nodeCapabilities,
       converterCapabilities,
     ),
-    capabilitiesOnline: Boolean(backend && health),
+    capabilitiesOnline: Boolean(gatewayAvailable && backend && health),
     misaImportRepair: normalizeMisaImportRepairCapability(
-      health || backend?.capabilities || backend,
+      gatewayAvailable ? health || backend?.capabilities || backend : null,
     ),
     templates: templatesData?.items?.length
       ? templatesData.items
@@ -261,9 +280,14 @@ export function useConverterApi() {
   }, []);
 
   const analyzeFile = useCallback(
-    async (file, targetTemplateId, conversionContextToken = null) => {
+    async (
+      file,
+      targetTemplateId,
+      conversionContextToken = null,
+      binding = {},
+    ) => {
       return readApiResponse(
-        api.post("/converter/uploads/analyze", buildUploadFormData(file, targetTemplateId, conversionContextToken), {
+        api.post("/converter/uploads/analyze", buildUploadFormData(file, targetTemplateId, conversionContextToken, binding), {
           headers: conversionContextToken ? { "X-Conversion-Context": conversionContextToken } : undefined,
         }),
         "Không thể phân tích file Excel.",

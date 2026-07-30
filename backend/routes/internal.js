@@ -22,6 +22,8 @@ const {
   getInternalStudentActivities,
   recordStudentActivity,
   recordStudentAnalysisCompleted,
+  recordStudentAttempt,
+  recordStudentHint,
   recordStudentQuestionEvent,
 } = require("../controllers/studentSessionController");
 router.get("/master-data/context/:snapshotSetHash", (req, res, next) => {
@@ -63,6 +65,12 @@ if (studentInternalRoutesEnabled()) {
   });
   router.post("/student/sessions/:id/questions", (req, res, next) => {
     Promise.resolve(recordStudentQuestionEvent(req, res, next)).catch(next);
+  });
+  router.post("/student/sessions/:id/attempts", (req, res, next) => {
+    Promise.resolve(recordStudentAttempt(req, res, next)).catch(next);
+  });
+  router.post("/student/sessions/:id/attempts/:attemptId/hints", (req, res, next) => {
+    Promise.resolve(recordStudentHint(req, res, next)).catch(next);
   });
   router.post("/student/sessions/:id/activities", (req, res, next) => {
     Promise.resolve(recordStudentActivity(req, res, next)).catch(next);

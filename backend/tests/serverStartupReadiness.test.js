@@ -3,7 +3,7 @@ const http = require("node:http");
 const test = require("node:test");
 
 const { createConnectDB } = require("../config/db");
-const { app } = require("../server");
+const { app, createStartServer } = require("../server");
 
 function createMongoConnection({ topologyType, hello }) {
   return {
@@ -143,6 +143,34 @@ test("CORS exposes Content-Disposition for browser export filenames", async () =
   } finally {
     await new Promise((resolve) => server.close(resolve));
   }
+});
+
+test("disabled repair feature performs no index migration, database mutation, or sweeper startup", async () => {
+  let ensureRepairCalls = 0;
+  let startRepairCalls = 0;
+  const fakeServer = { once() {} };
+  const startServer = createStartServer({
+    repairEnabled: false,
+    connectDatabase: async () => ({}),
+    migrateMappingProfiles: async () => ({ skipped: true }),
+    ensureV2Indexes: async () => undefined,
+    migrateMappingProfilesV2: async () => ({ skipped: true }),
+    migrateQuestionEvents: async () => ({ purged: 0 }),
+    ensureRepairIndexes: async () => {
+      ensureRepairCalls += 1;
+      return { droppedIndexes: [], unsetNullKeys: 0 };
+    },
+    startRepairSweeper: () => {
+      startRepairCalls += 1;
+      return { stop() {} };
+    },
+    listen: () => fakeServer,
+    logger: { error() {}, log() {} },
+  });
+
+  assert.equal(await startServer(), fakeServer);
+  assert.equal(ensureRepairCalls, 0);
+  assert.equal(startRepairCalls, 0);
 });
 
 test("disabled Student Assistant startup still attempts privacy purge and remains available", async () => {

@@ -2,7 +2,9 @@ const crypto = require("crypto");
 const mongoose = require("mongoose");
 const StudentFileSession = require("../models/StudentFileSession");
 const StudentQuestionEvent = require("../models/StudentQuestionEvent");
+const StudentAttempt = require("../models/StudentAttempt");
 const StudentActivity = require("../models/StudentActivity");
+const StudentSkillProgress = require("../models/StudentSkillProgress");
 const AccountingWorkspace = require("../models/AccountingWorkspace");
 const { userCanAccessWorkspace } = require("../services/masterDataService");
 const {
@@ -59,6 +61,20 @@ const STUDENT_QUESTION_CATEGORIES = new Set([
   "concept_explanation",
   "unsupported_legal_or_business_judgment",
 ]);
+const STUDENT_ATTEMPT_KINDS = new Set([
+  "mapping_attempt",
+  "data_cleanup_attempt",
+  "document_classification_attempt",
+  "voucher_review_attempt",
+  "reconciliation_attempt",
+]);
+const STUDENT_SKILL_BY_ATTEMPT = {
+  mapping_attempt: "excel_mapping",
+  data_cleanup_attempt: "excel_mapping",
+  document_classification_attempt: "document_classification",
+  voucher_review_attempt: "misa_template_readiness",
+  reconciliation_attempt: "vat_reconciliation",
+};
 const STUDENT_ACTIVITY_CONFIG = {
   accounting_map_reviewed: {
     scope: "accounting_map",
@@ -109,6 +125,7 @@ function studentContextScopesFromFlags(env = process.env) {
   const scopes = [];
   if (enabled("STUDENT_FILE_EXPLAIN_ENABLED")) scopes.push("analyze", "explain");
   if (enabled("STUDENT_FILE_QA_ENABLED")) scopes.push("ask");
+  if (enabled("STUDENT_CHECK_WORK_ENABLED")) scopes.push("attempt");
   if (enabled("STUDENT_ACCOUNTING_MAP_ENABLED")) scopes.push("accounting_map");
   if (enabled("STUDENT_RECONCILIATION_ENABLED")) scopes.push("reconcile");
   if (enabled("STUDENT_INTERNSHIP_ENABLED")) scopes.push("export");
@@ -236,6 +253,41 @@ function cleanQuestionEventPayload(body = {}) {
   };
 }
 
+function cleanAttemptSummary(value = {}) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  const issueIds = Array.isArray(value.issueIds)
+    ? value.issueIds
+        .map((item) => cleanString(item, 128))
+        .filter(Boolean)
+        .slice(0, 50)
+    : [];
+  const evidenceCount = cleanNonNegativeNumber(value.evidenceCount) || 0;
+  const breakdown = Array.isArray(value.breakdown)
+    ? value.breakdown.slice(0, 12).map((item) => ({
+        category: cleanString(item?.category, 64),
+        earned: cleanNonNegativeNumber(item?.earned) || 0,
+        maxScore: cleanNonNegativeNumber(item?.maxScore) || 0,
+      }))
+    : [];
+  return { issueIds, evidenceCount, breakdown };
+}
+
+function cleanAttemptCompletedPayload(body = {}) {
+  const kind = cleanString(body.kind, 64);
+  const score = Number(body.score);
+  return {
+    event: cleanString(body.event, 64),
+    kind: STUDENT_ATTEMPT_KINDS.has(kind) ? kind : "",
+    submittedStateHash: cleanString(body.submittedStateHash, 256),
+    sessionStateHash: cleanString(body.sessionStateHash, 256),
+    rubricVersion: cleanString(body.rubricVersion, 64),
+    score: Number.isFinite(score) && score >= 0 && score <= 100 ? score : NaN,
+    completed: body.completed === true,
+    deterministic: body.deterministic === true,
+    summary: cleanAttemptSummary(body.summary),
+  };
+}
+
 function activityPayloadHasRawValues(value) {
   if (!value || typeof value !== "object") return false;
   if (Buffer.isBuffer(value)) return true;
@@ -294,6 +346,21 @@ function serializeStudentSession(session) {
   };
 }
 
+function serializeStudentAttempt(attempt) {
+  return {
+    id: String(attempt._id || attempt.id || ""),
+    revision: Number(attempt.revision || 0),
+    kind: attempt.kind,
+    score: Number(attempt.score || 0),
+    rubricVersion: attempt.rubricVersion,
+    sessionStateHash: attempt.sessionStateHash,
+    submittedStateHash: attempt.submittedStateHash,
+    summary: cleanAttemptSummary(attempt.summary || {}),
+    hintLevelUsed: Number(attempt.hintLevelUsed || 0),
+    createdAt: attempt.createdAt || null,
+  };
+}
+
 function serializeStudentActivity(activity) {
   return {
     id: String(activity._id || activity.id || ""),
@@ -303,6 +370,25 @@ function serializeStudentActivity(activity) {
     evidenceCount: Number(activity.evidenceCount || 0),
     containsRawValues: false,
     createdAt: activity.createdAt || null,
+  };
+}
+
+function serializeStudentProgress(progress) {
+  const entries = progress?.skills instanceof Map
+    ? [...progress.skills.entries()]
+    : Object.entries(progress?.skills || {});
+  return {
+    userId: String(progress?.userId || ""),
+    skills: Object.fromEntries(
+      entries.map(([skill, value]) => [
+        skill,
+        {
+          score: Number(value?.score || 0),
+          evidenceCount: Number(value?.evidenceCount || 0),
+        },
+      ]),
+    ),
+    updatedAt: progress?.updatedAt || null,
   };
 }
 
@@ -461,6 +547,34 @@ async function refreshStudentContext(req, res) {
   }
 }
 
+async function getStudentAttempts(req, res) {
+  try {
+    const session = await findAccessibleSession(req.params.id, req.user._id);
+    if (!session) {
+      return res.status(404).json({ success: false, message: "Không tìm thấy phiên học" });
+    }
+    if (sessionIsExpired(session)) {
+      return res.status(410).json({ success: false, message: "Phiên học đã hết hạn" });
+    }
+    if (!verifySessionContext(req, session, res, "attempt")) return undefined;
+    const attempts = await StudentAttempt.find({
+      sessionId: session._id,
+      userId: session.userId,
+      ownerScope: session.ownerScope,
+      workspaceId: session.workspaceId || null,
+    })
+      .sort({ revision: -1 })
+      .limit(50);
+    return res.json({ success: true, attempts: attempts.map(serializeStudentAttempt) });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: "Không thể tải lịch sử bài làm",
+      error: error.message,
+    });
+  }
+}
+
 async function getStudentActivities(req, res) {
   try {
     const session = await findAccessibleSession(req.params.id, req.user._id);
@@ -507,6 +621,24 @@ async function deleteStudentActivities(req, res) {
     return res.status(500).json({
       success: false,
       message: "Không thể xoá lịch sử hoạt động",
+      error: error.message,
+    });
+  }
+}
+
+async function getStudentProgress(req, res) {
+  try {
+    const progress = await StudentSkillProgress.findOne({ userId: req.user._id });
+    return res.json({
+      success: true,
+      progress: progress
+        ? serializeStudentProgress(progress)
+        : { userId: String(req.user._id), skills: {}, updatedAt: null },
+    });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: "Không thể tải tiến độ kỹ năng",
       error: error.message,
     });
   }
@@ -618,6 +750,121 @@ async function getInternalStudentActivities(req, res) {
     return res.status(500).json({
       success: false,
       message: "Không thể tải student activity nội bộ",
+      error: error.message,
+    });
+  }
+}
+
+async function recordStudentAttempt(req, res) {
+  try {
+    const claims = verifyInternalStudentRequest(req, res, "attempt");
+    if (!claims) return undefined;
+    const payload = cleanAttemptCompletedPayload(req.body);
+    if (
+      payload.event !== "attempt_completed" ||
+      !payload.kind ||
+      !payload.submittedStateHash ||
+      !payload.sessionStateHash ||
+      payload.rubricVersion !== "student-v1" ||
+      !Number.isFinite(payload.score) ||
+      !payload.completed ||
+      !payload.deterministic
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "Student attempt event không hợp lệ",
+      });
+    }
+    const session = await findActiveInternalSession(claims);
+    if (!session) {
+      return res.status(404).json({ success: false, message: "Không tìm thấy phiên học đang hoạt động" });
+    }
+    const latest = await StudentAttempt.findOne({ sessionId: session._id })
+      .sort({ revision: -1 });
+    const revision = Number(latest?.revision || 0) + 1;
+    const attempt = await StudentAttempt.create({
+      sessionId: session._id,
+      userId: session.userId,
+      workspaceId: session.workspaceId || null,
+      ownerScope: session.ownerScope,
+      revision,
+      kind: payload.kind,
+      submittedStateHash: payload.submittedStateHash,
+      sessionStateHash: payload.sessionStateHash,
+      rubricVersion: payload.rubricVersion,
+      score: payload.score,
+      summary: payload.summary,
+      hintLevelUsed: 0,
+    });
+    const skill = STUDENT_SKILL_BY_ATTEMPT[payload.kind];
+    const progress = await StudentSkillProgress.findOneAndUpdate(
+      { userId: session.userId },
+      {
+        $set: { [`skills.${skill}.score`]: payload.score },
+        $inc: {
+          [`skills.${skill}.evidenceCount`]: payload.summary.evidenceCount,
+        },
+        $setOnInsert: { userId: session.userId },
+      },
+      { new: true, upsert: true, runValidators: true },
+    );
+    return res.status(201).json({
+      success: true,
+      attempt: serializeStudentAttempt(attempt),
+      progress: serializeStudentProgress(progress),
+    });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: "Không thể ghi nhận bài làm student",
+      error: error.message,
+    });
+  }
+}
+
+async function recordStudentHint(req, res) {
+  try {
+    const claims = verifyInternalStudentRequest(req, res, "attempt");
+    if (!claims) return undefined;
+    const issueId = cleanString(req.body?.issueId, 128);
+    const level = Number(req.body?.level);
+    if (
+      cleanString(req.body?.event, 64) !== "hint_revealed" ||
+      !issueId ||
+      !Number.isInteger(level) ||
+      level < 0 ||
+      level > 4 ||
+      !mongoose.isValidObjectId(req.params.attemptId)
+    ) {
+      return res.status(400).json({ success: false, message: "Student hint event không hợp lệ" });
+    }
+    const session = await findActiveInternalSession(claims);
+    if (!session) {
+      return res.status(404).json({ success: false, message: "Không tìm thấy phiên học đang hoạt động" });
+    }
+    const attempt = await StudentAttempt.findOneAndUpdate(
+      {
+        _id: req.params.attemptId,
+        sessionId: session._id,
+        userId: session.userId,
+        ownerScope: session.ownerScope,
+        workspaceId: session.workspaceId || null,
+      },
+      { $max: { hintLevelUsed: level } },
+      { new: true, runValidators: true },
+    );
+    if (!attempt) {
+      return res.status(404).json({ success: false, message: "Không tìm thấy lần làm bài" });
+    }
+    return res.status(202).json({
+      success: true,
+      attemptId: String(attempt._id),
+      hintLevelUsed: Number(attempt.hintLevelUsed || 0),
+    });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: "Không thể ghi nhận gợi ý student",
       error: error.message,
     });
   }
@@ -922,6 +1169,7 @@ async function checkStudentSessionActive(req, res) {
 module.exports = {
   checkStudentSessionActive,
   cleanAnalysisCompletedPayload,
+  cleanAttemptCompletedPayload,
   cleanQuestionEventPayload,
   cleanStudentActivityPayload,
   cleanStudentSessionPayload,
@@ -931,9 +1179,13 @@ module.exports = {
   deleteStudentActivities,
   getInternalStudentActivities,
   getStudentActivities,
+  getStudentAttempts,
+  getStudentProgress,
   getStudentSession,
   recordStudentAnalysisCompleted,
   recordStudentActivity,
+  recordStudentAttempt,
+  recordStudentHint,
   recordStudentQuestionEvent,
   refreshStudentContext,
   serializeStudentSession,

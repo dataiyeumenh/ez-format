@@ -1,3 +1,4 @@
+const crypto = require("node:crypto");
 const mongoose = require("mongoose");
 
 const conversionRunSchema = new mongoose.Schema(
@@ -49,7 +50,16 @@ const conversionRunSchema = new mongoose.Schema(
     converterUploadId: {
       type: String,
       trim: true,
-      default: "",
+      default: () => crypto.randomUUID(),
+    },
+    operationSessionId: {
+      type: String,
+      trim: true,
+      default: () => crypto.randomUUID(),
+      immutable: true,
+      index: true,
+      unique: true,
+      sparse: true,
     },
     mode: {
       type: String,

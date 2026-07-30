@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  buildUploadFormData,
   DEFAULT_CONVERTER_TEMPLATES,
   fetchConverterStatus,
 } from "./useConverterApi.js";
@@ -75,6 +76,55 @@ test("converter status is offline but keeps default templates when all status en
   assert.equal(status.serviceOnline, false);
   assert.equal(status.aiOnline, null);
   assert.deepEqual(status.templates, DEFAULT_CONVERTER_TEMPLATES);
+});
+
+test("disabled Node gateway remains offline with no converter feature capability", async () => {
+  const client = {
+    get: async (url) => {
+      if (url === "/health") {
+        return { data: { capabilities: { converterGateway: false, operations: { anomaly_detection: true } } } };
+      }
+      if (url === "/converter/capabilities") {
+        return {
+          data: {
+            status: "unavailable",
+            available: false,
+            gateway: false,
+            capabilities: { anomaly_detection: true },
+            misa_import_repair: { enabled: true },
+          },
+        };
+      }
+      throw new Error("templates unavailable");
+    },
+  };
+
+  const status = await fetchConverterStatus(client);
+
+  assert.equal(status.serviceOnline, false);
+  assert.equal(status.capabilitiesOnline, false);
+  assert.equal(status.capabilities.anomaly_detection, false);
+  assert.equal(status.misaImportRepair.enabled, false);
+  assert.deepEqual(status.templates, DEFAULT_CONVERTER_TEMPLATES);
+});
+
+test("analyze multipart carries the complete production run/session/upload handshake", () => {
+  const form = buildUploadFormData(
+    new Blob(["workbook"]),
+    "bsn_sales",
+    "signed-context",
+    {
+      conversionRunId: "run-1",
+      operationSessionId: "session-1",
+      uploadId: "upload-1",
+    },
+  );
+
+  assert.equal(form.get("target_template_id"), "bsn_sales");
+  assert.equal(form.get("conversion_context_token"), "signed-context");
+  assert.equal(form.get("conversion_run_id"), "run-1");
+  assert.equal(form.get("operation_session_id"), "session-1");
+  assert.equal(form.get("upload_id"), "upload-1");
 });
 
 test("callable Axios clients use Node gateway paths without duplicating /api", async () => {

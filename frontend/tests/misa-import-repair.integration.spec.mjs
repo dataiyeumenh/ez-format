@@ -150,6 +150,15 @@ async function extractMultipartFile(request) {
   return body.subarray(headerEnd + 4, fileEnd);
 }
 
+function assertMultipartField(request, name, expectedValue) {
+  const body = request.postDataBuffer()?.toString("utf8") || "";
+  assert.ok(body.includes(`name="${name}"`), `multipart upload must contain ${name}`);
+  assert.ok(
+    body.includes(`\r\n\r\n${expectedValue}\r\n`),
+    `${name} must preserve its production binding`,
+  );
+}
+
 function json(route, payload, status = 200) {
   return route.fulfill({ status, contentType: "application/json", body: JSON.stringify(payload) });
 }
@@ -212,7 +221,15 @@ function repairState(fixture, stage) {
 }
 
 function installApiRoutes(page, actor, options = {}) {
-  const state = { fixture: null, stage: "uploaded", requests: [], credits: 1, mapping: null };
+  const state = {
+    fixture: null,
+    stage: "uploaded",
+    requests: [],
+    credits: 1,
+    mapping: null,
+    conversionRun: null,
+    conversionRunSequence: 0,
+  };
   page.on("request", (request) => {
     if (request.url().includes("/api/")) state.requests.push(request);
   });
@@ -238,18 +255,49 @@ function installApiRoutes(page, actor, options = {}) {
     }
     if (pathname === "/accounting-workspaces") return json(route, { items: [{ id: actor.id === appUser.id ? "workspace-a" : "workspace-b", name: `Workspace ${actor.id}` }] });
     if (pathname.endsWith("/master-data")) return json(route, { snapshots: [] });
-    if (pathname.endsWith("/conversion-context")) return json(route, { contextToken: `workspace-context-${actor.id}` });
-    if (pathname === "/converter/context") return json(route, { contextToken: `personal-context-${actor.id}` });
+    if (pathname === "/conversion-runs" && request.method() === "POST") {
+      const payload = request.postDataJSON();
+      assert.ok(payload.fileName, "conversion run must identify the uploaded file");
+      state.conversionRunSequence += 1;
+      state.conversionRun = {
+        id: `run-${actor.id}-${state.conversionRunSequence}`,
+        operationSessionId: `operation-session-${actor.id}-${state.conversionRunSequence}`,
+        converterUploadId: `converter-upload-${actor.id}-${state.conversionRunSequence}`,
+      };
+      return json(route, { success: true, run: state.conversionRun }, 201);
+    }
+    if (pathname.endsWith("/conversion-context")) {
+      return json(route, {
+        contextToken: `workspace-context-${actor.id}`,
+        conversionRunId: state.conversionRun?.id,
+        operationSessionId: state.conversionRun?.operationSessionId,
+        uploadId: state.conversionRun?.converterUploadId,
+      });
+    }
+    if (pathname === "/converter/context") {
+      return json(route, {
+        contextToken: `personal-context-${actor.id}`,
+        conversionRunId: state.conversionRun?.id,
+        operationSessionId: state.conversionRun?.operationSessionId,
+        uploadId: state.conversionRun?.converterUploadId,
+      });
+    }
 
     if (pathname === "/converter/uploads/analyze" && request.method() === "POST") {
+      assert.ok(state.conversionRun, "analyze requires a preallocated conversion run");
+      assertMultipartField(request, "conversion_run_id", state.conversionRun.id);
+      assertMultipartField(request, "operation_session_id", state.conversionRun.operationSessionId);
+      assertMultipartField(request, "upload_id", state.conversionRun.converterUploadId);
       const uploaded = await extractMultipartFile(request);
       const markerFixture = fixtures.find((item) => workbookFixtureId(uploaded) === item.id);
       assert.ok(markerFixture, "analyze upload must be a valid synthetic workbook");
       assertWorkbook(uploaded, markerFixture);
       if (!state.fixture) state.fixture = markerFixture;
       return json(route, {
-        upload_id: `upload-${markerFixture.id}`,
-        runId: `run-${markerFixture.id}`,
+        upload_id: state.conversionRun.converterUploadId,
+        runId: state.conversionRun.id,
+        operation_session_id: state.conversionRun.operationSessionId,
+        conversion_run_id: state.conversionRun.id,
         contextToken: `context-${actor.id}`,
         target_template_id: markerFixture.template === "misa_purchase_domestic" ? "misa_purchase_domestic" : "bsn_sales",
         detected: { sheet_name: "ImportResult", headers: ["Số chứng từ", "Thông báo kỹ thuật", "Mã hàng", "Thành tiền"], row_count: markerFixture.detailRows || 1 },
@@ -622,7 +670,10 @@ test("focused QA wiring validates the canonical root and invokes the repair wrap
   const qaQc = await readFile(path.join(repoRoot, "scripts", "qa-qc.ps1"), "utf8");
   const wrapper = await readFile(path.join(repoRoot, "scripts", "qa-misa-import-repair.ps1"), "utf8");
   assert.equal((qaQc.match(/qa-misa-import-repair\.ps1/g) || []).length, 1);
-  assert.match(qaQc, /qa-misa-import-repair\.ps1.*-SkipSlowTests/);
+  assert.match(
+    qaQc,
+    /if \(\$SkipSlowTests\) \{\s*& \$repairGate -RepoRoot \$RepoRoot -SkipSlowTests\s*\} else \{\s*& \$repairGate -RepoRoot \$RepoRoot\s*\}/,
+  );
   assert.match(wrapper, /Resolve-Path/);
   assert.match(wrapper, /try\s*\{/);
   assert.match(wrapper, /finally\s*\{/);
