@@ -41,9 +41,13 @@ const {
   mergeGatewayCapabilities,
 } = require("./routes/converterGateway");
 const StudentQuestionEvent = require("./models/StudentQuestionEvent");
+const StudentAttempt = require("./models/StudentAttempt");
 const {
   migrateStudentQuestionEventPrivacy,
 } = require("./services/studentSessionService");
+const {
+  ensureStudentAttemptPersistence,
+} = require("./services/studentAttemptMigrationService");
 
 require("dotenv").config();
 
@@ -61,6 +65,9 @@ const voucherReconstructionEnabled =
   "true";
 const studentAssistantEnabled =
   String(process.env.STUDENT_ASSISTANT_ENABLED || "false").toLowerCase() === "true";
+const studentAttemptPersistenceEnabled =
+  studentAssistantEnabled &&
+  String(process.env.STUDENT_CHECK_WORK_ENABLED || "false").toLowerCase() === "true";
 const misaImportRepairEnabled =
   String(process.env.MISA_IMPORT_REPAIR_ENABLED || "false").trim().toLowerCase() ===
   "true";
@@ -181,6 +188,9 @@ function createStartServer({
   migrateMappingProfilesV2 = migrateMappingProfilesV1ToV2,
   migrateQuestionEvents = migrateStudentQuestionEventPrivacy,
   questionEventModel = StudentQuestionEvent,
+  migrateStudentAttempts = ensureStudentAttemptPersistence,
+  studentAttemptModel = StudentAttempt,
+  studentAttemptsEnabled = studentAttemptPersistenceEnabled,
   repairEnabled = misaImportRepairEnabled,
   ensureRepairIndexes = ensureMisaImportRepairIndexes,
   startArtifactSweeper = startConversionArtifactSweeper,
@@ -235,6 +245,17 @@ function createStartServer({
       }
     } catch (error) {
       logger.error(`[DB] Student question privacy migration failed: ${error.message}`);
+    }
+    try {
+      const attemptMigration = await migrateStudentAttempts(studentAttemptModel);
+      if (attemptMigration?.purged) {
+        logger.log(
+          `[DB] Student attempt persistence migration: ${attemptMigration.purged} unsafe legacy attempt(s) purged`,
+        );
+      }
+    } catch (error) {
+      logger.error(`[DB] Student attempt persistence migration failed: ${error.message}`);
+      if (studentAttemptsEnabled) throw error;
     }
     const artifactSweeper = converterGatewayUsageReady
       ? startArtifactSweeper()

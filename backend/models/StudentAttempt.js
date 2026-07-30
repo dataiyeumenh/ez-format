@@ -31,6 +31,22 @@ const studentAttemptSchema = new mongoose.Schema(
       immutable: true,
     },
     revision: { type: Number, required: true, min: 1, immutable: true },
+    idempotencyKeyHash: {
+      type: String,
+      required: true,
+      trim: true,
+      minlength: 64,
+      maxlength: 64,
+      immutable: true,
+    },
+    requestFingerprint: {
+      type: String,
+      required: true,
+      trim: true,
+      minlength: 64,
+      maxlength: 64,
+      immutable: true,
+    },
     kind: {
       type: String,
       required: true,
@@ -67,11 +83,18 @@ const studentAttemptSchema = new mongoose.Schema(
     score: { type: Number, required: true, min: 0, max: 100, immutable: true },
     summary: { type: mongoose.Schema.Types.Mixed, default: {}, immutable: true },
     hintLevelUsed: { type: Number, default: 0, min: 0, max: 4 },
+    retentionExpiresAt: {
+      type: Date,
+      required: true,
+      expires: 0,
+      immutable: true,
+    },
   },
   { timestamps: true },
 );
 
 studentAttemptSchema.index({ sessionId: 1, revision: 1 }, { unique: true });
+studentAttemptSchema.index({ sessionId: 1, idempotencyKeyHash: 1 }, { unique: true });
 studentAttemptSchema.index({ userId: 1, createdAt: -1 });
 
 module.exports = mongoose.model("StudentAttempt", studentAttemptSchema);

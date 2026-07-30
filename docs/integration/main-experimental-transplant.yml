@@ -199,10 +199,10 @@ rules:
     reason: reviewed model composed with hashed question privacy contract
   - path: backend/models/StudentAttempt.js
     owner: compose
-    reason: remove unsupported student attempt persistence
+    reason: Task 9 review-safe student attempt retention and idempotency contract
   - path: backend/models/StudentSkillProgress.js
     owner: compose
-    reason: remove unsupported student score persistence
+    reason: Task 9 student progress persistence contract
   - path: backend/routes/converterGateway.js
     owner: compose
     reason: Task 8 reviewed integration composition
@@ -212,12 +212,18 @@ rules:
   - path: backend/services/studentSessionService.js
     owner: compose
     reason: reviewed ownership helper plus legacy question privacy migration
+  - path: backend/services/studentAttemptMigrationService.js
+    owner: compose
+    reason: Task 9 attempt retention purge and index safeguards
+  - path: backend/services/studentAttemptPersistenceService.js
+    owner: compose
+    reason: Task 9 atomic idempotent attempt and progress persistence
   - path: backend/tests/studentActivities.test.js
     owner: source
     reason: reviewed student activity privacy tests
   - path: backend/tests/studentAttempts.test.js
     owner: compose
-    reason: remove unsupported student grading tests
+    reason: Task 9 attempt retention, concurrency, retry, and rollback regressions
   - path: backend/tests/studentQuestions.test.js
     owner: compose
     reason: reviewed question tests plus hashed persistence and migration coverage

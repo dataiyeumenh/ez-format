@@ -79,6 +79,49 @@ test("configured PayOS startup accepts a replica set from connected hello data",
   await assert.doesNotReject(connectDB());
 });
 
+test("Student check-work startup rejects standalone Mongo because completion needs transactions", async () => {
+  const connectDB = createConnectDB({
+    env: {
+      MONGO_URI: "mongodb://mongo.test:27017/ezformat",
+      STUDENT_ASSISTANT_ENABLED: "true",
+      STUDENT_CHECK_WORK_ENABLED: "true",
+    },
+    dnsResolver: { resolveSrv: async () => {} },
+    logger: { error() {}, log() {}, warn() {} },
+    mongooseInstance: {
+      connect: async () =>
+        createMongoConnection({
+          topologyType: "Single",
+          hello: { isWritablePrimary: true, logicalSessionTimeoutMinutes: 30 },
+        }),
+    },
+  });
+
+  await assert.rejects(connectDB(), /student attempt.*replica set or sharded cluster/i);
+});
+
+test("Student check-work startup accepts replica-set transaction readiness", async () => {
+  const connectDB = createConnectDB({
+    env: {
+      MONGO_URI: "mongodb://mongo.test:27017/ezformat",
+      STUDENT_ASSISTANT_ENABLED: "true",
+      STUDENT_CHECK_WORK_ENABLED: "true",
+    },
+    dnsResolver: { resolveSrv: async () => {} },
+    logger: { error() {}, log() {}, warn() {} },
+    ensureCouponUsagePaymentUniqueIndex: async () => {},
+    mongooseInstance: {
+      connect: async () =>
+        createMongoConnection({
+          topologyType: "Single",
+          hello: { setName: "rs0", logicalSessionTimeoutMinutes: 30 },
+        }),
+    },
+  });
+
+  await assert.doesNotReject(connectDB());
+});
+
 test("configured PayOS startup rejects when CouponUsage payment uniqueness cannot be ensured", async () => {
   const connectDB = createConnectDB({
     env: {
@@ -156,6 +199,7 @@ test("disabled repair feature performs no index migration, database mutation, or
     ensureV2Indexes: async () => undefined,
     migrateMappingProfilesV2: async () => ({ skipped: true }),
     migrateQuestionEvents: async () => ({ purged: 0 }),
+    migrateStudentAttempts: async () => ({ purged: 0 }),
     ensureRepairIndexes: async () => {
       ensureRepairCalls += 1;
       return { droppedIndexes: [], unsetNullKeys: 0 };
@@ -182,14 +226,19 @@ test("disabled Student Assistant startup still attempts privacy purge and remain
   try {
     const { createStartServer, studentAssistantEnabled } = require("../server");
     const errors = [];
-    let migrationCalls = 0;
+    let questionMigrationCalls = 0;
+    let attemptMigrationCalls = 0;
     let listenCalls = 0;
     const startServer = createStartServer({
       connectDatabase: async () => ({}),
       migrateMappingProfiles: async () => ({ skipped: true }),
       migrateQuestionEvents: async () => {
-        migrationCalls += 1;
+        questionMigrationCalls += 1;
         throw new Error("privacy migration unavailable");
+      },
+      migrateStudentAttempts: async () => {
+        attemptMigrationCalls += 1;
+        throw new Error("attempt retention migration unavailable");
       },
       listen: () => {
         listenCalls += 1;
@@ -200,12 +249,36 @@ test("disabled Student Assistant startup still attempts privacy purge and remain
 
     assert.equal(studentAssistantEnabled, false);
     await startServer();
-    assert.equal(migrationCalls, 1);
+    assert.equal(questionMigrationCalls, 1);
+    assert.equal(attemptMigrationCalls, 1);
     assert.equal(listenCalls, 1);
     assert.match(errors[0], /Student question privacy migration failed/i);
+    assert.match(errors[1], /Student attempt persistence migration failed/i);
   } finally {
     if (previousEnabled === undefined) delete process.env.STUDENT_ASSISTANT_ENABLED;
     else process.env.STUDENT_ASSISTANT_ENABLED = previousEnabled;
     delete require.cache[serverPath];
   }
+});
+
+test("enabled Student check-work refuses startup when attempt safeguards cannot be ensured", async () => {
+  let listenCalls = 0;
+  const startServer = createStartServer({
+    studentAttemptsEnabled: true,
+    connectDatabase: async () => ({}),
+    migrateMappingProfiles: async () => ({ skipped: true }),
+    migrateMappingProfilesV2: async () => ({ skipped: true }),
+    migrateQuestionEvents: async () => ({ purged: 0 }),
+    migrateStudentAttempts: async () => {
+      throw new Error("attempt indexes unavailable");
+    },
+    listen: () => {
+      listenCalls += 1;
+      return { once() {} };
+    },
+    logger: { error() {}, log() {} },
+  });
+
+  await assert.rejects(startServer(), /attempt indexes unavailable/);
+  assert.equal(listenCalls, 0);
 });

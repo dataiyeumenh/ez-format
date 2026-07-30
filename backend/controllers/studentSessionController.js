@@ -16,6 +16,9 @@ const {
   hashStudentQuestion,
   normalizeStudentQuestion,
 } = require("../services/studentSessionService");
+const {
+  studentAttemptPersistence,
+} = require("../services/studentAttemptPersistenceService");
 
 const DEFAULT_RETENTION_MS = 24 * 60 * 60 * 1000;
 const UNSAFE_METADATA_KEYS = new Set([
@@ -68,13 +71,6 @@ const STUDENT_ATTEMPT_KINDS = new Set([
   "voucher_review_attempt",
   "reconciliation_attempt",
 ]);
-const STUDENT_SKILL_BY_ATTEMPT = {
-  mapping_attempt: "excel_mapping",
-  data_cleanup_attempt: "excel_mapping",
-  document_classification_attempt: "document_classification",
-  voucher_review_attempt: "misa_template_readiness",
-  reconciliation_attempt: "vat_reconciliation",
-};
 const STUDENT_ACTIVITY_CONFIG = {
   accounting_map_reviewed: {
     scope: "accounting_map",
@@ -285,6 +281,27 @@ function cleanAttemptCompletedPayload(body = {}) {
     completed: body.completed === true,
     deterministic: body.deterministic === true,
     summary: cleanAttemptSummary(body.summary),
+  };
+}
+
+function sha256(value) {
+  return crypto.createHash("sha256").update(String(value), "utf8").digest("hex");
+}
+
+function buildStudentAttemptIdentity(payload, idempotencyKey = "") {
+  const requestFingerprint = sha256(JSON.stringify(payload));
+  const normalizedKey = cleanString(idempotencyKey, 256);
+  const naturalKey = JSON.stringify({
+    kind: payload.kind,
+    submittedStateHash: payload.submittedStateHash,
+    sessionStateHash: payload.sessionStateHash,
+    rubricVersion: payload.rubricVersion,
+  });
+  return {
+    idempotencyKeyHash: sha256(
+      normalizedKey ? `provided:${normalizedKey}` : `natural:${naturalKey}`,
+    ),
+    requestFingerprint,
   };
 }
 
@@ -521,6 +538,11 @@ async function deleteStudentSession(req, res) {
       return res.status(404).json({ success: false, message: "Không tìm thấy phiên hỗ trợ" });
     }
     if (!verifySessionContext(req, session, res)) return undefined;
+    await StudentAttempt.deleteMany({
+      sessionId: session._id,
+      userId: session.userId,
+      ownerScope: session.ownerScope,
+    });
     await session.deleteOne();
     return res.json({ success: true });
   } catch (error) {
@@ -779,42 +801,20 @@ async function recordStudentAttempt(req, res) {
     if (!session) {
       return res.status(404).json({ success: false, message: "Không tìm thấy phiên học đang hoạt động" });
     }
-    const latest = await StudentAttempt.findOne({ sessionId: session._id })
-      .sort({ revision: -1 });
-    const revision = Number(latest?.revision || 0) + 1;
-    const attempt = await StudentAttempt.create({
-      sessionId: session._id,
-      userId: session.userId,
-      workspaceId: session.workspaceId || null,
-      ownerScope: session.ownerScope,
-      revision,
-      kind: payload.kind,
-      submittedStateHash: payload.submittedStateHash,
-      sessionStateHash: payload.sessionStateHash,
-      rubricVersion: payload.rubricVersion,
-      score: payload.score,
-      summary: payload.summary,
-      hintLevelUsed: 0,
-    });
-    const skill = STUDENT_SKILL_BY_ATTEMPT[payload.kind];
-    const progress = await StudentSkillProgress.findOneAndUpdate(
-      { userId: session.userId },
-      {
-        $set: { [`skills.${skill}.score`]: payload.score },
-        $inc: {
-          [`skills.${skill}.evidenceCount`]: payload.summary.evidenceCount,
-        },
-        $setOnInsert: { userId: session.userId },
-      },
-      { new: true, upsert: true, runValidators: true },
+    const identity = buildStudentAttemptIdentity(
+      payload,
+      req.headers["idempotency-key"],
     );
-    return res.status(201).json({
+    const { attempt, progress, idempotent } =
+      await studentAttemptPersistence.persistCompletion({ session, payload, identity });
+    return res.status(idempotent ? 200 : 201).json({
       success: true,
       attempt: serializeStudentAttempt(attempt),
       progress: serializeStudentProgress(progress),
+      idempotent,
     });
   } catch (error) {
-    return res.status(500).json({
+    return res.status(error.statusCode || 500).json({
       success: false,
       message: "Không thể ghi nhận bài làm student",
       error: error.message,
@@ -1167,6 +1167,7 @@ async function checkStudentSessionActive(req, res) {
 }
 
 module.exports = {
+  buildStudentAttemptIdentity,
   checkStudentSessionActive,
   cleanAnalysisCompletedPayload,
   cleanAttemptCompletedPayload,

@@ -3,6 +3,7 @@ const dns = require("dns").promises;
 const CouponUsage = require("../models/CouponUsage");
 
 const PAYMENT_SETTLEMENT_NOT_READY = "PAYMENT_SETTLEMENT_NOT_READY";
+const MONGO_TRANSACTIONS_NOT_READY = "MONGO_TRANSACTIONS_NOT_READY";
 const COUPON_USAGE_PAYMENT_UNIQUE_INDEX = Object.freeze({
   keys: Object.freeze({ payment: 1 }),
   options: Object.freeze({
@@ -76,10 +77,26 @@ function assertPaymentSettlementReady() {
   throw error;
 }
 
+function assertMongoTransactionReady(featureName = "This operation") {
+  if (paymentSettlementReadiness.ready) return;
+  const error = new Error(
+    `${featureName} requires MongoDB transactions. ${paymentSettlementReadiness.reason}`,
+  );
+  error.code = MONGO_TRANSACTIONS_NOT_READY;
+  error.statusCode = 503;
+  throw error;
+}
+
 function isPayOSSettlementConfigured(env = process.env) {
   return ["PAYOS_CLIENT_ID", "PAYOS_API_KEY", "PAYOS_CHECKSUM_KEY"].every(
     (name) => Boolean(String(env[name] || "").trim()),
   );
+}
+
+function isStudentAttemptPersistenceConfigured(env = process.env) {
+  const enabled = (name) =>
+    String(env[name] || "false").trim().toLowerCase() === "true";
+  return enabled("STUDENT_ASSISTANT_ENABLED") && enabled("STUDENT_CHECK_WORK_ENABLED");
 }
 
 async function ensureCouponUsagePaymentUniqueIndex(CouponUsageModel = CouponUsage) {
@@ -98,15 +115,18 @@ function createConnectDB({
   return async function connectDB() {
     const mongoUri = env.MONGO_URI;
     const isProduction = env.NODE_ENV === "production";
+    const studentAttemptsConfigured = isStudentAttemptPersistenceConfigured(env);
 
     if (!mongoUri) {
       setPaymentSettlementReadiness({
         ready: false,
         deployment: "unconfigured",
-        reason: "MONGO_URI is required for PayOS settlement transactions.",
+        reason: "MONGO_URI is required for MongoDB transactions.",
       });
-      if (isProduction || isPayOSSettlementConfigured(env)) {
-        throw new Error("[DB] MONGO_URI is required for production or PayOS settlement.");
+      if (isProduction || isPayOSSettlementConfigured(env) || studentAttemptsConfigured) {
+        throw new Error(
+          "[DB] MONGO_URI is required for production, PayOS settlement, or Student attempt persistence.",
+        );
       }
       logger.warn(
         "[DB] MONGO_URI not set — auth/admin disabled. Converter still works via Python.",
@@ -151,6 +171,11 @@ function createConnectDB({
       if (isPayOSSettlementConfigured(env) && !readiness.ready) {
         throw new Error(readiness.reason);
       }
+      if (studentAttemptsConfigured && !readiness.ready) {
+        throw new Error(
+          `Student attempt completion requires a MongoDB replica set or sharded cluster. ${readiness.reason}`,
+        );
+      }
       return conn;
     } catch (error) {
       setPaymentSettlementReadiness({
@@ -159,7 +184,7 @@ function createConnectDB({
         reason: error.message,
       });
       logger.error("[DB] MongoDB connection failed:", error.message);
-      if (isProduction || isPayOSSettlementConfigured(env)) throw error;
+      if (isProduction || isPayOSSettlementConfigured(env) || studentAttemptsConfigured) throw error;
       logger.warn("[DB] Continuing without database in development mode.");
       return null;
     }
@@ -170,11 +195,14 @@ const connectDB = createConnectDB();
 
 module.exports = connectDB;
 module.exports.PAYMENT_SETTLEMENT_NOT_READY = PAYMENT_SETTLEMENT_NOT_READY;
+module.exports.MONGO_TRANSACTIONS_NOT_READY = MONGO_TRANSACTIONS_NOT_READY;
 module.exports.assessMongoTransactionReadiness = assessMongoTransactionReadiness;
+module.exports.assertMongoTransactionReady = assertMongoTransactionReady;
 module.exports.assertPaymentSettlementReady = assertPaymentSettlementReady;
 module.exports.createConnectDB = createConnectDB;
 module.exports.getPaymentSettlementReadiness = getPaymentSettlementReadiness;
 module.exports.inspectConnectedMongoTransactionReadiness =
   inspectConnectedMongoTransactionReadiness;
 module.exports.isPayOSSettlementConfigured = isPayOSSettlementConfigured;
+module.exports.isStudentAttemptPersistenceConfigured = isStudentAttemptPersistenceConfigured;
 module.exports.ensureCouponUsagePaymentUniqueIndex = ensureCouponUsagePaymentUniqueIndex;

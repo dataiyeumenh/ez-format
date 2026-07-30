@@ -1065,6 +1065,7 @@ test("concurrent server lifecycles own independent repair sweepers", async () =>
     const startServer = createStartServer({
       repairEnabled: true,
       migrateQuestionEvents: async () => ({ purged: 0 }),
+      migrateStudentAttempts: async () => ({ purged: 0 }),
       listen: () => {
       const server = {
         closeHandler: null,
