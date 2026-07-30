@@ -1,14 +1,17 @@
 /**
  * convert.js (route)
- * Legacy Node conversion — superseded by converter/ (Python) for preview/export.
- * Kept for backward compatibility; browser converter traffic uses /api/converter/*.
+ * Legacy Node preview conversion — superseded by converter/ (Python).
+ * Browser conversion/export traffic uses /api/converter/*.
  */
 
 const express = require("express");
 const multer = require("multer");
+const requireDb = require("../middleware/requireDb");
+const { protect } = require("../middleware/auth");
 const {
   convertExcel,
   exportExcel,
+  legacyExportMigrationGate,
 } = require("../controllers/convertController");
 
 const router = express.Router();
@@ -42,8 +45,15 @@ router.post("/", upload.single("file"), convertExcel);
 
 /**
  * POST /api/convert/export
- * Accepts edited JSON rows → MISA Excel download
+ * Complete legacy bindings are authenticated, then bridged to canonical export.
+ * Rows-only requests receive a migration response before DB/auth middleware.
  */
-router.post("/export", exportExcel);
+router.post(
+  "/export",
+  legacyExportMigrationGate,
+  requireDb,
+  protect,
+  exportExcel,
+);
 
 module.exports = router;
