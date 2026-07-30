@@ -9,10 +9,7 @@ const {
   cleanQuestionEventPayload,
   recordStudentQuestionEvent,
 } = require("../controllers/studentSessionController");
-const {
-  hashStudentQuestion,
-  migrateStudentQuestionEventPrivacy,
-} = require("../services/studentSessionService");
+const { hashStudentQuestion } = require("../services/studentSessionService");
 
 process.env.CONVERSION_CONTEXT_SECRET = "test-student-question-secret";
 
@@ -169,95 +166,12 @@ test("internal question event is ask-scope and owner bounded", async () => {
       evidenceIds: ["evidence-1", "evidence-2"],
       evidenceCount: 2,
       outcome: "supported",
+      retentionExpiresAt: session.retentionExpiresAt,
     });
   } finally {
     StudentFileSession.findOne = originalFindOne;
     StudentQuestionEvent.create = originalCreate;
   }
-});
-
-test("legacy question migration purges one bounded raw-content batch", async () => {
-  const calls = [];
-  const result = await migrateStudentQuestionEventPrivacy({
-    collection: {
-      find(filter) {
-        calls.push({ type: "find", filter });
-        return {
-          sort(sort) {
-            calls.push({ type: "sort", sort });
-            return this;
-          },
-          limit(limit) {
-            calls.push({ type: "limit", limit });
-            return this;
-          },
-          project(projection) {
-            calls.push({ type: "project", projection });
-            return this;
-          },
-          toArray: async () => [{ _id: "legacy-1" }, { _id: "legacy-2" }],
-        };
-      },
-      updateMany: async (filter, update) => {
-        calls.push({ filter, update });
-        return { modifiedCount: 2 };
-      },
-    },
-  }, { batchSize: 2 });
-
-  assert.equal(result.purged, 2);
-  assert.deepEqual(calls[0].filter, {
-    $or: [
-      { question: { $exists: true } },
-      { answer: { $exists: true } },
-      { rows: { $exists: true } },
-      { rawRows: { $exists: true } },
-      { evidence: { $exists: true } },
-      { workbook: { $exists: true } },
-      { workbookBytes: { $exists: true } },
-      { content: { $exists: true } },
-    ],
-  });
-  assert.deepEqual(calls[1], { type: "sort", sort: { _id: 1 } });
-  assert.deepEqual(calls[2], { type: "limit", limit: 2 });
-  assert.deepEqual(calls[3], { type: "project", projection: { _id: 1 } });
-  assert.deepEqual(calls[4].filter, {
-    _id: { $in: ["legacy-1", "legacy-2"] },
-  });
-  assert.deepEqual(calls[4].update, {
-    $unset: {
-      question: 1,
-      answer: 1,
-      rows: 1,
-      rawRows: 1,
-      evidence: 1,
-      workbook: 1,
-      workbookBytes: 1,
-      content: 1,
-    },
-  });
-});
-
-test("legacy question migration is idempotent after raw content is purged", async () => {
-  let updateCalled = false;
-  const result = await migrateStudentQuestionEventPrivacy({
-    collection: {
-      find() {
-        return {
-          sort() { return this; },
-          limit() { return this; },
-          project() { return this; },
-          toArray: async () => [],
-        };
-      },
-      updateMany: async () => {
-        updateCalled = true;
-      },
-    },
-  });
-
-  assert.equal(result.purged, 0);
-  assert.equal(updateCalled, false);
 });
 
 test("internal question event rejects a different session before database access", async () => {

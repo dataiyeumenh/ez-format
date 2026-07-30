@@ -12,6 +12,7 @@ from openpyxl.utils.cell import coordinate_from_string
 
 from app.document_structure import inspect_workbook_structure
 from app.misa_templates import get_misa_template
+from app.master_data_client import ConversionContextError, verify_conversion_context_token
 from app.misa_workflow import (
     _read_metadata,
     _read_upload_table,
@@ -20,6 +21,7 @@ from app.misa_workflow import (
     readiness_mapping,
 )
 from app.normalization import normalize_header
+from app.operation_store import operation_context_required
 from app.student_accounting_map import build_accounting_maps
 from app.student_anonymization import (
     AnonymizationExportError,
@@ -93,9 +95,11 @@ def analyze_student_file(
     content: bytes,
     context_token: str,
     target_template_id: str | None = None,
+    operation_context_token: str | None = None,
 ) -> dict[str, Any]:
     claims = _student_claims(context_token, "analyze")
     _student_claims(context_token, "explain")
+    operation_binding = _student_operation_binding(claims, operation_context_token)
     try:
         with claim_student_analysis(claims):
             assert_no_student_upload_for_session(claims)
@@ -105,6 +109,8 @@ def analyze_student_file(
                     content=content,
                     requested_target_template_id=target_template_id,
                     student_context_token=context_token,
+                    operation_context_token=operation_context_token,
+                    **operation_binding,
                 )
             except ValueError as exc:
                 raise StudentWorkflowError(400, str(exc)) from exc
@@ -126,6 +132,38 @@ def analyze_student_file(
             return overview
     except StudentUploadConflictError as exc:
         raise StudentWorkflowError(409, str(exc)) from exc
+
+
+def _student_operation_binding(
+    student_claims: StudentContextClaims,
+    operation_context_token: str | None,
+) -> dict[str, str]:
+    token = str(operation_context_token or "").strip()
+    if not token:
+        if operation_context_required():
+            raise StudentWorkflowError(401, "Thiếu signed Student operation context")
+        return {}
+    try:
+        claims = verify_conversion_context_token(token)
+    except ConversionContextError as exc:
+        raise StudentWorkflowError(401, str(exc)) from exc
+    expected = {
+        "operation_session_id": student_claims.session_id,
+        "user_id": student_claims.user_id,
+        "owner_scope": student_claims.owner_scope,
+        "workspace_id": str(student_claims.workspace_id or ""),
+    }
+    if any(str(claims.get(key) or "") != str(value) for key, value in expected.items()):
+        raise StudentWorkflowError(403, "Student operation context không khớp phiên hỗ trợ")
+    if "analyze" not in (claims.get("scopes") or []):
+        raise StudentWorkflowError(403, "Student operation context thiếu quyền analyze")
+    conversion_run_id = str(claims.get("conversion_run_id") or "").strip()
+    if not conversion_run_id:
+        raise StudentWorkflowError(409, "Student operation context thiếu conversion run")
+    return {
+        "operation_session_id": student_claims.session_id,
+        "conversion_run_id": conversion_run_id,
+    }
 
 
 def get_student_overview(*, session_id: str, context_token: str) -> dict[str, Any]:

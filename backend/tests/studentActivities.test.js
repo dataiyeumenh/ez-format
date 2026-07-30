@@ -112,6 +112,7 @@ test("internal activity creation is scope and owner bounded", async () => {
     );
     assert.equal(response.statusCode, 201);
     assert.equal(created[0].ownerScope, active.ownerScope);
+    assert.equal(created[0].retentionExpiresAt, active.retentionExpiresAt);
     assert.equal(created[0].skill, "accounting_mapping");
     assert.equal(created[0].containsRawValues, false);
   } finally {

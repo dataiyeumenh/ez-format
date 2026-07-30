@@ -43,7 +43,7 @@ const {
 
 process.env.CONVERSION_CONTEXT_SECRET = "test-student-session-secret";
 
-test("student router composes support, attempt-history, and progress endpoints", () => {
+test("student router exposes assistance without grading, attempts, or progress", () => {
   const routes = studentRouter.stack
     .filter((layer) => layer.route)
     .map((layer) => ({
@@ -52,8 +52,8 @@ test("student router composes support, attempt-history, and progress endpoints",
     }));
   const routePaths = routes.map(({ path }) => path);
 
-  assert.ok(routePaths.includes("/sessions/:id/attempts"));
-  assert.ok(routePaths.includes("/progress"));
+  assert.equal(routePaths.includes("/sessions/:id/attempts"), false);
+  assert.equal(routePaths.includes("/progress"), false);
   assert.equal(routePaths.some((path) => path.includes("score")), false);
   assert.equal(routePaths.some((path) => path.includes("grade")), false);
 
@@ -73,13 +73,12 @@ test("student router composes support, attempt-history, and progress endpoints",
   );
 });
 
-test("internal student routes expose deterministic attempts without grading routes", () => {
+test("internal student routes expose assistance without grading or attempt routes", () => {
   const routePaths = internalRouter.stack
     .map((layer) => layer.route?.path)
     .filter((routePath) => routePath?.startsWith("/student/"));
 
-  assert.ok(routePaths.includes("/student/sessions/:id/attempts"));
-  assert.ok(routePaths.includes("/student/sessions/:id/attempts/:attemptId/hints"));
+  assert.equal(routePaths.some((routePath) => routePath.includes("attempt")), false);
   assert.equal(routePaths.some((routePath) => routePath.includes("score")), false);
   assert.ok(routePaths.includes("/student/sessions/:id/events"));
   assert.equal(
@@ -343,7 +342,7 @@ test("student context rejects non-HS256 tokens", () => {
   );
 });
 
-test("student context scopes include attempts only behind the check-work gate", () => {
+test("student context never grants grading or attempt scopes", () => {
   const flags = {
     STUDENT_ASSISTANT_ENABLED: "true",
     STUDENT_FILE_EXPLAIN_ENABLED: "true",
@@ -367,7 +366,7 @@ test("student context scopes include attempts only behind the check-work gate", 
       STUDENT_ACCOUNTING_MAP_ENABLED: "true",
       STUDENT_RECONCILIATION_ENABLED: "true",
     }),
-    ["analyze", "explain", "ask", "attempt", "accounting_map", "reconcile"],
+    ["analyze", "explain", "ask", "accounting_map", "reconcile"],
   );
   assert.deepEqual(
     studentContextScopesFromFlags({ ...flags, STUDENT_INTERNSHIP_ENABLED: "true" }),
@@ -376,6 +375,38 @@ test("student context scopes include attempts only behind the check-work gate", 
   assert.deepEqual(
     studentContextScopesFromFlags({ ...flags, STUDENT_ASSISTANT_ENABLED: "false" }),
     [],
+  );
+});
+
+test("student context issuance rejects removed attempt scopes", () => {
+  assert.throws(
+    () =>
+      createStudentContextToken({
+        sessionId: "session-1",
+        userId: "user-1",
+        ownerScope: "user:user-1",
+        allowedScopes: ["analyze", "attempt"],
+      }),
+    /scope.*attempt|attempt.*scope/i,
+  );
+});
+
+test("student context verification rejects legacy attempt scopes", () => {
+  const token = jwt.sign(
+    {
+      purpose: "student_file_session",
+      session_id: "session-1",
+      user_id: "user-1",
+      owner_scope: "user:user-1",
+      allowed_scopes: ["analyze", "attempt"],
+    },
+    process.env.CONVERSION_CONTEXT_SECRET,
+    { algorithm: "HS256", expiresIn: "10m" },
+  );
+
+  assert.throws(
+    () => verifyStudentContextToken(token, "analyze"),
+    /scope.*attempt|attempt.*scope/i,
   );
 });
 

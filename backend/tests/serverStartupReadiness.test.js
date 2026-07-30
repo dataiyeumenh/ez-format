@@ -79,49 +79,6 @@ test("configured PayOS startup accepts a replica set from connected hello data",
   await assert.doesNotReject(connectDB());
 });
 
-test("Student check-work startup rejects standalone Mongo because completion needs transactions", async () => {
-  const connectDB = createConnectDB({
-    env: {
-      MONGO_URI: "mongodb://mongo.test:27017/ezformat",
-      STUDENT_ASSISTANT_ENABLED: "true",
-      STUDENT_CHECK_WORK_ENABLED: "true",
-    },
-    dnsResolver: { resolveSrv: async () => {} },
-    logger: { error() {}, log() {}, warn() {} },
-    mongooseInstance: {
-      connect: async () =>
-        createMongoConnection({
-          topologyType: "Single",
-          hello: { isWritablePrimary: true, logicalSessionTimeoutMinutes: 30 },
-        }),
-    },
-  });
-
-  await assert.rejects(connectDB(), /student attempt.*replica set or sharded cluster/i);
-});
-
-test("Student check-work startup accepts replica-set transaction readiness", async () => {
-  const connectDB = createConnectDB({
-    env: {
-      MONGO_URI: "mongodb://mongo.test:27017/ezformat",
-      STUDENT_ASSISTANT_ENABLED: "true",
-      STUDENT_CHECK_WORK_ENABLED: "true",
-    },
-    dnsResolver: { resolveSrv: async () => {} },
-    logger: { error() {}, log() {}, warn() {} },
-    ensureCouponUsagePaymentUniqueIndex: async () => {},
-    mongooseInstance: {
-      connect: async () =>
-        createMongoConnection({
-          topologyType: "Single",
-          hello: { setName: "rs0", logicalSessionTimeoutMinutes: 30 },
-        }),
-    },
-  });
-
-  await assert.doesNotReject(connectDB());
-});
-
 test("configured PayOS startup rejects when CouponUsage payment uniqueness cannot be ensured", async () => {
   const connectDB = createConnectDB({
     env: {
@@ -199,7 +156,6 @@ test("disabled repair feature performs no index migration, database mutation, or
     ensureV2Indexes: async () => undefined,
     migrateMappingProfilesV2: async () => ({ skipped: true }),
     migrateQuestionEvents: async () => ({ purged: 0 }),
-    migrateStudentAttempts: async () => ({ purged: 0 }),
     ensureRepairIndexes: async () => {
       ensureRepairCalls += 1;
       return { droppedIndexes: [], unsetNullKeys: 0 };
@@ -215,72 +171,6 @@ test("disabled repair feature performs no index migration, database mutation, or
   assert.equal(await startServer(), fakeServer);
   assert.equal(ensureRepairCalls, 0);
   assert.equal(startRepairCalls, 0);
-});
-
-test("disabled Student Assistant startup still attempts privacy purge and remains available", async () => {
-  const serverPath = require.resolve("../server");
-  const previousEnabled = process.env.STUDENT_ASSISTANT_ENABLED;
-  delete require.cache[serverPath];
-  process.env.STUDENT_ASSISTANT_ENABLED = "false";
-
-  try {
-    const { createStartServer, studentAssistantEnabled } = require("../server");
-    const errors = [];
-    let questionMigrationCalls = 0;
-    let attemptMigrationCalls = 0;
-    let listenCalls = 0;
-    const startServer = createStartServer({
-      connectDatabase: async () => ({}),
-      migrateMappingProfiles: async () => ({ skipped: true }),
-      migrateQuestionEvents: async () => {
-        questionMigrationCalls += 1;
-        throw new Error("privacy migration unavailable");
-      },
-      migrateStudentAttempts: async () => {
-        attemptMigrationCalls += 1;
-        throw new Error("attempt retention migration unavailable");
-      },
-      listen: () => {
-        listenCalls += 1;
-        return { once() {} };
-      },
-      logger: { error: (message) => errors.push(message), log() {} },
-    });
-
-    assert.equal(studentAssistantEnabled, false);
-    await startServer();
-    assert.equal(questionMigrationCalls, 1);
-    assert.equal(attemptMigrationCalls, 1);
-    assert.equal(listenCalls, 1);
-    assert.match(errors[0], /Student question privacy migration failed/i);
-    assert.match(errors[1], /Student attempt persistence migration failed/i);
-  } finally {
-    if (previousEnabled === undefined) delete process.env.STUDENT_ASSISTANT_ENABLED;
-    else process.env.STUDENT_ASSISTANT_ENABLED = previousEnabled;
-    delete require.cache[serverPath];
-  }
-});
-
-test("enabled Student check-work refuses startup when attempt safeguards cannot be ensured", async () => {
-  let listenCalls = 0;
-  const startServer = createStartServer({
-    studentAttemptsEnabled: true,
-    connectDatabase: async () => ({}),
-    migrateMappingProfiles: async () => ({ skipped: true }),
-    migrateMappingProfilesV2: async () => ({ skipped: true }),
-    migrateQuestionEvents: async () => ({ purged: 0 }),
-    migrateStudentAttempts: async () => {
-      throw new Error("attempt indexes unavailable");
-    },
-    listen: () => {
-      listenCalls += 1;
-      return { once() {} };
-    },
-    logger: { error() {}, log() {} },
-  });
-
-  await assert.rejects(startServer(), /attempt indexes unavailable/);
-  assert.equal(listenCalls, 0);
 });
 
 test("mapping-profile startup off mode performs compatibility checks without index mutation", async () => {
@@ -302,7 +192,6 @@ test("mapping-profile startup off mode performs compatibility checks without ind
       return { skipped: true };
     },
     migrateQuestionEvents: async () => ({ purged: 0 }),
-    migrateStudentAttempts: async () => ({ purged: 0 }),
     listen: () => fakeServer,
     logger: { error() {}, log() {} },
   });
@@ -345,7 +234,6 @@ test("mapping-profile startup apply mode composes owner, index, and V2 mutations
       };
     },
     migrateQuestionEvents: async () => ({ purged: 0 }),
-    migrateStudentAttempts: async () => ({ purged: 0 }),
     listen: () => fakeServer,
     logger: { error() {}, log() {} },
   });
@@ -416,7 +304,6 @@ test("mapping-profile startup apply logs shared phase report and fails closed", 
       };
     },
     migrateQuestionEvents: async () => ({ purged: 0 }),
-    migrateStudentAttempts: async () => ({ purged: 0 }),
     listen: () => {
       listenCalls += 1;
       return { once() {} };
@@ -478,7 +365,6 @@ test("mapping-profile startup rejects rollback mode before any migration mutatio
       return { skipped: true };
     },
     migrateQuestionEvents: async () => ({ purged: 0 }),
-    migrateStudentAttempts: async () => ({ purged: 0 }),
     listen: () => {
       listenCalls += 1;
       return { once() {} };

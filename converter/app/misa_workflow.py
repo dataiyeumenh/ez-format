@@ -74,6 +74,7 @@ from app.operation_store import (
     OperationStoreConflictError,
     OperationStoreError,
     operation_context_required,
+    STUDENT_METADATA_STATE_CONTRACT,
     unauthenticated_local_operations_enabled,
 )
 from app.student_context import StudentContextClaims, verify_student_context
@@ -184,6 +185,7 @@ def analyze_upload(
     content: bytes,
     requested_target_template_id: str | None = None,
     conversion_context_token: str | None = None,
+    operation_context_token: str | None = None,
     operation_session_id: str | None = None,
     conversion_run_id: str | None = None,
     preallocated_upload_id: str | None = None,
@@ -195,9 +197,28 @@ def analyze_upload(
         raise OperationStoreError(
             "Production conversion requires a preallocated operation_session_id"
         )
+    if operation_context_token and conversion_context_token:
+        raise ValueError("Chỉ được dùng một conversion operation context")
     if student_context_token and conversion_context_token:
         raise ValueError("Không thể dùng student context và conversion context đồng thời")
     student_claims = _verify_student_token(student_context_token, "analyze")
+    operation_claims = (
+        verify_conversion_context_token(operation_context_token)
+        if operation_context_token
+        else None
+    )
+    if student_claims and operation_claims:
+        expected_binding = {
+            "operation_session_id": student_claims.session_id,
+            "user_id": student_claims.user_id,
+            "owner_scope": student_claims.owner_scope,
+            "workspace_id": str(student_claims.workspace_id or ""),
+        }
+        if any(
+            str(operation_claims.get(key) or "") != str(expected)
+            for key, expected in expected_binding.items()
+        ) or "analyze" not in (operation_claims.get("scopes") or []):
+            raise ValueError("Student operation context không khớp phiên hỗ trợ")
     student_ttl = student_upload_retention_seconds() if student_claims else None
     upload_id, input_path = save_upload(
         filename,
@@ -215,11 +236,15 @@ def analyze_upload(
         conversion_context_token
     )
     trusted_session_id, trusted_run_id = _trusted_preallocated_session_binding(
-        context_claims,
+        operation_claims or context_claims,
         operation_session_id=operation_session_id,
         conversion_run_id=conversion_run_id,
     )
-    workspace_id = str((context_claims or {}).get("workspace_id") or "")
+    workspace_id = str(
+        (student_claims.workspace_id if student_claims else None)
+        or (context_claims or {}).get("workspace_id")
+        or ""
+    )
     owner_scope = (
         student_claims.owner_scope
         if student_claims
@@ -456,7 +481,7 @@ def analyze_upload(
     session = None
     if student_claims or context_claims or unauthenticated_local_operations_enabled():
         operation_store = OperationStore(
-            conversion_context_token=conversion_context_token
+            conversion_context_token=operation_context_token or conversion_context_token
         )
         session = operation_store.create_session(
             session_id=trusted_session_id,
@@ -478,14 +503,24 @@ def analyze_upload(
             table=table,
             raw_sha256=hashlib.sha256(content).hexdigest(),
             conversion_run_id=trusted_run_id,
+            ttl_seconds=(
+                _student_operation_ttl_seconds(student_claims, student_ttl)
+                if student_claims
+                else None
+            ),
             initial_context={
                 "mapping": suggestion.mapping,
                 "defaults": suggestion.defaults,
                 "formulas": suggestion.formulas,
                 UPLOAD_METADATA_CONTEXT_KEY: _portable_upload_metadata(metadata),
             },
+            state_contract=(
+                STUDENT_METADATA_STATE_CONTRACT if student_claims else None
+            ),
         )
         metadata["operation_session_id"] = session.session_id
+        if student_claims:
+            metadata["operation_state_contract"] = STUDENT_METADATA_STATE_CONTRACT
         session_expires_at = int(session.expires_at.timestamp())
         metadata.update(
             {
@@ -494,13 +529,14 @@ def analyze_upload(
                 "operation_session_expires_at": session_expires_at,
             }
         )
-        operation_store.put_artifact(
-            session.session_id,
-            kind="upload",
-            revision=1,
-            content=content,
-            content_type=_upload_content_type(filename),
-        )
+        if not student_claims:
+            operation_store.put_artifact(
+                session.session_id,
+                kind="upload",
+                revision=1,
+                content=content,
+                content_type=_upload_content_type(filename),
+            )
     _write_metadata(upload_id, metadata)
     store.record_run(
         run_id=upload_id,
@@ -685,21 +721,16 @@ def confirm_mapping(
     formulas: dict[str, str] | None = None,
     profile_name: str | None = None,
     conversion_context_token: str | None = None,
-    student_context_token: str | None = None,
     session_id: str | None = None,
     revision: int | None = None,
     state_hash: str | None = None,
 ) -> dict[str, Any]:
-    student_claims = _assert_student_upload_context(
-        upload_id, student_context_token, "attempt"
-    )
     _assert_operation_state(
         upload_id,
         session_id,
         revision,
         state_hash,
         conversion_context_token=conversion_context_token,
-        student_owner_scope=student_claims.owner_scope if student_claims else None,
         required_scope="confirm",
     )
     metadata = _read_metadata(upload_id)
@@ -725,7 +756,7 @@ def confirm_mapping(
         template.headers,
     )
     owner_scope = _owner_scope_from_upload_metadata(metadata)
-    profile_token = student_context_token or conversion_context_token
+    profile_token = conversion_context_token
     confirmed_profile_kind = "v1"
     confirmed_profile_version = None
     confirmed_profile_state_hash = None
@@ -881,6 +912,15 @@ def confirm_mapping(
             "state_hash": derived.state_hash,
         }
     return payload
+
+
+def _student_operation_ttl_seconds(
+    claims: StudentContextClaims, configured_ttl_seconds: int | None
+) -> int:
+    remaining_seconds = claims.retention_expires_at - int(time.time()) - 1
+    if remaining_seconds <= 0:
+        raise ValueError("Student context retention đã hết hạn")
+    return min(int(configured_ttl_seconds or remaining_seconds), remaining_seconds)
 
 
 def _export_resolved_confirmed_profile(
@@ -1648,6 +1688,8 @@ def _read_upload_table(
 ) -> InputTable:
     metadata = _read_metadata(upload_id)
     session_id = str(metadata.get("operation_session_id") or "")
+    if metadata.get("operation_state_contract") == STUDENT_METADATA_STATE_CONTRACT:
+        return read_input_table(Path(metadata["input_path"]))
     if session_id:
         return OperationStore(
             conversion_context_token=conversion_context_token
@@ -1793,21 +1835,16 @@ def sync_mapping_session(
     defaults: dict[str, Any] | None = None,
     formulas: dict[str, str] | None = None,
     conversion_context_token: str | None = None,
-    student_context_token: str | None = None,
     session_id: str,
     revision: int,
     state_hash: str,
 ) -> dict[str, Any]:
-    student_claims = _assert_student_upload_context(
-        upload_id, student_context_token, "attempt"
-    )
     _assert_operation_state(
         upload_id,
         session_id,
         revision,
         state_hash,
         conversion_context_token=conversion_context_token,
-        student_owner_scope=student_claims.owner_scope if student_claims else None,
         required_scope="confirm",
     )
     metadata = _read_metadata(upload_id)
@@ -1934,6 +1971,12 @@ def _assert_operation_state(
             bound_session_id = str(metadata.get("operation_session_id") or "")
             if require_bound_session and not bound_session_id:
                 raise OperationStoreConflictError("Upload chưa gắn operation session")
+            if (
+                bound_session_id
+                and metadata.get("operation_state_contract")
+                == STUDENT_METADATA_STATE_CONTRACT
+            ):
+                return
             if bound_session_id:
                 session = OperationStore().load_session(bound_session_id)
                 if session.upload_id != upload_id or session.owner_scope != student_owner_scope:

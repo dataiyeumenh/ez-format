@@ -528,6 +528,7 @@ async def analyze_student_session(
     file: Annotated[UploadFile, File()],
     context_token: Annotated[str, Form()],
     target_template_id: Annotated[str | None, Form()] = None,
+    x_conversion_context: Annotated[str | None, Header()] = None,
 ) -> JSONResponse:
     try:
         rate_claims = _verified_student_rate_claims(context_token, "analyze")
@@ -542,6 +543,7 @@ async def analyze_student_session(
             content=content,
             context_token=context_token,
             target_template_id=target_template_id,
+            operation_context_token=x_conversion_context,
         )
         return JSONResponse(jsonable_encoder(payload))
     except StudentWorkflowError as exc:
@@ -1069,7 +1071,6 @@ async def confirm_misa_mapping(
             formulas=body.get("formulas") or {},
             profile_name=body.get("profile_name"),
             conversion_context_token=context_token,
-            student_context_token=None,
             session_id=body.get("session_id"),
             revision=body.get("revision"),
             state_hash=body.get("state_hash"),
@@ -1979,7 +1980,6 @@ async def sync_misa_mapping_session(
             defaults=body.get("defaults") or {},
             formulas=body.get("formulas") or {},
             conversion_context_token=context_token,
-            student_context_token=None,
             session_id=str(body["session_id"]),
             revision=int(body["revision"]),
             state_hash=str(body["state_hash"]),

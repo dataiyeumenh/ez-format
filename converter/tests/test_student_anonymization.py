@@ -203,6 +203,65 @@ def test_confidential_scanner_reports_categories_without_returning_raw_values():
     assert "0012345678" not in matches
 
 
+def test_anonymized_export_discovers_pii_in_generic_notes_and_variants():
+    workbook = Workbook()
+    worksheet = workbook.active
+    worksheet.append(["Ghi chú"])
+    worksheet.append(
+        ["Liên hệ ALICE.Example+Student@Example.COM hoặc 0901 234 567"]
+    )
+    worksheet.append(
+        ["Email dự phòng alice.example+student@example.com; ĐT 0901-234-567"]
+    )
+    worksheet.append(
+        ["Đối tác: Công ty TNHH Bí Mật; MST: 0312345678; địa chỉ: 12 Đường Riêng"]
+    )
+    stream = BytesIO()
+    workbook.save(stream)
+
+    exported = anonymize_workbook_bytes(
+        filename="student.xlsx",
+        content=stream.getvalue(),
+        session=AnonymizationSession("session-generic-notes", "secret"),
+        confidential_values={},
+    )
+
+    values = [
+        str(cell.value or "")
+        for row in load_workbook(BytesIO(exported.content)).active.iter_rows()
+        for cell in row
+    ]
+    exported_text = "\n".join(values).casefold()
+    assert "alice.example+student@example.com" not in exported_text
+    assert "0901 234 567" not in exported_text
+    assert "0901-234-567" not in exported_text
+    assert "công ty tnhh bí mật" not in exported_text
+    assert "0312345678" not in exported_text
+    assert "12 đường riêng" not in exported_text
+    assert set(exported.replaced_categories) >= {
+        "company",
+        "tax_code",
+        "address",
+        "email",
+        "phone",
+    }
+
+
+def test_anonymized_export_post_scan_rejects_unredacted_pii_without_inventory():
+    workbook = Workbook()
+    workbook.active["A1"] = '=HYPERLINK("mailto:private.student@example.com")'
+    stream = BytesIO()
+    workbook.save(stream)
+
+    with pytest.raises(AnonymizationExportError, match="email"):
+        anonymize_workbook_bytes(
+            filename="student.xlsx",
+            content=stream.getvalue(),
+            session=AnonymizationSession("session-independent-post-scan", "secret"),
+            confidential_values={},
+        )
+
+
 def test_anonymize_xlsx_returns_a_scanned_copy_without_mutating_original_bytes():
     workbook = Workbook()
     worksheet = workbook.active

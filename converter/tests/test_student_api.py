@@ -77,6 +77,31 @@ def _student_token(secret="student-secret", **overrides):
     return f"{header_part}.{payload_part}.{signature_part}"
 
 
+def _student_operation_token(secret="student-secret", **overrides):
+    session_id = "507f1f77bcf86cd799439011"
+    user_id = "507f1f77bcf86cd799439012"
+    payload = {
+        "purpose": "misa_conversion",
+        "user_id": user_id,
+        "owner_scope": f"user:{user_id}",
+        "workspace_id": None,
+        "snapshot_set_hash": None,
+        "conversion_run_id": f"student:{session_id}",
+        "operation_session_id": session_id,
+        "upload_id": "",
+        "target_template_id": "bsn_sales",
+        "scopes": ["analyze"],
+        "exp": int(time.time()) + 600,
+    }
+    payload.update(overrides)
+    header_part = _encode_part({"alg": "HS256", "typ": "JWT"})
+    payload_part = _encode_part(payload)
+    signed = f"{header_part}.{payload_part}".encode("ascii")
+    signature = hmac.new(secret.encode("utf-8"), signed, hashlib.sha256).digest()
+    signature_part = base64.urlsafe_b64encode(signature).rstrip(b"=").decode("ascii")
+    return f"{header_part}.{payload_part}.{signature_part}"
+
+
 def _workbook_bytes():
     workbook = openpyxl.Workbook()
     sheet = workbook.active
@@ -307,6 +332,77 @@ def test_student_analyze_requires_valid_signed_context(student_api):
     invalid = _analyze(client, "not-a-token")
     assert invalid.status_code == 401
     assert "context" in invalid.json()["detail"].lower()
+
+
+def test_student_analyze_uses_node_binding_with_metadata_only_remote_state(
+    student_api,
+    monkeypatch,
+    tmp_path,
+):
+    client, _ = student_api
+    captured_puts = []
+    session_id = "507f1f77bcf86cd799439011"
+
+    class CapturingRemoteStore:
+        def __init__(self):
+            self.run_id = f"student:{session_id}"
+            self.session_id = session_id
+
+        def put_state(self, **payload):
+            captured_puts.append(payload)
+            return {"session": {"revision": payload["revision"]}}
+
+        def put_artifact(self, **_payload):
+            raise AssertionError("Student analysis must not persist raw upload artifacts remotely")
+
+    remote = CapturingRemoteStore()
+    monkeypatch.setenv("OPERATION_STORE_PROVIDER", "node")
+    monkeypatch.setenv("OPERATION_SESSION_DIR", str(tmp_path / "operation-sessions"))
+    monkeypatch.setattr(
+        "app.operation_store.NodeOperationStoreClient",
+        lambda _token: remote,
+    )
+    student_token = _student_token()
+
+    response = client.post(
+        "/api/v1/student/sessions/analyze",
+        headers={
+            "X-Student-Context": student_token,
+            "X-Conversion-Context": _student_operation_token(),
+        },
+        data={
+            "context_token": student_token,
+            "target_template_id": "bsn_sales",
+        },
+        files={
+            "file": (
+                "sales.xlsx",
+                _workbook_bytes(),
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    assert len(captured_puts) == 1
+    state = captured_puts[0]["state"]
+    assert state["contract"] == "student_metadata_v1"
+    assert "audit_events" not in state["session"]
+    retention_expires_at = verify_student_context(student_token, "analyze").retention_expires_at
+    assert time.time() + 23 * 60 * 60 < captured_puts[0]["expires_at"].timestamp()
+    assert captured_puts[0]["expires_at"].timestamp() <= retention_expires_at
+    serialized = json.dumps(state, ensure_ascii=False)
+    for forbidden in (
+        "headers",
+        "rows",
+        "values",
+        "Mã hóa đơn",
+        "Tên khách hàng",
+        "HD001",
+        "Khách A",
+        "SP001",
+    ):
+        assert forbidden not in serialized
 
 
 def test_student_analyze_rejects_upload_over_configured_maximum(

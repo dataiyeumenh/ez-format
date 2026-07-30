@@ -65,6 +65,12 @@ const studentQuestionEventSchema = new mongoose.Schema(
       required: true,
       enum: ["supported", "unsupported", "ai_unavailable"],
     },
+    retentionExpiresAt: {
+      type: Date,
+      required: true,
+      immutable: true,
+      expires: 0,
+    },
   },
   { timestamps: true },
 );

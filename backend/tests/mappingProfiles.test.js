@@ -159,7 +159,7 @@ test("mapping profile lookup/get/save/use stay bound to the signed student owner
   try {
     const analyzeA = tokenFor("user-a", ownerA, ["analyze"]);
     const analyzeB = tokenFor("user-b", ownerB, ["analyze"]);
-    const attemptA = tokenFor("user-a", ownerA, ["attempt"]);
+    const accountingMapA = tokenFor("user-a", ownerA, ["accounting_map"]);
     const exportA = tokenFor("user-a", ownerA, ["export"]);
     const exportB = tokenFor("user-b", ownerB, ["export"]);
 
@@ -219,7 +219,7 @@ test("mapping profile lookup/get/save/use stay bound to the signed student owner
 
     const saveA = responseRecorder();
     await saveInternalMappingProfile(
-      internalRequest(attemptA, {
+      internalRequest(accountingMapA, {
         body: {
           name: "Student mapping",
           targetTemplateId: "bsn_purchase",

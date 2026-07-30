@@ -11,6 +11,11 @@ from typing import Any
 from app.context_secrets import conversion_context_secret
 
 
+STUDENT_ASSISTANCE_SCOPES = frozenset(
+    {"analyze", "explain", "ask", "accounting_map", "reconcile", "export"}
+)
+
+
 @dataclass(frozen=True)
 class StudentContextClaims:
     purpose: str
@@ -74,7 +79,19 @@ def verify_student_context(token: str, required_scope: str) -> StudentContextCla
     raw_scopes = payload.get("allowed_scopes")
     if not isinstance(raw_scopes, list):
         raise ValueError("Student context scopes không hợp lệ")
-    allowed_scopes = tuple(str(scope) for scope in raw_scopes)
+    allowed_scopes = tuple(str(scope).strip() for scope in raw_scopes)
+    unsupported_scope = next(
+        (
+            scope
+            for scope in allowed_scopes
+            if not scope or scope not in STUDENT_ASSISTANCE_SCOPES
+        ),
+        None,
+    )
+    if unsupported_scope:
+        raise ValueError(
+            f"Student context scope không được hỗ trợ: {unsupported_scope}"
+        )
     if normalized_scope not in allowed_scopes:
         raise ValueError(f"Student context thiếu quyền {normalized_scope}")
 

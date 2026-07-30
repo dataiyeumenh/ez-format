@@ -748,7 +748,7 @@ async function getInternalMappingProfile(req, res) {
 
 async function saveInternalMappingProfile(req, res) {
   try {
-    const claims = authenticateInternalContext(req, "attempt");
+    const claims = authenticateInternalContext(req, "accounting_map");
     const owner = await mappingProfileAccessFromClaims(claims, {
       requireEdit: true,
     });

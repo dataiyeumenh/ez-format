@@ -19,6 +19,9 @@ from app.operation_models import DerivedRevision, NormalizedSession
 from app.operation_store_client import NodeOperationStoreClient, OperationStoreClientError
 
 
+STUDENT_METADATA_STATE_CONTRACT = "student_metadata_v1"
+
+
 class OperationStoreError(ValueError):
     pass
 
@@ -118,6 +121,7 @@ class OperationStore:
         self._remote_run_id = str(conversion_run_id or "").strip()
         self._remote_payloads: dict[str, dict[str, Any]] = {}
         self._remote_storage_revisions: dict[str, int] = {}
+        self._state_contracts: dict[str, str] = {}
         if (
             conversion_context_token
             and remote_client is None
@@ -157,8 +161,11 @@ class OperationStore:
         conversion_run_id: str | None = None,
         ttl_seconds: int | None = None,
         initial_context: dict[str, Any] | None = None,
+        state_contract: str | None = None,
     ) -> NormalizedSession:
         _validate_owner_binding(owner_scope, user_id, workspace_id)
+        if state_contract not in {None, STUDENT_METADATA_STATE_CONTRACT}:
+            raise OperationStoreError("Operation state contract không hợp lệ")
         expected_remote_session_id = str(
             getattr(self._remote_client, "session_id", "") or ""
         ).strip()
@@ -225,7 +232,9 @@ class OperationStore:
             expires_at=expires_at,
             revisions=[base_revision],
         )
-        if self._remote_client is None:
+        if state_contract:
+            self._state_contracts[session_id] = state_contract
+        if self._remote_client is None or state_contract == STUDENT_METADATA_STATE_CONTRACT:
             directory = self._directory(session_id)
             directory.mkdir(parents=True, exist_ok=False)
             self._atomic_write(directory / "table.json", table_payload)
@@ -234,6 +243,10 @@ class OperationStore:
 
     def load_session(self, session_id: str) -> NormalizedSession:
         if self._remote_client is not None:
+            if self._state_contracts.get(session_id) == STUDENT_METADATA_STATE_CONTRACT:
+                cached = self._remote_payloads.get(session_id)
+                if cached is not None:
+                    return cached["session"]
             try:
                 session, _ = self._load_remote_state(session_id)
                 return session
@@ -496,6 +509,8 @@ class OperationStore:
             raise OperationStoreError("Không tải được artifact từ Node") from exc
 
     def _read_table(self, session_id: str) -> dict[str, Any]:
+        if self._state_contracts.get(session_id) == STUDENT_METADATA_STATE_CONTRACT:
+            return self._read_local_table(session_id)
         if self._remote_client is not None:
             payload = self._remote_payloads.get(session_id)
             if payload is None:
@@ -569,11 +584,16 @@ class OperationStore:
             raise OperationStoreError("Conversion run binding là bắt buộc")
         self._remote_run_id = run_id
         storage_revision = self._remote_storage_revisions.get(session.session_id, 0) + 1
-        state = {
-            "schema_version": 1,
-            "session": session.model_dump(mode="json"),
-            "table": table_payload,
-        }
+        state = (
+            self._student_metadata_remote_state(session, table_payload)
+            if self._state_contracts.get(session.session_id)
+            == STUDENT_METADATA_STATE_CONTRACT
+            else {
+                "schema_version": 1,
+                "session": session.model_dump(mode="json"),
+                "table": table_payload,
+            }
+        )
         try:
             result = self._remote_client.put_state(
                 session_id=session.session_id,
@@ -592,6 +612,73 @@ class OperationStore:
             remote_revision if isinstance(remote_revision, int) and remote_revision >= 1 else storage_revision
         )
         self._remote_payloads[session.session_id] = {"session": session, "table": table_payload}
+
+    @staticmethod
+    def _student_metadata_remote_state(
+        session: NormalizedSession, table_payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        raw_session = session.model_dump(mode="json")
+        signature = session.source_signature if isinstance(session.source_signature, dict) else {}
+        session_payload = {
+            key: raw_session[key]
+            for key in (
+                "session_id",
+                "upload_id",
+                "user_id",
+                "workspace_id",
+                "owner_scope",
+                "target_template_id",
+                "target_template_version",
+                "primary_table_id",
+                "active_revision",
+                "state_hash",
+                "raw_sha256",
+                "created_at",
+                "expires_at",
+            )
+        }
+        session_payload["source_signature"] = {
+            "hash": str(signature.get("hash") or ""),
+            "row_count": len(table_payload.get("rows") or []),
+            "column_count": len(table_payload.get("headers") or []),
+        }
+        session_payload["revisions"] = [
+            OperationStore._student_metadata_revision(revision)
+            for revision in raw_session.get("revisions") or []
+            if isinstance(revision, dict)
+        ]
+        return {
+            "schema_version": 1,
+            "contract": STUDENT_METADATA_STATE_CONTRACT,
+            "session": session_payload,
+            "table_metadata": {
+                "row_count": len(table_payload.get("rows") or []),
+                "column_count": len(table_payload.get("headers") or []),
+                "header_row_index": int(table_payload.get("header_row_index") or 0),
+                "has_sheet_name": bool(table_payload.get("sheet_name")),
+            },
+        }
+
+    @staticmethod
+    def _student_metadata_revision(revision: dict[str, Any]) -> dict[str, Any]:
+        context = revision.get("context")
+        payload = {
+            key: revision.get(key)
+            for key in (
+                "revision",
+                "parent_revision",
+                "patch_set_id",
+                "state_hash",
+                "created_by",
+                "created_at",
+            )
+        }
+        payload["context"] = {
+            key: context[key]
+            for key in ("target_template_id", "conversion_run_id")
+            if isinstance(context, dict) and context.get(key) is not None
+        }
+        return payload
 
     @staticmethod
     def _run_id_from_session(session: NormalizedSession) -> str:

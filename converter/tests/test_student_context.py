@@ -1,6 +1,7 @@
 import base64
 import hashlib
 import hmac
+import inspect
 import json
 import time
 from io import BytesIO
@@ -16,6 +17,7 @@ from app.misa_workflow import (
     export_confirmed_profile,
     preview_mapping,
     readiness_mapping,
+    sync_mapping_session,
 )
 from app.student_context import verify_student_context
 from app.student_store import (
@@ -41,7 +43,7 @@ def _student_token(secret="student-secret", **overrides):
         "owner_scope": "user:user-1",
         "workspace_id": None,
         "snapshot_set_hash": None,
-        "allowed_scopes": ["analyze", "explain", "attempt", "export"],
+        "allowed_scopes": ["analyze", "explain", "accounting_map", "export"],
         "iat": int(time.time()),
         "exp": int(time.time()) + 600,
         "retention_expires_at": int(time.time()) + 24 * 60 * 60,
@@ -73,7 +75,22 @@ def test_verify_student_context_accepts_node_compatible_hs256_claims(monkeypatch
     assert claims.session_id == "session-1"
     assert claims.user_id == "user-1"
     assert claims.owner_scope == "user:user-1"
-    assert claims.allowed_scopes == ("analyze", "explain", "attempt", "export")
+    assert claims.allowed_scopes == (
+        "analyze",
+        "explain",
+        "accounting_map",
+        "export",
+    )
+
+
+def test_verify_student_context_rejects_removed_attempt_scope(monkeypatch):
+    monkeypatch.setenv("CONVERSION_CONTEXT_SECRET", "student-secret")
+
+    with pytest.raises(ValueError, match="attempt"):
+        verify_student_context(
+            _student_token(allowed_scopes=["analyze", "attempt"]),
+            "analyze",
+        )
 
 
 @pytest.mark.parametrize(
@@ -355,7 +372,7 @@ def test_analyze_rejects_combining_student_and_conversion_contexts(
         )
 
 
-def test_student_mapping_operations_require_operation_specific_scopes(
+def test_student_mapping_operations_exclude_confirm_mutations(
     tmp_path, monkeypatch
 ):
     upload_root = tmp_path / "uploads"
@@ -393,15 +410,8 @@ def test_student_mapping_operations_require_operation_specific_scopes(
         student_context_token=phase_one,
     )
 
-    with pytest.raises(ValueError, match="attempt"):
-        confirm_mapping(
-            upload_id=analyzed["upload_id"],
-            target_template_id="bsn_sales",
-            mapping=suggestion["mapping"],
-            defaults=suggestion["defaults"],
-            formulas=suggestion["formulas"],
-            student_context_token=phase_one,
-        )
+    assert "student_context_token" not in inspect.signature(confirm_mapping).parameters
+    assert "student_context_token" not in inspect.signature(sync_mapping_session).parameters
 
     with pytest.raises(ValueError, match="export"):
         export_confirmed_profile(

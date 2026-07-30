@@ -93,12 +93,6 @@ function isPayOSSettlementConfigured(env = process.env) {
   );
 }
 
-function isStudentAttemptPersistenceConfigured(env = process.env) {
-  const enabled = (name) =>
-    String(env[name] || "false").trim().toLowerCase() === "true";
-  return enabled("STUDENT_ASSISTANT_ENABLED") && enabled("STUDENT_CHECK_WORK_ENABLED");
-}
-
 async function ensureCouponUsagePaymentUniqueIndex(CouponUsageModel = CouponUsage) {
   const { keys, options } = COUPON_USAGE_PAYMENT_UNIQUE_INDEX;
   return CouponUsageModel.collection.createIndex(keys, options);
@@ -115,17 +109,15 @@ function createConnectDB({
   return async function connectDB() {
     const mongoUri = env.MONGO_URI;
     const isProduction = env.NODE_ENV === "production";
-    const studentAttemptsConfigured = isStudentAttemptPersistenceConfigured(env);
-
     if (!mongoUri) {
       setPaymentSettlementReadiness({
         ready: false,
         deployment: "unconfigured",
         reason: "MONGO_URI is required for MongoDB transactions.",
       });
-      if (isProduction || isPayOSSettlementConfigured(env) || studentAttemptsConfigured) {
+      if (isProduction || isPayOSSettlementConfigured(env)) {
         throw new Error(
-          "[DB] MONGO_URI is required for production, PayOS settlement, or Student attempt persistence.",
+          "[DB] MONGO_URI is required for production or PayOS settlement.",
         );
       }
       logger.warn(
@@ -171,11 +163,6 @@ function createConnectDB({
       if (isPayOSSettlementConfigured(env) && !readiness.ready) {
         throw new Error(readiness.reason);
       }
-      if (studentAttemptsConfigured && !readiness.ready) {
-        throw new Error(
-          `Student attempt completion requires a MongoDB replica set or sharded cluster. ${readiness.reason}`,
-        );
-      }
       return conn;
     } catch (error) {
       setPaymentSettlementReadiness({
@@ -184,7 +171,7 @@ function createConnectDB({
         reason: error.message,
       });
       logger.error("[DB] MongoDB connection failed:", error.message);
-      if (isProduction || isPayOSSettlementConfigured(env) || studentAttemptsConfigured) throw error;
+      if (isProduction || isPayOSSettlementConfigured(env)) throw error;
       logger.warn("[DB] Continuing without database in development mode.");
       return null;
     }
@@ -204,5 +191,4 @@ module.exports.getPaymentSettlementReadiness = getPaymentSettlementReadiness;
 module.exports.inspectConnectedMongoTransactionReadiness =
   inspectConnectedMongoTransactionReadiness;
 module.exports.isPayOSSettlementConfigured = isPayOSSettlementConfigured;
-module.exports.isStudentAttemptPersistenceConfigured = isStudentAttemptPersistenceConfigured;
 module.exports.ensureCouponUsagePaymentUniqueIndex = ensureCouponUsagePaymentUniqueIndex;

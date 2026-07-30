@@ -38,6 +38,12 @@ const studentActivitySchema = new mongoose.Schema(
     summaryVi: { type: String, required: true, trim: true, maxlength: 240, immutable: true },
     evidenceCount: { type: Number, required: true, min: 0, default: 0, immutable: true },
     containsRawValues: { type: Boolean, default: false, enum: [false], immutable: true },
+    retentionExpiresAt: {
+      type: Date,
+      required: true,
+      immutable: true,
+      expires: 0,
+    },
   },
   { timestamps: true },
 );

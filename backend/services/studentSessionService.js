@@ -25,51 +25,189 @@ function hashStudentQuestion(value) {
     .digest("hex");
 }
 
-async function migrateStudentQuestionEventPrivacy(model, { batchSize = 100 } = {}) {
-  const collection = model?.collection || model;
-  if (!collection || typeof collection.updateMany !== "function") {
-    throw new Error("StudentQuestionEvent model là bắt buộc");
+const RAW_STUDENT_QUESTION_FIELDS = Object.freeze([
+  "question",
+  "answer",
+  "rows",
+  "rawRows",
+  "evidence",
+  "workbook",
+  "workbookBytes",
+  "content",
+]);
+
+function normalizeStudentPrivacyMigrationMode(value) {
+  const mode = String(value || "off").trim().toLowerCase();
+  if (!["off", "dry-run", "apply"].includes(mode)) {
+    throw new Error("STUDENT_PRIVACY_MIGRATION_MODE must be off, dry-run, or apply");
   }
-  const rawFields = [
-    "question",
-    "answer",
-    "rows",
-    "rawRows",
-    "evidence",
-    "workbook",
-    "workbookBytes",
-    "content",
-  ];
-  if (typeof collection.find !== "function") {
-    throw new Error("StudentQuestionEvent collection phải hỗ trợ truy vấn giới hạn");
+  return mode;
+}
+
+function boundedBatchSize(value) {
+  return Math.min(Math.max(Math.floor(Number(value) || 100), 1), 1000);
+}
+
+async function findBounded(model, filter, batchSize, projection) {
+  if (!model || typeof model.find !== "function") {
+    throw new Error("Student privacy model phải hỗ trợ find");
   }
-  const boundedBatchSize = Math.min(
-    Math.max(Math.floor(Number(batchSize) || 100), 1),
-    1000,
-  );
-  const rawContentFilter = {
-    $or: rawFields.map((field) => ({ [field]: { $exists: true } })),
-  };
-  const legacyEvents = await collection
-    .find(rawContentFilter)
+  const query = model.find(filter);
+  if (
+    !query ||
+    typeof query.sort !== "function" ||
+    typeof query.limit !== "function" ||
+    typeof query.select !== "function" ||
+    typeof query.lean !== "function"
+  ) {
+    throw new Error("Student privacy query phải hỗ trợ bounded projection");
+  }
+  return query
     .sort({ _id: 1 })
-    .limit(boundedBatchSize)
-    .project({ _id: 1 })
-    .toArray();
-  const legacyIds = legacyEvents.map((event) => event?._id).filter(Boolean);
-  if (!legacyIds.length) {
-    return { purged: 0 };
-  }
-  const result = await collection.updateMany(
-    { _id: { $in: legacyIds } },
-    { $unset: Object.fromEntries(rawFields.map((field) => [field, 1])) },
+    .limit(batchSize)
+    .select(projection)
+    .lean();
+}
+
+async function migrateRetentionMetadata({
+  model,
+  sessionModel,
+  mode,
+  batchSize,
+  now,
+}) {
+  const candidates = await findBounded(
+    model,
+    {
+      $or: [
+        { retentionExpiresAt: { $exists: false } },
+        { retentionExpiresAt: null },
+        { retentionExpiresAt: { $lte: now } },
+      ],
+    },
+    batchSize,
+    { _id: 1, sessionId: 1, retentionExpiresAt: 1 },
   );
-  return { purged: Number(result?.modifiedCount || 0) };
+  if (!candidates.length) return { scanned: 0, backfilled: 0, purged: 0 };
+
+  const missingRetention = candidates.filter((item) => !item?.retentionExpiresAt);
+  let sessions = [];
+  if (missingRetention.length) {
+    if (!sessionModel || typeof sessionModel.find !== "function") {
+      throw new Error("StudentFileSession model là bắt buộc cho orphan cleanup");
+    }
+    const query = sessionModel.find({
+      _id: { $in: missingRetention.map((item) => item.sessionId).filter(Boolean) },
+    });
+    if (!query || typeof query.select !== "function" || typeof query.lean !== "function") {
+      throw new Error("StudentFileSession query không hợp lệ");
+    }
+    sessions = await query.select({ _id: 1, retentionExpiresAt: 1 }).lean();
+  }
+  const retentionBySession = new Map(
+    sessions.map((session) => [String(session._id), session.retentionExpiresAt]),
+  );
+  const purgeIds = [];
+  const backfills = [];
+  for (const candidate of candidates) {
+    if (candidate.retentionExpiresAt) {
+      purgeIds.push(candidate._id);
+      continue;
+    }
+    const retentionExpiresAt = retentionBySession.get(String(candidate.sessionId));
+    if (!retentionExpiresAt || new Date(retentionExpiresAt) <= now) {
+      purgeIds.push(candidate._id);
+    } else {
+      backfills.push({ _id: candidate._id, retentionExpiresAt });
+    }
+  }
+  if (mode !== "apply") {
+    return { scanned: candidates.length, backfilled: 0, purged: 0 };
+  }
+  if (typeof model.updateMany !== "function" || typeof model.deleteMany !== "function") {
+    throw new Error("Student privacy model phải hỗ trợ updateMany và deleteMany");
+  }
+  let backfilled = 0;
+  for (const item of backfills) {
+    const result = await model.updateMany(
+      { _id: item._id, retentionExpiresAt: { $in: [null] } },
+      { $set: { retentionExpiresAt: item.retentionExpiresAt } },
+    );
+    backfilled += Number(result?.modifiedCount || 0);
+  }
+  const deletion = purgeIds.length
+    ? await model.deleteMany({ _id: { $in: purgeIds } })
+    : { deletedCount: 0 };
+  return {
+    scanned: candidates.length,
+    backfilled,
+    purged: Number(deletion?.deletedCount || 0),
+  };
+}
+
+async function migrateStudentPrivacy(
+  { questionEventModel, activityModel, sessionModel } = {},
+  { mode: requestedMode = "off", batchSize = 100, now = new Date() } = {},
+) {
+  const mode = normalizeStudentPrivacyMigrationMode(requestedMode);
+  const report = {
+    mode,
+    scanned: 0,
+    rawCandidates: 0,
+    scrubbed: 0,
+    backfilled: 0,
+    orphansPurged: 0,
+  };
+  if (mode === "off") return report;
+
+  const limit = boundedBatchSize(batchSize);
+  const rawEvents = await findBounded(
+    questionEventModel,
+    {
+      $or: RAW_STUDENT_QUESTION_FIELDS.map((field) => ({
+        [field]: { $exists: true },
+      })),
+    },
+    limit,
+    { _id: 1 },
+  );
+  const rawIds = rawEvents.map((event) => event?._id).filter(Boolean);
+  report.rawCandidates = rawIds.length;
+  report.scanned += rawIds.length;
+  if (mode === "apply" && rawIds.length) {
+    if (typeof questionEventModel.updateMany !== "function") {
+      throw new Error("StudentQuestionEvent model phải hỗ trợ updateMany");
+    }
+    const result = await questionEventModel.updateMany(
+      { _id: { $in: rawIds } },
+      {
+        $unset: Object.fromEntries(
+          RAW_STUDENT_QUESTION_FIELDS.map((field) => [field, 1]),
+        ),
+      },
+    );
+    report.scrubbed = Number(result?.modifiedCount || 0);
+  }
+
+  for (const model of [questionEventModel, activityModel]) {
+    const retention = await migrateRetentionMetadata({
+      model,
+      sessionModel,
+      mode,
+      batchSize: limit,
+      now,
+    });
+    report.scanned += retention.scanned;
+    report.backfilled += retention.backfilled;
+    report.orphansPurged += retention.purged;
+  }
+  return report;
 }
 
 module.exports = {
   buildOwnerScope,
   hashStudentQuestion,
-  migrateStudentQuestionEventPrivacy,
+  migrateStudentPrivacy,
+  normalizeStudentPrivacyMigrationMode,
   normalizeStudentQuestion,
 };

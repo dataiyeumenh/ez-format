@@ -60,6 +60,44 @@ _NUMERIC_PREFIXES = {
     "document_number": "DOC",
 }
 
+_PII_PATTERNS = {
+    "company": re.compile(
+        r"((?:c[oô]ng\s*ty|cong\s*ty|cty|doanh\s*nghi[eệ]p|doanh\s*nghiep)"
+        r"\s+[^;,|\n]{2,120})",
+        re.IGNORECASE,
+    ),
+    "counterparty": re.compile(
+        r"(?:kh[aá]ch\s*h[aà]ng|khach\s*hang|nh[aà]\s*cung\s*c[aấ]p|"
+        r"nha\s*cung\s*cap|[dđ][oố]i\s*t[aá]c|doi\s*tac)"
+        r"\s*[:#-]\s*([^;,|\n]{2,120})",
+        re.IGNORECASE,
+    ),
+    "address": re.compile(
+        r"(?:[dđ][iị]a\s*ch[iỉ]|dia\s*chi|address)"
+        r"\s*[:#-]\s*([^;|\n]{4,180})",
+        re.IGNORECASE,
+    ),
+    "email": re.compile(
+        r"(?<![\w.+-])[A-Z0-9.!#$%&'*+/=?^_`{|}~-]+@"
+        r"[A-Z0-9](?:[A-Z0-9.-]{0,251}[A-Z0-9])?\.[A-Z]{2,63}(?![\w.-])",
+        re.IGNORECASE,
+    ),
+    "phone": re.compile(
+        r"(?<!\d)(?:\+?84|0)(?:[\s().-]*\d){8,10}(?!\d)",
+        re.IGNORECASE,
+    ),
+    "tax_code": re.compile(
+        r"(?:m[aã]\s*s[oố]\s*thu[eế]|ma\s+so\s+thue|mst|tax\s*code)"
+        r"\s*[:#-]?\s*(\d{10}(?:-\d{3})?)",
+        re.IGNORECASE,
+    ),
+    "bank_account": re.compile(
+        r"(?:s[oố]\s*t[aà]i\s*kho[aả]n|so\s+tai\s+khoan|stk|bank\s*account)"
+        r"\s*[:#-]?\s*(\d(?:[\s.-]*\d){5,18})",
+        re.IGNORECASE,
+    ),
+}
+
 
 class AnonymizationExportError(ValueError):
     """Raised when a generated workbook still contains confidential content."""
@@ -155,6 +193,73 @@ def scan_confidential_values(
     return tuple(matches)
 
 
+def discover_pii_values(payload: Any) -> dict[str, tuple[str, ...]]:
+    """Discover high-confidence PII tokens without relying on column names."""
+    discovered: dict[str, list[str]] = {}
+    seen: dict[str, set[str]] = {}
+    for candidate in _iter_text_values(payload):
+        text = str(candidate or "")
+        for category, pattern in _PII_PATTERNS.items():
+            for match in pattern.finditer(text):
+                value = match.group(1) if match.lastindex else match.group(0)
+                value = value.strip().rstrip(".,;:")
+                if not value or _is_anonymized_token(text, match.start(), category, value):
+                    continue
+                if category == "phone":
+                    digit_count = len(re.sub(r"\D", "", value))
+                    if digit_count < 9 or digit_count > 11:
+                        continue
+                canonical = value.casefold()
+                category_seen = seen.setdefault(category, set())
+                if canonical in category_seen:
+                    continue
+                category_seen.add(canonical)
+                discovered.setdefault(category, []).append(value)
+    return {category: tuple(values) for category, values in discovered.items()}
+
+
+def _is_anonymized_token(
+    text: str, start: int, category: str, value: str
+) -> bool:
+    if category == "email" and value.casefold().endswith("@example.invalid"):
+        return True
+    if re.fullmatch(
+        rf"(?:{'|'.join(map(re.escape, _TEXT_PREFIXES.values()))})-[A-F0-9]{{12}}",
+        value,
+        flags=re.IGNORECASE,
+    ):
+        return True
+    prefix = text[max(0, start - 16) : start].upper()
+    if any(prefix.endswith(marker) for marker in ("PHONE-", "TAX-", "BANK-", "DOC-")):
+        return True
+    expected = {
+        "phone": "PHONE-",
+        "tax_code": "TAX-",
+        "bank_account": "BANK-",
+    }.get(category)
+    return bool(expected and prefix.endswith(expected))
+
+
+def _merge_confidential_values(
+    supplied: Mapping[str, Iterable[Any]], discovered: Mapping[str, Iterable[Any]]
+) -> dict[str, tuple[Any, ...]]:
+    merged: dict[str, list[Any]] = {}
+    seen: dict[str, set[str]] = {}
+    for source in (supplied, discovered):
+        for category, values in source.items():
+            normalized_category = _validate_category(category)
+            for value in _confidential_value_items(values):
+                if value is None or not str(value).strip():
+                    continue
+                canonical = str(value).strip().casefold()
+                category_seen = seen.setdefault(normalized_category, set())
+                if canonical in category_seen:
+                    continue
+                category_seen.add(canonical)
+                merged.setdefault(normalized_category, []).append(value)
+    return {category: tuple(values) for category, values in merged.items()}
+
+
 def anonymize_workbook_bytes(
     *,
     filename: str,
@@ -174,8 +279,15 @@ def anonymize_workbook_bytes(
     if not isinstance(content, bytes) or not content:
         raise ValueError("Workbook content is required")
 
-    active_values = _active_confidential_values(
+    if extension == ".xlsx":
+        _validate_xlsx_archive(content)
+    source_values = _workbook_values(content, extension)
+    all_confidential_values = _merge_confidential_values(
         confidential_values,
+        discover_pii_values(source_values),
+    )
+    active_values = _active_confidential_values(
+        all_confidential_values,
         full_document_numbers=full_document_numbers,
     )
     if extension == ".xlsx":
@@ -194,8 +306,14 @@ def anonymize_workbook_bytes(
     matches = scan_confidential_values(
         _workbook_values(exported, extension), active_values
     )
-    if matches:
-        raise AnonymizationExportError(matches)
+    independent_matches = tuple(
+        category
+        for category in ANONYMIZATION_CATEGORIES
+        if category in discover_pii_values(_workbook_values(exported, extension))
+    )
+    failed_categories = tuple(dict.fromkeys((*matches, *independent_matches)))
+    if failed_categories:
+        raise AnonymizationExportError(failed_categories)
     return AnonymizedWorkbook(
         content=exported,
         filename=_export_filename(normalized_filename),
@@ -274,8 +392,8 @@ def _anonymize_xlsx(
                 value, session, confidential_values
             )
             if replacement is not None:
-                value, category = replacement
-                replaced_categories.add(category)
+                value, categories = replacement
+                replaced_categories.update(categories)
                 replaced_layers.add("cell_values")
             worksheet.cell(
                 row=source_cell.row,
@@ -664,23 +782,13 @@ def _replacement_for_cell(
     value: Any,
     session: AnonymizationSession,
     confidential_values: Mapping[str, Iterable[Any]],
-) -> tuple[str, str] | None:
+) -> tuple[str, set[str]] | None:
     if not isinstance(value, str) or value.startswith("="):
         return None
-    candidate = value.casefold()
-    for category in ANONYMIZATION_CATEGORIES:
-        for original in confidential_values.get(category, ()):
-            if original is None:
-                continue
-            source = str(original).strip()
-            if source and _contains_confidential(candidate, source):
-                return (
-                    _replace_confidential(
-                        value, source, session.replace(category, source)
-                    ),
-                    category,
-                )
-    return None
+    replacement, categories = _replace_all_known_text(
+        value, session, confidential_values
+    )
+    return (replacement, categories) if categories else None
 
 
 def _workbook_values(content: bytes, extension: str) -> list[Any]:

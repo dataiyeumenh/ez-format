@@ -2,6 +2,14 @@ const jwt = require("jsonwebtoken");
 
 const MAX_STUDENT_CONTEXT_LIFETIME_SECONDS = 24 * 60 * 60;
 const MIN_PRODUCTION_CONTEXT_SECRET_LENGTH = 32;
+const STUDENT_ASSISTANCE_SCOPES = new Set([
+  "analyze",
+  "explain",
+  "ask",
+  "accounting_map",
+  "reconcile",
+  "export",
+]);
 
 function contextSecret(env = process.env) {
   const dedicated = String(env.CONVERSION_CONTEXT_SECRET || "").trim();
@@ -130,6 +138,20 @@ function parseStudentContextLifetime(expiresIn) {
   throw new Error("Student context lifetime không hợp lệ");
 }
 
+function normalizeStudentContextScopes(scopes) {
+  if (!Array.isArray(scopes)) {
+    throw new Error("Student context scopes không hợp lệ");
+  }
+  const normalized = scopes.map((scope) => String(scope).trim());
+  const unsupported = normalized.find(
+    (scope) => !scope || !STUDENT_ASSISTANCE_SCOPES.has(scope),
+  );
+  if (unsupported) {
+    throw new Error(`Student context scope không được hỗ trợ: ${unsupported}`);
+  }
+  return normalized;
+}
+
 function createStudentContextToken({
   sessionId,
   userId,
@@ -151,6 +173,7 @@ function createStudentContextToken({
     nowSeconds,
     lifetimeSeconds,
   );
+  const normalizedScopes = normalizeStudentContextScopes(allowedScopes);
 
   return jwt.sign(
     {
@@ -161,7 +184,7 @@ function createStudentContextToken({
       owner_scope: normalizedOwnerScope,
       workspace_id: workspaceId == null ? null : String(workspaceId),
       snapshot_set_hash: snapshotSetHash == null ? null : String(snapshotSetHash),
-      allowed_scopes: allowedScopes.map(String),
+      allowed_scopes: normalizedScopes,
       retention_expires_at: retentionSeconds,
     },
     contextSecret(),
@@ -205,6 +228,7 @@ function verifyStudentContextToken(token, requiredScope) {
   if (!Array.isArray(claims.allowed_scopes)) {
     throw new Error("Student context scopes không hợp lệ");
   }
+  claims.allowed_scopes = normalizeStudentContextScopes(claims.allowed_scopes);
   if (!claims.allowed_scopes.includes(normalizedRequiredScope)) {
     throw new Error(`Student context thiếu quyền ${normalizedRequiredScope}`);
   }

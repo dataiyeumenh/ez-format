@@ -43,14 +43,10 @@ const {
 const {
   mergeGatewayCapabilities,
 } = require("./routes/converterGateway");
-const StudentQuestionEvent = require("./models/StudentQuestionEvent");
-const StudentAttempt = require("./models/StudentAttempt");
 const {
-  migrateStudentQuestionEventPrivacy,
+  migrateStudentPrivacy,
+  normalizeStudentPrivacyMigrationMode,
 } = require("./services/studentSessionService");
-const {
-  ensureStudentAttemptPersistence,
-} = require("./services/studentAttemptMigrationService");
 
 require("dotenv").config();
 
@@ -68,9 +64,6 @@ const voucherReconstructionEnabled =
   "true";
 const studentAssistantEnabled =
   String(process.env.STUDENT_ASSISTANT_ENABLED || "false").toLowerCase() === "true";
-const studentAttemptPersistenceEnabled =
-  studentAssistantEnabled &&
-  String(process.env.STUDENT_CHECK_WORK_ENABLED || "false").toLowerCase() === "true";
 const misaImportRepairEnabled =
   String(process.env.MISA_IMPORT_REPAIR_ENABLED || "false").trim().toLowerCase() ===
   "true";
@@ -184,17 +177,23 @@ app.get("/api/health", (req, res) => {
 
 const PORT = process.env.PORT || 5000;
 
+function loadStudentPrivacyModels() {
+  return {
+    questionEventModel: require("./models/StudentQuestionEvent"),
+    activityModel: require("./models/StudentActivity"),
+    sessionModel: require("./models/StudentFileSession"),
+  };
+}
+
 function createStartServer({
   connectDatabase = connectDB,
   migrateMappingProfiles = migrateMappingProfileOwnerScope,
   ensureV2Indexes = ensureMappingProfileV2Indexes,
   migrateMappingProfilesV2 = migrateMappingProfilesV1ToV2,
   runMappingProfileMigrations = runProductionMigrationPreflight,
-  migrateQuestionEvents = migrateStudentQuestionEventPrivacy,
-  questionEventModel = StudentQuestionEvent,
-  migrateStudentAttempts = ensureStudentAttemptPersistence,
-  studentAttemptModel = StudentAttempt,
-  studentAttemptsEnabled = studentAttemptPersistenceEnabled,
+  studentEnabled = studentAssistantEnabled,
+  migrateStudentPrivacy: runStudentPrivacyMigration = migrateStudentPrivacy,
+  loadStudentPrivacyModels: loadPrivacyModels = loadStudentPrivacyModels,
   repairEnabled = misaImportRepairEnabled,
   ensureRepairIndexes = ensureMisaImportRepairIndexes,
   startArtifactSweeper = startConversionArtifactSweeper,
@@ -203,6 +202,9 @@ function createStartServer({
   logger = console,
 } = {}) {
   return async function startServer() {
+    const privacyMigrationMode = normalizeStudentPrivacyMigrationMode(
+      process.env.STUDENT_PRIVACY_MIGRATION_MODE,
+    );
     const v2MigrationMode = String(
       process.env.MAPPING_PROFILE_V2_MIGRATION_MODE || "off",
     ).trim().toLowerCase();
@@ -261,26 +263,14 @@ function createStartServer({
         throw error;
       }
     }
-    try {
-      const questionMigration = await migrateQuestionEvents(questionEventModel);
-      if (questionMigration.purged) {
-        logger.log(
-          `[DB] Student question privacy migration: ${questionMigration.purged} legacy event(s) purged`,
-        );
-      }
-    } catch (error) {
-      logger.error(`[DB] Student question privacy migration failed: ${error.message}`);
-    }
-    try {
-      const attemptMigration = await migrateStudentAttempts(studentAttemptModel);
-      if (attemptMigration?.purged) {
-        logger.log(
-          `[DB] Student attempt persistence migration: ${attemptMigration.purged} unsafe legacy attempt(s) purged`,
-        );
-      }
-    } catch (error) {
-      logger.error(`[DB] Student attempt persistence migration failed: ${error.message}`);
-      if (studentAttemptsEnabled) throw error;
+    if (studentEnabled && privacyMigrationMode !== "off") {
+      const report = await runStudentPrivacyMigration(loadPrivacyModels(), {
+        mode: privacyMigrationMode,
+      });
+      logger.log(JSON.stringify({
+        event: "student-privacy-migration-completed",
+        report,
+      }));
     }
     const artifactSweeper = converterGatewayUsageReady
       ? startArtifactSweeper()

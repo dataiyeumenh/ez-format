@@ -22,7 +22,10 @@ test("workspace QA runs the repair gate in default and fast modes", async () => 
   assert.doesNotMatch(focused, /requires -SkipSlowTests/);
 });
 
-test("student fast gate includes the attempt ownership and progress contract", async () => {
+test("student fast gate includes the no-grading contract", async () => {
   const qa = await readFile(path.join(root, "scripts", "qa-qc.ps1"), "utf8");
   assert.match(qa, /backend[\\/]tests[\\/]studentAttempts\.test\.js/);
+  assert.match(qa, /backend[\\/]tests[\\/]studentPrivacy\.test\.js/);
+  assert.doesNotMatch(qa, /backend[\\/]models[\\/]StudentAttempt\.js/);
+  assert.doesNotMatch(qa, /backend[\\/]models[\\/]StudentSkillProgress\.js/);
 });

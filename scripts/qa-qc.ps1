@@ -65,9 +65,9 @@ $steps = @()
         "backend\controllers\authController.js",
         "backend\controllers\convertController.js",
         "backend\controllers\studentSessionController.js",
-        "backend\models\StudentAttempt.js",
         "backend\models\StudentActivity.js",
-        "backend\models\StudentSkillProgress.js",
+        "backend\models\StudentFileSession.js",
+        "backend\models\StudentQuestionEvent.js",
         "backend\routes\student.js",
         "backend\routes\internal.js",
         "backend\seed.js"
@@ -81,7 +81,7 @@ $steps = @()
 })
 
 [void]($steps += Step "Backend student tests" {
-    node --test backend/tests/studentSessions.test.js backend/tests/studentQuestions.test.js backend/tests/studentActivities.test.js backend/tests/studentAttempts.test.js
+    node --test backend/tests/studentSessions.test.js backend/tests/studentQuestions.test.js backend/tests/studentActivities.test.js backend/tests/studentAttempts.test.js backend/tests/studentPrivacy.test.js
     if ($LASTEXITCODE -ne 0) { throw "Backend student tests failed" }
 })
 
