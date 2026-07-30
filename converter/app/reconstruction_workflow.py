@@ -12,12 +12,6 @@ from typing import Any
 
 import httpx
 
-from app.ai_mapping_client import ai_enabled
-from app.ai_reconstruction_client import (
-    AiReconstructionError,
-    redact_reconstruction_sample_rows,
-    request_reconstruction_suggestion,
-)
 from app.excel_io import read_input_table
 from app.field_provenance import apply_master_data_to_drafts
 from app.document_structure import (
@@ -47,7 +41,6 @@ from app.reconstruction_store import (
 )
 from app.voucher_models import (
     FieldProvenance,
-    ReconstructionIssue,
     VoucherDraft,
     VoucherField,
     VoucherReconstructionReport,
@@ -146,52 +139,7 @@ def analyze_reconstruction(
         else preliminary
     )
     _enforce_draft_limit(report)
-    if not profile and ai_enabled() and _needs_ai_reconstruction(report):
-        ai_started_at = time.perf_counter()
-        try:
-            ai_suggestion = request_reconstruction_suggestion(
-                {
-                    "mode": mode,
-                    "workspace_tax_code_configured": bool(workspace_tax_code),
-                    "source": {
-                        "sheet_name": table.sheet_name,
-                        "headers": table.headers,
-                        "sample_rows": redact_reconstruction_sample_rows(
-                            table.rows,
-                            table.headers,
-                        ),
-                    },
-                    "detected_columns": report.detected_columns,
-                    "unresolved_codes": [
-                        issue.code
-                        for draft in report.drafts
-                        for issue in draft.issues
-                    ][:20],
-                },
-                cache_key=(
-                    f"{report.source_signature_hash}:{mode}:"
-                    f"{int(bool(workspace_tax_code))}"
-                ),
-            )
-            ai_mode = (
-                ai_suggestion["direction"]
-                if mode == "auto" and ai_suggestion.get("direction") in {"purchase", "sales"}
-                else mode
-            )
-            report = reconstruct_vouchers(
-                table,
-                mode=ai_mode,
-                workspace_tax_code=workspace_tax_code,
-                requested_template_id=target_template_id,
-                column_mapping=ai_suggestion.get("field_roles") or None,
-                grouping_keys=ai_suggestion.get("grouping_keys") or None,
-            )
-            _enforce_draft_limit(report)
-            _mark_ai_assisted(report, ai_suggestion)
-        except AiReconstructionError as exc:
-            ai_warning = str(exc)
-        finally:
-            ai_duration_ms = round((time.perf_counter() - ai_started_at) * 1000, 2)
+    # Analysis remains deterministic; remote AI cannot alter accounting output.
     apply_master_data_to_drafts(report.drafts, master_data_context)
     payload = report.model_dump(mode="json")
     payload["reconstruction_id"] = reconstruction_id
@@ -872,54 +820,10 @@ def _profile_column_mapping(profile: dict[str, Any] | None) -> dict[str, str] | 
     return output or None
 
 
-def _needs_ai_reconstruction(report: VoucherReconstructionReport) -> bool:
-    return any(
-        draft.direction == "unknown"
-        or draft.nature == "unknown"
-        or any(issue.code == "fallback_document_grouping" for issue in draft.issues)
-        for draft in report.drafts
-    )
-
-
 def _enforce_draft_limit(report: VoucherReconstructionReport) -> None:
     limit = max(1, int(os.getenv("RECONSTRUCTION_MAX_DRAFTS", "10000")))
     if report.summary.draft_count > limit:
         raise ValueError(f"File tạo ra quá {limit} chứng từ; vui lòng chia nhỏ file")
-
-
-def _mark_ai_assisted(
-    report: VoucherReconstructionReport,
-    suggestion: dict[str, Any],
-) -> None:
-    suggested_nature = suggestion.get("nature")
-    for draft in report.drafts:
-        if draft.direction != "unknown" and suggestion.get("direction") in {
-            "purchase",
-            "sales",
-        }:
-            draft.direction_trust = "suggested"
-        if draft.nature == "unknown" and suggested_nature in {"goods", "service"}:
-            draft.nature = suggested_nature
-            draft.nature_trust = "suggested"
-            draft.document_kind = f"{draft.direction}_{draft.nature}"
-            draft.template_id = {
-                ("purchase", "goods"): "misa_purchase_domestic",
-                ("purchase", "service"): "purchase_service",
-                ("sales", "goods"): "bsn_sales",
-                ("sales", "service"): "sales_service",
-            }.get((draft.direction, draft.nature))
-        draft.issues.append(
-            ReconstructionIssue(
-                severity="warning",
-                code="ai_reconstruction_suggestion_review",
-                message="AI đã hỗ trợ gợi ý cấu trúc; kế toán cần xác nhận trước khi export.",
-                source_rows=draft.source_rows,
-                fix_hint="Kiểm tra ranh giới, loại chứng từ và các field được AI gợi ý.",
-            )
-        )
-        draft.status = "needs_review"
-    _refresh_report(report)
-
 
 def _json_safe(value: Any) -> Any:
     if isinstance(value, dict):

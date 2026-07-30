@@ -11,6 +11,7 @@ from typing import Any
 
 import httpx
 
+from app.ai_endpoint_policy import validate_remote_ai_endpoint
 from app.ai_mapping_client import ai_enabled
 from app.normalization import normalize_header
 
@@ -90,6 +91,7 @@ def request_reconstruction_suggestion(
 ) -> dict[str, Any]:
     if not ai_enabled():
         raise AiReconstructionError("AI reconstruction đang tắt")
+    payload = redact_reconstruction_payload(payload)
     url = _endpoint()
     resolved_cache_key = (
         f"{url}|{_prompt_version()}|{cache_key}" if cache_key else ""
@@ -303,6 +305,32 @@ def redact_reconstruction_sample_rows(
     return output
 
 
+def redact_reconstruction_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    source = payload.get("source") if isinstance(payload.get("source"), dict) else {}
+    source_headers = [str(item) for item in source.get("headers") or []]
+    return {
+        "mode": str(payload.get("mode") or "auto"),
+        "workspace_tax_code_configured": bool(
+            payload.get("workspace_tax_code_configured")
+        ),
+        "source": {
+            "sheet_name": _redacted_value(source.get("sheet_name")),
+            "headers": source_headers,
+            "sample_rows": redact_reconstruction_sample_rows(
+                source.get("sample_rows"), source_headers
+            ),
+        },
+        "detected_columns": {
+            str(key): str(value)
+            for key, value in (payload.get("detected_columns") or {}).items()
+            if isinstance(key, str) and isinstance(value, str) and value in source_headers
+        },
+        "unresolved_codes": [
+            str(item)[:100] for item in (payload.get("unresolved_codes") or [])[:20]
+        ],
+    }
+
+
 def _redacted_value(value: Any) -> str:
     if value is None or str(value).strip() == "":
         return "<blank>"
@@ -329,10 +357,25 @@ def _redacted_value(value: Any) -> str:
 def _endpoint() -> str:
     configured = os.getenv("AI_RECONSTRUCTION_BASE_URL", "").strip()
     if configured:
-        return configured
+        try:
+            return validate_remote_ai_endpoint(configured)
+        except ValueError as exc:
+            raise AiReconstructionError(str(exc)) from exc
     mapping_url = os.getenv("AI_BASE_URL", "").strip()
     if mapping_url.endswith("/v1/misa/suggest-mapping"):
-        return mapping_url[: -len("/v1/misa/suggest-mapping")] + "/v1/misa/suggest-reconstruction"
+        candidate = (
+            mapping_url[: -len("/v1/misa/suggest-mapping")]
+            + "/v1/misa/suggest-reconstruction"
+        )
+        try:
+            return validate_remote_ai_endpoint(candidate)
+        except ValueError as exc:
+            raise AiReconstructionError(str(exc)) from exc
     if mapping_url:
-        return mapping_url.rstrip("/") + "/v1/misa/suggest-reconstruction"
+        try:
+            return validate_remote_ai_endpoint(
+                mapping_url.rstrip("/") + "/v1/misa/suggest-reconstruction"
+            )
+        except ValueError as exc:
+            raise AiReconstructionError(str(exc)) from exc
     raise AiReconstructionError("AI_RECONSTRUCTION_BASE_URL chưa được cấu hình")

@@ -10,6 +10,7 @@ import io
 from pathlib import Path
 
 import openpyxl
+import pytest
 import xlrd
 from fastapi.testclient import TestClient
 
@@ -19,6 +20,15 @@ from app.reconstruction_profile_client import ReconstructionProfileClientError
 
 
 client = TestClient(app)
+
+
+@pytest.fixture(autouse=True)
+def _internal_service_auth(monkeypatch):
+    token = "reconstruction-service-token"
+    monkeypatch.setenv("CONVERTER_SERVICE_TOKEN", token)
+    client.headers["x-converter-service-token"] = token
+    yield
+    client.headers.pop("x-converter-service-token", None)
 
 
 def test_converter_cors_exposes_download_filename_header():
@@ -205,6 +215,54 @@ def _write_purchase(path: Path) -> Path:
     )
     workbook.save(path)
     return path
+
+
+def test_reconstruction_ai_is_not_called_without_explicit_opt_in(tmp_path, monkeypatch):
+    clear_reconstruction_rate_limits()
+    monkeypatch.setenv("VOUCHER_RECONSTRUCTION_ENABLED", "true")
+    monkeypatch.setenv("CONVERSION_CONTEXT_SECRET", "reconstruction-test-secret")
+    monkeypatch.setenv("RECONSTRUCTION_STORE_PROVIDER", "filesystem")
+    monkeypatch.setenv("RECONSTRUCTION_STORE_DIR", str(tmp_path / "store"))
+    monkeypatch.setenv("RECONSTRUCTION_NOTIFY_NODE", "false")
+    monkeypatch.setenv("AI_PROVIDER", "remote_http")
+    calls = []
+    monkeypatch.setattr(
+        "app.reconstruction_workflow.request_reconstruction_suggestion",
+        lambda *_args, **_kwargs: calls.append(True)
+        or {
+            "field_roles": {},
+            "grouping_keys": [],
+            "direction": "unknown",
+            "nature": "unknown",
+            "confidence": 0,
+            "notes": [],
+        },
+        raising=False,
+    )
+    raw = tmp_path / "no-auto-ai.xlsx"
+    workbook = openpyxl.Workbook()
+    sheet = workbook.active
+    sheet.append(["Cột A", "Cột B"])
+    sheet.append(["A1", "Nội dung chưa phân loại"])
+    workbook.save(raw)
+    token = _token("no-auto-ai")
+
+    with raw.open("rb") as handle:
+        response = client.post(
+            "/api/v1/reconstructions/analyze",
+            data={"context_token": token, "mode": "purchase"},
+            files={
+                "file": (
+                    raw.name,
+                    handle,
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                )
+            },
+        )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["ai"]["used"] is False
+    assert calls == []
 
 
 def test_reconstruction_analyze_review_approve_and_export(tmp_path, monkeypatch):

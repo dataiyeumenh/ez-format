@@ -43,7 +43,7 @@ def test_ai_reconstruction_redacts_transaction_values_before_http(monkeypatch):
     monkeypatch.setenv("AI_PROVIDER", "remote_http")
     monkeypatch.setenv(
         "AI_RECONSTRUCTION_BASE_URL",
-        "http://ai.test/v1/misa/suggest-reconstruction",
+        "https://ai.example.test/v1/misa/suggest-reconstruction",
     )
     captured = {}
 
@@ -92,6 +92,77 @@ def test_ai_reconstruction_redacts_transaction_values_before_http(monkeypatch):
     assert "200000" not in serialized
     assert "hang_hoa" in serialized
     assert captured["headers"]["X-Request-ID"]
+    clear_reconstruction_suggestion_cache()
+
+
+def test_ai_reconstruction_rejects_plaintext_public_remote_endpoint(monkeypatch):
+    clear_reconstruction_suggestion_cache()
+    monkeypatch.setenv("AI_PROVIDER", "remote_http")
+    monkeypatch.setenv(
+        "AI_RECONSTRUCTION_BASE_URL",
+        "http://ai.example.test/v1/misa/suggest-reconstruction",
+    )
+    monkeypatch.setattr(
+        "app.ai_reconstruction_client.httpx.post",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("plaintext endpoint reached HTTP")
+        ),
+    )
+
+    with pytest.raises(AiReconstructionError, match="HTTPS"):
+        request_reconstruction_suggestion(
+            {"source": {"headers": ["Số hóa đơn"], "sample_rows": []}},
+            cache_key="plaintext",
+        )
+
+
+def test_ai_reconstruction_client_redacts_even_when_caller_passes_raw_rows(monkeypatch):
+    clear_reconstruction_suggestion_cache()
+    monkeypatch.setenv("AI_PROVIDER", "remote_http")
+    monkeypatch.setenv(
+        "AI_RECONSTRUCTION_BASE_URL",
+        "https://ai.example.test/v1/misa/suggest-reconstruction",
+    )
+    captured = {}
+
+    class Response:
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return {
+                "field_roles": {},
+                "grouping_keys": [],
+                "direction": "unknown",
+                "nature": "unknown",
+                "confidence": 0,
+                "notes": [],
+            }
+
+    monkeypatch.setattr(
+        "app.ai_reconstruction_client.httpx.post",
+        lambda *_args, **kwargs: captured.update(kwargs) or Response(),
+    )
+    request_reconstruction_suggestion(
+        {
+            "source": {
+                "headers": ["Số hóa đơn", "MST NCC", "Thành tiền"],
+                "sample_rows": [
+                    {
+                        "Số hóa đơn": "000123",
+                        "MST NCC": "0312345678",
+                        "Thành tiền": 200000,
+                    }
+                ],
+            }
+        },
+        cache_key="raw-redaction",
+    )
+
+    serialized = str(captured["json"])
+    assert "000123" not in serialized
+    assert "0312345678" not in serialized
+    assert "200000" not in serialized
     clear_reconstruction_suggestion_cache()
 
 
@@ -151,7 +222,7 @@ def test_ai_reconstruction_calls_remote_once_per_source_signature(monkeypatch):
     monkeypatch.setenv("AI_PROVIDER", "remote_http")
     monkeypatch.setenv(
         "AI_RECONSTRUCTION_BASE_URL",
-        "http://ai.test/v1/misa/suggest-reconstruction",
+        "https://ai.example.test/v1/misa/suggest-reconstruction",
     )
     calls = []
 
@@ -190,7 +261,7 @@ def test_ai_reconstruction_cache_isolated_by_prompt_version(monkeypatch):
     monkeypatch.setenv("AI_PROVIDER", "remote_http")
     monkeypatch.setenv(
         "AI_RECONSTRUCTION_BASE_URL",
-        "http://ai.test/v1/misa/suggest-reconstruction",
+        "https://ai.example.test/v1/misa/suggest-reconstruction",
     )
     monkeypatch.setenv("AI_RECONSTRUCTION_PROMPT_VERSION", "phase3-v1")
     calls = []
@@ -230,7 +301,7 @@ def test_ai_reconstruction_deduplicates_concurrent_signature_calls(monkeypatch):
     monkeypatch.setenv("AI_PROVIDER", "remote_http")
     monkeypatch.setenv(
         "AI_RECONSTRUCTION_BASE_URL",
-        "http://ai.test/v1/misa/suggest-reconstruction",
+        "https://ai.example.test/v1/misa/suggest-reconstruction",
     )
     calls = []
 

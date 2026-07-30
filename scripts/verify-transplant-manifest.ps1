@@ -1,7 +1,8 @@
 param(
     [string]$RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path,
     [string]$ManifestPath,
-    [string]$HeadRef = "HEAD"
+    [string]$HeadRef = "HEAD",
+    [switch]$CanonicalOnly
 )
 
 Set-StrictMode -Version Latest
@@ -193,8 +194,97 @@ function Invoke-Git {
     return @($output | ForEach-Object { [string]$_ })
 }
 
+function Test-CanonicalReconstructionContracts {
+    param([string]$Root)
+
+    $backendRoot = Join-Path $Root "backend"
+    $routeRoot = Join-Path $backendRoot "routes"
+    $modelRoot = Join-Path $backendRoot "models"
+    $backendFiles = @()
+    if (Test-Path -LiteralPath $backendRoot) {
+        $backendFiles += @(Get-ChildItem -LiteralPath $backendRoot -File -Filter "*.js")
+    }
+    if (Test-Path -LiteralPath $routeRoot) {
+        $backendFiles += @(Get-ChildItem -LiteralPath $routeRoot -File -Filter "*.js")
+    }
+
+    $routeMounts = @()
+    foreach ($file in $backendFiles) {
+        $content = [IO.File]::ReadAllText($file.FullName)
+        $matches = [regex]::Matches(
+            $content,
+            'app\.use\s*\(\s*["'']/api/reconstructions["'']',
+            [Text.RegularExpressions.RegexOptions]::IgnoreCase
+        )
+        foreach ($match in $matches) {
+            $routeMounts += $file.FullName
+        }
+    }
+
+    $routeModules = if (Test-Path -LiteralPath $routeRoot) {
+        @(Get-ChildItem -LiteralPath $routeRoot -File -Filter "*.js" | Where-Object {
+            $_.BaseName -match "reconstruction"
+        })
+    } else {
+        @()
+    }
+
+    $modelRegistrations = @()
+    if (Test-Path -LiteralPath $modelRoot) {
+        foreach ($file in Get-ChildItem -LiteralPath $modelRoot -File -Filter "*.js") {
+            $content = [IO.File]::ReadAllText($file.FullName)
+            foreach ($match in [regex]::Matches(
+                $content,
+                'mongoose\.model\s*\(\s*["'']([^"'']+)["'']',
+                [Text.RegularExpressions.RegexOptions]::IgnoreCase
+            )) {
+                $modelRegistrations += [pscustomobject]@{
+                    name = $match.Groups[1].Value
+                    path = $file.FullName
+                }
+            }
+        }
+    }
+
+    $routeMounts = @($routeMounts)
+    $routeModules = @($routeModules)
+    $modelRegistrations = @($modelRegistrations)
+    $failures = @()
+    if ($routeMounts.Count -gt 1) {
+        $failures += "Duplicate reconstruction route mount: $($routeMounts -join ', ')"
+    }
+    if ($routeModules.Count -gt 1) {
+        $failures += "Duplicate reconstruction route module: $($routeModules.FullName -join ', ')"
+    }
+    foreach ($group in $modelRegistrations | Group-Object -Property name) {
+        if ($group.Count -gt 1) {
+            $paths = @($group.Group | ForEach-Object { $_.path })
+            $failures += "Duplicate Mongoose model registration '$($group.Name)': $($paths -join ', ')"
+        }
+    }
+
+    return [pscustomobject]@{
+        status = if ($failures.Count -eq 0) { "pass" } else { "fail" }
+        reconstruction_route_mounts = $routeMounts.Count
+        reconstruction_route_modules = $routeModules.Count
+        mongoose_model_registrations = $modelRegistrations.Count
+        failures = $failures
+    }
+}
+
 try {
     $RepoRoot = (Resolve-Path -LiteralPath $RepoRoot).Path
+    $canonical = Test-CanonicalReconstructionContracts -Root $RepoRoot
+    Write-Output "TRANSPLANT_CANONICAL_SUMMARY $($canonical | ConvertTo-Json -Compress -Depth 4)"
+    if ($canonical.status -ne "pass") {
+        foreach ($failure in $canonical.failures) {
+            [Console]::Error.WriteLine($failure)
+        }
+        exit 1
+    }
+    if ($CanonicalOnly) {
+        exit 0
+    }
     if ([string]::IsNullOrWhiteSpace($ManifestPath)) {
         $ManifestPath = Join-Path $RepoRoot "docs/integration/main-experimental-transplant.yml"
     }
@@ -253,6 +343,7 @@ try {
         checked_paths = $pathSet.Count
         owned_paths = @($results | Where-Object { $_.status -eq "owned" }).Count
         excluded_paths = @($results | Where-Object { $_.status -eq "excluded" }).Count
+        canonical_contracts = $canonical
         failures = $failures
         results = $results
     }
