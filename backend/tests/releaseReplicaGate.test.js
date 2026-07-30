@@ -16,7 +16,7 @@ function runScript(script, env, args = []) {
 
 test("qa:release requires a replica-set URI without depending on PayOS secrets", () => {
   const result = runScript(releaseScript, {
-    REQUIRE_REPLICA_TESTS: "1",
+    REQUIRE_REPLICA_TESTS: "",
     PAYMENT_REPLICA_SET_TEST_URI: "",
     PAYOS_CLIENT_ID: "",
     PAYOS_API_KEY: "",
