@@ -1,9 +1,7 @@
 const Payment = require("../models/Payment");
-const User = require("../models/User");
 const { getPayOSClient } = require("../services/payosClient");
 const { buildPaymentDescription } = require("../services/paymentPlans");
 const { findActivePlanByCodeOrId, serializePlan } = require("../services/planService");
-const { applyPaidPlanToUser } = require("../services/subscriptionService");
 const {
   applyPaidPayment,
   normalizePayOSStatus,
@@ -11,7 +9,6 @@ const {
 } = require("../services/paymentStatusSync");
 const {
   validateCouponForCheckout,
-  recordCouponUsage,
   normalizeCouponCode,
 } = require("../services/couponService");
 
@@ -156,34 +153,22 @@ async function createPayment(req, res) {
       status: "pending",
     });
 
-    // Giảm 100% => kích hoạt gói ngay, không qua payOS
+    // Giảm 100% vẫn phải đi qua giao dịch settlement idempotent.
     if (finalAmount === 0) {
-      const user = await User.findById(req.user._id);
-      if (!user) {
-        payment.status = "failed";
-        await payment.save();
+      const settledPayment = await applyPaidPayment(
+        payment,
+        { amount: 0, status: "PAID" },
+        { freeCheckout: true },
+      );
+      if (!settledPayment || settledPayment.status !== "paid") {
         return res.status(400).json({
           success: false,
           message: "Không tìm thấy tài khoản người dùng",
         });
       }
-      const paidAt = new Date();
-      applyPaidPlanToUser(user, plan, paidAt);
-      await user.save();
-      payment.status = "paid";
-      payment.paidAt = paidAt;
-      await payment.save();
-      if (couponDoc) {
-        await recordCouponUsage({
-          couponId: couponDoc._id,
-          userId: user._id,
-          paymentId: payment._id,
-          discountAmount,
-        });
-      }
       return res.status(201).json({
         success: true,
-        payment: serializePayment(payment),
+        payment: serializePayment(settledPayment),
         checkoutUrl: getReturnUrl(),
         orderCode,
         freeCheckout: true,

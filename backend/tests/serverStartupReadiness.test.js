@@ -66,6 +66,7 @@ test("configured PayOS startup accepts a replica set from connected hello data",
     },
     dnsResolver: { resolveSrv: async () => {} },
     logger: { error() {}, log() {}, warn() {} },
+    ensureCouponUsagePaymentUniqueIndex: async () => {},
     mongooseInstance: {
       connect: async () =>
         createMongoConnection({
@@ -76,6 +77,31 @@ test("configured PayOS startup accepts a replica set from connected hello data",
   });
 
   await assert.doesNotReject(connectDB());
+});
+
+test("configured PayOS startup rejects when CouponUsage payment uniqueness cannot be ensured", async () => {
+  const connectDB = createConnectDB({
+    env: {
+      MONGO_URI: "mongodb://mongo.test:27017/ezformat",
+      PAYOS_CLIENT_ID: "client",
+      PAYOS_API_KEY: "<redacted>",
+      PAYOS_CHECKSUM_KEY: "checksum",
+    },
+    dnsResolver: { resolveSrv: async () => {} },
+    logger: { error() {}, log() {}, warn() {} },
+    mongooseInstance: {
+      connect: async () =>
+        createMongoConnection({
+          topologyType: "Single",
+          hello: { setName: "rs0", logicalSessionTimeoutMinutes: 30 },
+        }),
+    },
+    ensureCouponUsagePaymentUniqueIndex: async () => {
+      throw new Error("CouponUsage payment uniqueness migration failed");
+    },
+  });
+
+  await assert.rejects(connectDB(), /CouponUsage payment uniqueness migration failed/);
 });
 
 test("health never advertises payment settlement as ready before transaction preflight", async () => {

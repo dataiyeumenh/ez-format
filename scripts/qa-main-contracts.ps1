@@ -1,11 +1,36 @@
 $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent $PSScriptRoot
+$MissingPayOSConfigCount = @("PAYOS_CLIENT_ID", "PAYOS_API_KEY", "PAYOS_CHECKSUM_KEY") |
+    ForEach-Object { -not [string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($_)) } |
+    Where-Object { -not $_ } |
+    Measure-Object |
+    Select-Object -ExpandProperty Count
+$ReplicaSetTestUri = [string]$env:PAYMENT_REPLICA_SET_TEST_URI
+$ReplicaSetDatabase = (($ReplicaSetTestUri -split "\?")[0] -split "/")[-1]
+$ReplicaSetSkipReason = if ([string]::IsNullOrWhiteSpace($ReplicaSetTestUri)) {
+    "PAYMENT_REPLICA_SET_TEST_URI is not set."
+} elseif ($ReplicaSetDatabase -notmatch "(?i)(?:^|[-_])test$") {
+    "PAYMENT_REPLICA_SET_TEST_URI must use a database name ending in -test or _test."
+} else {
+    $null
+}
+
+if ($MissingPayOSConfigCount -eq 0 -and $ReplicaSetSkipReason) {
+    throw "PayOS is configured; the real replica-set payment suite is required: $ReplicaSetSkipReason"
+}
+
+if ($ReplicaSetSkipReason) {
+    Write-Output "[QA] Replica-set payment suite: SKIPPED - $ReplicaSetSkipReason"
+} else {
+    Write-Output "[QA] Replica-set payment suite: EXECUTED - PAYMENT_REPLICA_SET_TEST_URI is configured."
+}
 
 $backendTests = @(
     "tests/authContracts.test.js",
     "tests/adminContracts.test.js",
     "tests/plans.test.js",
     "tests/paymentPlans.test.js",
+    "tests/paymentControllerZeroTotal.test.js",
     "tests/paymentStatusSync.test.js",
     "tests/paymentReplicaSet.integration.test.js",
     "tests/paymentSettlementReadiness.test.js",

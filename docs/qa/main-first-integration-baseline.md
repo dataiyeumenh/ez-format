@@ -42,3 +42,10 @@ Pre-existing failures: none.
 - Coupon usage runs inside the same PayOS payment transaction as the user credit and payment status update; non-coupon payments remain unchanged.
 - `qa:main-contracts` includes the replica-set coupon settlement regression. Without `PAYMENT_REPLICA_SET_TEST_URI`, that real-Mongo coverage is explicitly skipped rather than reported as passed.
 - Latest `npm run qa:main-contracts`: 52 passed, 0 failed, 4 replica-set tests skipped because `PAYMENT_REPLICA_SET_TEST_URI` is not set; the frontend payment contract passed (1 test).
+
+## Task 3 Final Settlement Gate (2026-07-30)
+
+- Zero-total checkout now calls the same idempotent transaction settlement service as a paid PayOS callback; payment status, entitlement, and coupon usage roll back together on payment or coupon persistence failure.
+- Startup explicitly calls `CouponUsage.collection.createIndex` for the unique partial `{ payment: 1 }` index. A migration error leaves payment settlement not ready and causes configured PayOS startup to fail closed.
+- Local `npm run qa:main-contracts`: backend 62 total, 57 passed, 0 failed, 5 skipped; frontend payment contract 1 passed. The five skipped tests are the explicit real-Mongo replica-set suite because `PAYMENT_REPLICA_SET_TEST_URI` is not set.
+- Replica-set status is printed as `SKIPPED` or `EXECUTED` by `qa:main-contracts`. When all PayOS credentials are configured, a missing or non-test `PAYMENT_REPLICA_SET_TEST_URI` fails the gate before contracts run; the local non-PayOS baseline may skip with the reason shown above.

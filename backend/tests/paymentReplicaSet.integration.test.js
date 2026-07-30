@@ -24,6 +24,7 @@ if (SKIP_REASON) {
   for (const name of [
     "replica-set duplicate PayOS webhooks settle once",
     "replica-set transaction rolls back user credits when payment persistence fails",
+    "replica-set transaction rolls back payment, entitlement, and coupon when coupon settlement fails",
     "replica-set concurrent settlement retries a write conflict without double credits",
     "replica-set concurrent coupon settlement records one usage",
   ]) {
@@ -156,6 +157,34 @@ if (SKIP_REASON) {
     const storedUser = await User.findById(user._id);
     assert.equal(storedPayment.status, "pending");
     assert.equal(storedUser.fileCredits, 2);
+  });
+
+  test("replica-set transaction rolls back payment, entitlement, and coupon when coupon settlement fails", async () => {
+    const { coupon, payment, user } = await createFixture({ withCoupon: true });
+    const originalUpdateOne = CouponUsage.updateOne;
+    CouponUsage.updateOne = async () => {
+      throw new Error("injected coupon settlement failure");
+    };
+
+    try {
+      await assert.rejects(
+        applyPaidPayment(payment, { amount: payment.amount, status: "PAID" }, {}),
+        /injected coupon settlement failure/,
+      );
+    } finally {
+      CouponUsage.updateOne = originalUpdateOne;
+    }
+
+    const [storedCoupon, storedPayment, storedUser, usages] = await Promise.all([
+      Coupon.findById(coupon._id),
+      Payment.findById(payment._id),
+      User.findById(user._id),
+      CouponUsage.countDocuments({ payment: payment._id }),
+    ]);
+    assert.equal(storedPayment.status, "pending");
+    assert.equal(storedUser.fileCredits, 2);
+    assert.equal(storedCoupon.usageCount, 0);
+    assert.equal(usages, 0);
   });
 
   test("replica-set concurrent settlement retries a write conflict without double credits", async () => {

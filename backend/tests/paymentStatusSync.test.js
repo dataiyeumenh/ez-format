@@ -260,6 +260,55 @@ test("PayOS concurrent snapshots settle one coupon usage in the payment transact
   assert.equal(couponSettlements, 1);
 });
 
+test("zero-total settlement uses the same transactional coupon and entitlement path", async () => {
+  const { createPendingSnapshot, store } = installPaymentStore();
+  store.payment.amount = 0;
+  store.payment.coupon = "coupon-id";
+  store.payment.discountAmount = 10000;
+  let couponSettlements = 0;
+  const sync = createPaymentStatusSynchronizer({
+    PaymentModel: Payment,
+    UserModel: User,
+    assertPaymentSettlementReady: () => {},
+    async recordCouponUsage({ paymentId, session }) {
+      assert.equal(paymentId, "payment-id");
+      assert.ok(session?.state, "coupon settlement must receive the active transaction session");
+      couponSettlements += 1;
+    },
+  });
+
+  const settled = await sync.applyPaidPayment(createPendingSnapshot(), { amount: 0 }, {
+    freeCheckout: true,
+  });
+
+  assert.equal(settled.status, "paid");
+  assert.equal(store.payment.status, "paid");
+  assert.equal(store.user.fileCredits, 3);
+  assert.equal(couponSettlements, 1);
+  assert.equal(store.transactions, 1);
+});
+
+test("PayOS settlement rolls back payment and entitlement when coupon settlement fails", async () => {
+  const { createPendingSnapshot, store } = installPaymentStore();
+  store.payment.coupon = "coupon-id";
+
+  const sync = createPaymentStatusSynchronizer({
+    PaymentModel: Payment,
+    UserModel: User,
+    assertPaymentSettlementReady: () => {},
+    async recordCouponUsage() {
+      throw new Error("coupon usage failed");
+    },
+  });
+
+  await assert.rejects(
+    sync.applyPaidPayment(createPendingSnapshot(), { amount: 10000, status: "PAID" }, {}),
+    /coupon usage failed/,
+  );
+  assert.equal(store.payment.status, "pending");
+  assert.equal(store.user.fileCredits, 2);
+});
+
 test("PayOS sync rolls back credits when payment persistence fails", async () => {
   const { createPendingSnapshot, store } = installPaymentStore({ failNextPaymentSave: true });
 

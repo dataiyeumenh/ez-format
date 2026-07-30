@@ -1,7 +1,15 @@
 const mongoose = require("mongoose");
 const dns = require("dns").promises;
+const CouponUsage = require("../models/CouponUsage");
 
 const PAYMENT_SETTLEMENT_NOT_READY = "PAYMENT_SETTLEMENT_NOT_READY";
+const COUPON_USAGE_PAYMENT_UNIQUE_INDEX = Object.freeze({
+  keys: Object.freeze({ payment: 1 }),
+  options: Object.freeze({
+    unique: true,
+    partialFilterExpression: Object.freeze({ payment: Object.freeze({ $type: "objectId" }) }),
+  }),
+});
 const UNVERIFIED_READINESS = Object.freeze({
   ready: false,
   deployment: "unverified",
@@ -74,11 +82,18 @@ function isPayOSSettlementConfigured(env = process.env) {
   );
 }
 
+async function ensureCouponUsagePaymentUniqueIndex(CouponUsageModel = CouponUsage) {
+  const { keys, options } = COUPON_USAGE_PAYMENT_UNIQUE_INDEX;
+  return CouponUsageModel.collection.createIndex(keys, options);
+}
+
 function createConnectDB({
   mongooseInstance = mongoose,
   dnsResolver = dns,
   env = process.env,
   logger = console,
+  ensureCouponUsagePaymentUniqueIndex: ensureCouponUsageIndex =
+    ensureCouponUsagePaymentUniqueIndex,
 } = {}) {
   return async function connectDB() {
     const mongoUri = env.MONGO_URI;
@@ -116,7 +131,18 @@ function createConnectDB({
 
       const conn = await mongooseInstance.connect(mongoUri);
       logger.log("[DB] MongoDB connected:", conn.connection.host);
-      const readiness = await inspectConnectedMongoTransactionReadiness(conn);
+      let readiness = await inspectConnectedMongoTransactionReadiness(conn);
+      if (readiness.ready) {
+        try {
+          await ensureCouponUsageIndex();
+        } catch (error) {
+          readiness = {
+            ready: false,
+            deployment: readiness.deployment,
+            reason: `CouponUsage payment uniqueness migration failed: ${error.message}`,
+          };
+        }
+      }
       setPaymentSettlementReadiness(readiness);
       logger.log(
         `[DB] PayOS settlement transactions: ${readiness.ready ? "ready" : "not ready"} (${readiness.deployment})`,
@@ -151,3 +177,4 @@ module.exports.getPaymentSettlementReadiness = getPaymentSettlementReadiness;
 module.exports.inspectConnectedMongoTransactionReadiness =
   inspectConnectedMongoTransactionReadiness;
 module.exports.isPayOSSettlementConfigured = isPayOSSettlementConfigured;
+module.exports.ensureCouponUsagePaymentUniqueIndex = ensureCouponUsagePaymentUniqueIndex;
