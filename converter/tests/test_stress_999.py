@@ -1,8 +1,8 @@
 """
 Super extreme backend stress — synthetic matrix ~99.9% use-case coverage.
 
-Covers: header profiles × 6 conversion types, validate/preview/export/convert APIs,
-edge formats, negatives, 2000-row regression without manual column_mapping.
+Covers: header profiles × 6 conversion types, validate/preview APIs, isolated row
+export, direct conversion, edge formats, negatives, and 2000-row regression.
 """
 
 from __future__ import annotations
@@ -16,7 +16,7 @@ import xlrd
 from fastapi.testclient import TestClient
 
 from app.conversion_types import CONVERSION_TYPES
-from app.converter import convert_file, preview_file, validate_file
+from app.converter import convert_file, export_rows, preview_file, validate_file
 from app.excel_io import read_input_table
 from app.field_detection import detect_columns
 from app.main import app
@@ -35,11 +35,6 @@ ARTIFACT_DIR = ROOT / ".artifacts" / "stress-999"
 client = TestClient(app)
 
 
-@pytest.fixture
-def legacy_row_export_enabled(monkeypatch):
-    monkeypatch.setenv("ALLOW_LEGACY_ROW_EXPORT", "true")
-
-
 @pytest.fixture(scope="module")
 def matrix_report_path() -> Path:
     ARTIFACT_DIR.mkdir(parents=True, exist_ok=True)
@@ -48,7 +43,7 @@ def matrix_report_path() -> Path:
 
 @pytest.mark.parametrize("case_id,profile,conversion_type", matrix_cases())
 def test_matrix_auto_detect_validate_preview_export_convert(
-    tmp_path, case_id: str, profile, conversion_type: str, legacy_row_export_enabled
+    tmp_path, case_id: str, profile, conversion_type: str
 ):
     path = tmp_path / f"{case_id}.xlsx"
     write_profile_workbook(
@@ -86,15 +81,12 @@ def test_matrix_auto_detect_validate_preview_export_convert(
                     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 )
             },
-        )
+    )
     assert preview_res.status_code == 200, preview_res.text[:400]
     api_rows = preview_res.json()["rows"]
-    export_res = client.post(
-        "/api/v1/conversions/export",
-        json={"conversion_type": conversion_type, "rows": api_rows[:5]},
-    )
-    assert export_res.status_code == 200
-    assert len(export_res.content) > 500
+    row_export = tmp_path / f"{case_id}_rows.xls"
+    export_rows(conversion_type, api_rows[:5], row_export)
+    assert row_export.stat().st_size > 500
 
     out = tmp_path / f"{case_id}.xls"
     conv = convert_file(path, conversion_type, out, options)

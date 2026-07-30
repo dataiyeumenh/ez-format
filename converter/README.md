@@ -52,7 +52,8 @@ $env:AI_REQUIRED='false'
 - `GET /api/v1/conversion-types`
 - `POST /api/v1/conversions/validate`
 - `POST /api/v1/conversions/preview` → JSON `{ headers, rows, report }`
-- `POST /api/v1/conversions/export` → `.xls` download (legacy rows or confirmed profile)
+- `POST /api/v1/conversions/export` → bound confirmed-profile/template `.xls`;
+  client rows are rejected
 - `POST /api/v1/conversions` → direct `.xls` (no preview)
 
 ## Tests

@@ -114,13 +114,6 @@ class PreviewResponse(BaseModel):
     report: ValidationReport
 
 
-class ExportRowsRequest(BaseModel):
-    conversion_type: str
-    rows: list[dict[str, Any]]
-    options: JsonDict | None = None
-    sheet_name: str | None = None
-
-
 class ExportManifestRow(BaseModel):
     model_config = ConfigDict(frozen=True)
 

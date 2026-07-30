@@ -129,7 +129,6 @@ def test_export_blocks_when_readiness_has_blocker(tmp_path, monkeypatch):
         json={
             "upload_id": upload_id,
             "profile_id": profile_id,
-            "rows": [_valid_sales_row()],
             "acknowledge_warnings": True,
         },
     )
@@ -148,7 +147,6 @@ def test_export_blocks_warning_without_acknowledgement(tmp_path, monkeypatch):
         json={
             "upload_id": upload_id,
             "profile_id": profile_id,
-            "rows": [_valid_sales_row(**{"Mã hàng (*)": "Hàng test"})],
         },
     )
 
@@ -166,7 +164,6 @@ def test_export_allows_warning_when_acknowledged(tmp_path, monkeypatch):
         json={
             "upload_id": upload_id,
             "profile_id": profile_id,
-            "rows": [_valid_sales_row(**{"Mã hàng (*)": "Hàng test"})],
             "acknowledge_warnings": True,
         },
     )

@@ -6,7 +6,6 @@ validate → preview → export roundtrip + direct convert download.
 from __future__ import annotations
 
 import json
-import os
 from io import BytesIO
 from pathlib import Path
 
@@ -16,6 +15,7 @@ import xlrd
 from fastapi.testclient import TestClient
 
 from app.conversion_types import CONVERSION_TYPES
+from app.converter import export_rows
 from app.main import app
 
 
@@ -24,20 +24,14 @@ SAMPLES = ROOT / "fixtures" / "samples"
 client = TestClient(app)
 
 
-@pytest.fixture
-def legacy_row_export_enabled(monkeypatch):
-    monkeypatch.setenv("ALLOW_LEGACY_ROW_EXPORT", "true")
-
-
-def test_legacy_row_export_defaults_fail_closed():
-    assert os.getenv("ALLOW_LEGACY_ROW_EXPORT") is None
+def test_public_export_rejects_legacy_rows():
     response = client.post(
         "/api/v1/conversions/export",
         json={"conversion_type": "bsn_sales", "rows": []},
     )
-    assert response.status_code == 403
+    assert response.status_code == 422
     assert response.json()["detail"] == (
-        "Legacy client-row export is disabled unless explicitly enabled."
+        "Client-provided rows are not accepted by the canonical export endpoint."
     )
 
 SALES_HEADERS = [
@@ -98,14 +92,14 @@ def test_health_and_conversion_types_catalog():
     assert ids == set(CONVERSION_TYPES.keys())
 
 
-def test_raw_sales_sample_full_journey_all_sales_types(tmp_path, legacy_row_export_enabled):
+def test_raw_sales_sample_full_journey_all_sales_types(tmp_path):
     path = SAMPLES / "raw_sales_sample.xlsx"
     assert path.exists(), "missing fixtures/samples/raw_sales_sample.xlsx"
     for ct in ("bsn_sales", "sales_goods", "sales_service"):
         _journey_for_file(path, ct, tmp_path)
 
 
-def test_e2e_validate_preview_export_roundtrip_all_types(tmp_path, legacy_row_export_enabled):
+def test_e2e_validate_preview_export_roundtrip_all_types(tmp_path):
     for conversion_type in CONVERSION_TYPES:
         input_path = _kind_path(conversion_type, tmp_path)
         _journey_for_file(input_path, conversion_type, tmp_path)
@@ -131,7 +125,7 @@ def test_e2e_direct_convert_download_all_types(tmp_path):
         assert len(response.content) > 1000
 
 
-def test_purchase_common_headers_validate_preview_export(tmp_path, legacy_row_export_enabled):
+def test_purchase_common_headers_validate_preview_export(tmp_path):
     """Real-world headers: Số PN, Ngày nhập (not only formal MISA names)."""
     path = tmp_path / "purchase_pn.xlsx"
     _write_purchase_xlsx_common(path)
@@ -217,15 +211,9 @@ def _journey_for_file(input_path: Path, conversion_type: str, tmp_path: Path) ->
     assert rows
     assert preview["report"]["ok"] is True
 
-    # 3) export edited rows
-    export_res = client.post(
-        "/api/v1/conversions/export",
-        json={"conversion_type": conversion_type, "rows": rows},
-    )
-    assert export_res.status_code == 200, export_res.text
-    assert export_res.headers["content-type"].startswith("application/vnd.ms-excel")
+    # 3) Exercise the isolated row writer without exposing it through the API.
     out = tmp_path / f"{conversion_type}_e2e_out.xls"
-    out.write_bytes(export_res.content)
+    export_rows(conversion_type, rows, out)
     book = xlrd.open_workbook(str(out))
     sheet = book.sheet_by_index(0)
     assert sheet.nrows > 8

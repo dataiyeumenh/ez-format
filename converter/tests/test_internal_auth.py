@@ -32,6 +32,19 @@ def test_production_auth_config_requires_context_and_strong_service_token(monkey
     assert_secure_production_config()
 
 
+def test_removed_legacy_row_export_flag_has_no_production_effect(monkeypatch):
+    monkeypatch.setenv("NODE_ENV", "production")
+    monkeypatch.setenv("ALLOW_LEGACY_ROW_EXPORT", "true")
+    monkeypatch.setenv(
+        "CONVERTER_SERVICE_TOKEN", "Svc_7nP3xR8kV2mQ9tW4yZ6aB1dF5hJ0cLs"
+    )
+    monkeypatch.setenv(
+        "CONVERSION_CONTEXT_SECRET", "Ctx_8mQ2vN7xK4pR9sT1wY6zA3dF5gH0jLc"
+    )
+
+    assert_secure_production_config()
+
+
 @pytest.mark.parametrize(
     ("name", "value"),
     [

@@ -5,6 +5,7 @@ import openpyxl
 import xlrd
 from fastapi.testclient import TestClient
 
+import app.main as main_module
 from app.main import app
 
 
@@ -721,65 +722,62 @@ def test_preview_endpoint_returns_json_rows(tmp_path):
     assert payload["rows"][0]["Số chứng từ (*)"] == "HD-MESS-001"
 
 
-def test_export_rows_endpoint_rejects_legacy_rows_by_default(tmp_path, monkeypatch):
-    monkeypatch.delenv("ALLOW_LEGACY_ROW_EXPORT", raising=False)
-    input_path = _write_messy_sales_workbook(tmp_path / "messy.xlsx")
-    options = json.dumps({"column_mapping": MESSY_SALES_MAPPING})
-
-    with input_path.open("rb") as handle:
-        preview = client.post(
-            "/api/v1/conversions/preview",
-            data={"conversion_type": "bsn_sales", "options": options},
-            files={
-                "file": (
-                    "messy.xlsx",
-                    handle,
-                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                )
-            },
-        )
-
-    response = client.post(
-        "/api/v1/conversions/export",
-        json={
-            "conversion_type": "bsn_sales",
-            "rows": preview.json()["rows"],
-        },
-    )
-
-    assert response.status_code == 403
-    assert response.json()["detail"] == (
-        "Legacy client-row export is disabled unless explicitly enabled."
-    )
-
-
-def test_export_rows_endpoint_returns_xls_when_explicitly_enabled(tmp_path, monkeypatch):
+def test_export_endpoint_rejects_client_rows_even_if_legacy_flag_is_set(
+    monkeypatch,
+):
     monkeypatch.setenv("ALLOW_LEGACY_ROW_EXPORT", "true")
-    input_path = _write_messy_sales_workbook(tmp_path / "messy.xlsx")
-    options = json.dumps({"column_mapping": MESSY_SALES_MAPPING})
+    calls = []
 
-    with input_path.open("rb") as handle:
-        preview = client.post(
-            "/api/v1/conversions/preview",
-            data={"conversion_type": "bsn_sales", "options": options},
-            files={
-                "file": (
-                    "messy.xlsx",
-                    handle,
-                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                )
-            },
-        )
+    def fake_export_rows(
+        conversion_type,
+        rows,
+        output_path,
+        options=None,
+        *,
+        sheet_name=None,
+    ):
+        calls.append((conversion_type, rows, options, sheet_name))
+        output_path.write_bytes(b"legacy-export")
 
-    rows = preview.json()["rows"]
+    monkeypatch.setattr(main_module, "export_rows", fake_export_rows, raising=False)
     response = client.post(
         "/api/v1/conversions/export",
         json={
             "conversion_type": "bsn_sales",
-            "rows": rows,
+            "rows": [{"client": "supplied"}],
         },
     )
 
-    assert response.status_code == 200
-    assert response.headers["content-type"].startswith("application/vnd.ms-excel")
-    assert "bsn_sales_import.xls" in response.headers["content-disposition"]
+    assert response.status_code == 422
+    assert response.json()["detail"] == (
+        "Client-provided rows are not accepted by the canonical export endpoint."
+    )
+    assert calls == []
+
+
+def test_export_endpoint_rejects_rows_before_loading_bound_artifacts():
+    response = client.post(
+        "/api/v1/conversions/export",
+        json={
+            "upload_id": "missing-upload",
+            "profile_id": "missing-profile",
+            "rows": [{"client": "supplied"}],
+        },
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == (
+        "Client-provided rows are not accepted by the canonical export endpoint."
+    )
+
+
+def test_export_endpoint_requires_bound_upload_and_profile():
+    response = client.post(
+        "/api/v1/conversions/export",
+        json={"conversion_type": "bsn_sales"},
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == (
+        "Canonical export requires bound upload_id and profile_id values."
+    )

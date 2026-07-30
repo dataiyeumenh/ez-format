@@ -711,7 +711,7 @@ def test_session_readiness_ignores_client_rows_instead_of_breaking_preview_flow(
     assert "FORGED-CLIENT-ROW" not in response.text
 
 
-def test_session_export_uses_active_revision_and_ignores_client_rows(tmp_path, monkeypatch):
+def test_session_export_uses_active_revision_without_client_rows(tmp_path, monkeypatch):
     import app.misa_workflow as workflow
 
     monkeypatch.setattr(workflow, "UPLOAD_ROOT", tmp_path / "uploads")
@@ -811,13 +811,11 @@ def test_session_export_uses_active_revision_and_ignores_client_rows(tmp_path, m
             "session_id": active["session_id"],
             "revision": derived.revision,
             "state_hash": derived.state_hash,
-            "rows": [{"Tên khách hàng": "FORGED-CLIENT-ROW"}],
             "acknowledge_warnings": True,
         },
     )
 
     assert response.status_code == 200
-    assert all("FORGED-CLIENT-ROW" not in str(row) for row in captured["rows"])
     assert any("REVISION-VALUE" in str(row) for row in captured["rows"])
 
 

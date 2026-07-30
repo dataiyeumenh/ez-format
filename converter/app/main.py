@@ -44,7 +44,7 @@ from app.correction_workflow import (
     undo_corrections,
 )
 from app.conversion_types import BACKEND_ROOT, CONVERSION_TYPES
-from app.converter import convert_file, export_rows, preview_file, validate_file
+from app.converter import convert_file, preview_file, validate_file
 from app.document_structure import validate_excel_magic
 from app.error_check import check_file_for_errors
 from app.excel_io import InputReadError
@@ -84,7 +84,7 @@ from app.master_data_client import (
     verify_conversion_context_token,
 )
 from app.mapping_profile_v2 import MappingProfileV2Error
-from app.models import ExportManifestV1, ExportRowsRequest, PreviewResponse, ValidationReport
+from app.models import ExportManifestV1, PreviewResponse, ValidationReport
 from app.operation_store import (
     OperationStore,
     OperationStoreConflictError,
@@ -1252,7 +1252,7 @@ async def create_export_manifest(
 
 
 @app.post("/api/v1/conversions/export", response_model=None)
-async def export_conversion_rows(
+async def export_conversion(
     body: dict,
     x_conversion_context: Annotated[str | None, Header()] = None,
 ) -> Response:
@@ -1261,6 +1261,18 @@ async def export_conversion_rows(
         body.get("conversion_context_token"),
         required_scope="export",
     )
+    if "rows" in body:
+        raise HTTPException(
+            status_code=422,
+            detail="Client-provided rows are not accepted by the canonical export endpoint.",
+        )
+    if not all(
+        str(body.get(field) or "").strip() for field in ("upload_id", "profile_id")
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail="Canonical export requires bound upload_id and profile_id values.",
+        )
     if "upload_id" in body and "profile_id" in body:
         upload_id = str(body["upload_id"] or "").strip()
         try:
@@ -1307,12 +1319,11 @@ async def export_conversion_rows(
             claims=claims,
         )
         try:
-            edited_rows = body.get("rows")
             content, filename = await run_in_threadpool(
                 export_confirmed_profile,
                 upload_id=upload_id,
                 profile_id=str(body["profile_id"]),
-                edited_rows=edited_rows if isinstance(edited_rows, list) and edited_rows else None,
+                edited_rows=None,
                 acknowledge_warnings=bool(body.get("acknowledge_warnings")),
                 conversion_context_token=context_token,
                 student_context_token=None,
@@ -1342,41 +1353,6 @@ async def export_conversion_rows(
             media_type=EXPORT_MEDIA_TYPE,
             headers={"Content-Disposition": f'attachment; filename="{filename}"'},
         )
-
-    if os.getenv("ALLOW_LEGACY_ROW_EXPORT", "false").strip().lower() not in {
-        "1",
-        "true",
-        "yes",
-    }:
-        raise HTTPException(
-            status_code=403,
-            detail="Legacy client-row export is disabled unless explicitly enabled.",
-        )
-    legacy_body = ExportRowsRequest.model_validate(body)
-    workdir = _create_workdir()
-    try:
-        output_path = workdir / f"{legacy_body.conversion_type}_import.xls"
-        await run_in_threadpool(
-            export_rows,
-            legacy_body.conversion_type,
-            legacy_body.rows,
-            output_path,
-            legacy_body.options,
-            sheet_name=legacy_body.sheet_name,
-        )
-        content = output_path.read_bytes()
-        return Response(
-            content=content,
-            media_type=EXCEL_MEDIA_TYPE,
-            headers={
-                "Content-Disposition": f'attachment; filename="{legacy_body.conversion_type}_import.xls"'
-            },
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    finally:
-        shutil.rmtree(workdir, ignore_errors=True)
-        _cleanup_tmp_root()
 
 
 @app.post("/api/v1/conversions", response_model=None)

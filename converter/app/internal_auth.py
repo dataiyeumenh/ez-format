@@ -62,8 +62,6 @@ def assert_secure_production_config() -> None:
         return
 
     unsafe: list[str] = []
-    if _env_enabled("ALLOW_LEGACY_ROW_EXPORT"):
-        unsafe.append("ALLOW_LEGACY_ROW_EXPORT must be false")
     if _env_enabled("ALLOW_UNAUTHENTICATED_LOCAL_OPERATIONS"):
         unsafe.append("ALLOW_UNAUTHENTICATED_LOCAL_OPERATIONS must be false")
     service_token = os.getenv("CONVERTER_SERVICE_TOKEN", "").strip()
