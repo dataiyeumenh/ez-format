@@ -272,13 +272,25 @@ function createStartServer({
       }
     }
     if (studentEnabled && privacyMigrationMode !== "off") {
-      const report = await runStudentPrivacyMigration(loadPrivacyModels(connection), {
-        mode: privacyMigrationMode,
-      });
-      logger.log(JSON.stringify({
-        event: "student-privacy-migration-completed",
-        report,
-      }));
+      try {
+        const report = await runStudentPrivacyMigration(loadPrivacyModels(connection), {
+          mode: privacyMigrationMode,
+          maxRetiredRecords: process.env.STUDENT_PRIVACY_MIGRATION_MAX_TOTAL,
+          maxDurationMs: process.env.STUDENT_PRIVACY_MIGRATION_MAX_DURATION_MS,
+        });
+        logger.log(JSON.stringify({
+          event: "student-privacy-migration-completed",
+          report,
+        }));
+      } catch (error) {
+        if (error?.report) {
+          logger.error(JSON.stringify({
+            event: "student-privacy-migration-failed",
+            report: error.report,
+          }));
+        }
+        throw error;
+      }
     }
     const artifactSweeper = converterGatewayUsageReady
       ? startArtifactSweeper()

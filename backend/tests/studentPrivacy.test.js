@@ -275,6 +275,106 @@ test("Student privacy migration counts and purges retired raw collections", asyn
   });
 });
 
+test("Student privacy apply drains 101+ retired records in bounded batches", async () => {
+  const retiredAttempts = Array.from({ length: 101 }, (_, index) => ({
+    _id: `attempt-${String(index + 1).padStart(3, "0")}`,
+  }));
+  const retiredProgresses = Array.from({ length: 101 }, (_, index) => ({
+    _id: `progress-${String(index + 1).padStart(3, "0")}`,
+  }));
+  const { models, calls } = privacyModels({ retiredAttempts, retiredProgresses });
+
+  const applied = await migrateStudentPrivacy(models, {
+    mode: "apply",
+    batchSize: 100,
+    maxRetiredRecords: 1000,
+    maxDurationMs: 30_000,
+  });
+
+  assert.equal(applied.retiredRawCandidates, 202);
+  assert.equal(applied.retiredRawPurged, 202);
+  assert.deepEqual(applied.retiredCollections, {
+    studentattempts: { candidates: 101, purged: 101 },
+    studentskillprogresses: { candidates: 101, purged: 101 },
+  });
+  assert.equal(applied.retiredDrain.status, "completed");
+  assert.equal(applied.retiredDrain.batches, 4);
+  assert.ok(
+    calls
+      .filter(([type]) => type === "studentattempts-delete")
+      .every(([, filter]) => filter._id.$in.length <= 100),
+  );
+  assert.ok(
+    calls
+      .filter(([type]) => type === "studentskillprogresses-delete")
+      .every(([, filter]) => filter._id.$in.length <= 100),
+  );
+
+  const repeated = await migrateStudentPrivacy(models, {
+    mode: "apply",
+    batchSize: 100,
+    maxRetiredRecords: 1000,
+    maxDurationMs: 30_000,
+  });
+  assert.equal(repeated.retiredRawCandidates, 0);
+  assert.equal(repeated.retiredRawPurged, 0);
+  assert.equal(repeated.retiredDrain.status, "completed");
+  assert.equal(repeated.retiredDrain.batches, 0);
+});
+
+test("Student privacy apply fails closed with report at retired max-total", async () => {
+  const retiredAttempts = Array.from({ length: 101 }, (_, index) => ({
+    _id: `attempt-${index + 1}`,
+  }));
+  const { models } = privacyModels({ retiredAttempts });
+
+  await assert.rejects(
+    migrateStudentPrivacy(models, {
+      mode: "apply",
+      batchSize: 50,
+      maxRetiredRecords: 100,
+      maxDurationMs: 30_000,
+    }),
+    (error) => {
+      assert.equal(error.code, "STUDENT_PRIVACY_MAX_TOTAL_EXCEEDED");
+      assert.equal(error.report.retiredRawPurged, 100);
+      assert.equal(error.report.retiredDrain.status, "failed");
+      assert.equal(error.report.retiredDrain.reason, "max-total");
+      assert.equal(error.report.retiredDrain.maxTotal, 100);
+      return true;
+    },
+  );
+});
+
+test("Student privacy apply fails closed with report at retired time limit", async () => {
+  const { models } = privacyModels({
+    retiredAttempts: [{ _id: "attempt-1" }],
+  });
+  let elapsed = 0;
+  const clock = () => {
+    elapsed += 10;
+    return elapsed;
+  };
+
+  await assert.rejects(
+    migrateStudentPrivacy(models, {
+      mode: "apply",
+      batchSize: 100,
+      maxRetiredRecords: 1000,
+      maxDurationMs: 15,
+      clock,
+    }),
+    (error) => {
+      assert.equal(error.code, "STUDENT_PRIVACY_TIME_LIMIT_EXCEEDED");
+      assert.equal(error.report.retiredRawPurged, 0);
+      assert.equal(error.report.retiredDrain.status, "failed");
+      assert.equal(error.report.retiredDrain.reason, "time-limit");
+      assert.equal(error.report.retiredDrain.maxDurationMs, 15);
+      return true;
+    },
+  );
+});
+
 test("Student privacy cleanup backfills live metadata and purges bounded orphans", async () => {
   const now = new Date("2026-07-30T00:00:00Z");
   const liveRetention = new Date("2026-07-31T00:00:00Z");
@@ -745,12 +845,23 @@ test("feature-off startup performs zero Student migration or model loading", asy
 
 test("Student privacy migration defaults off and active modes fail closed", async () => {
   const previousMode = process.env.STUDENT_PRIVACY_MIGRATION_MODE;
+  const previousMaxTotal = process.env.STUDENT_PRIVACY_MIGRATION_MAX_TOTAL;
+  const previousMaxDuration = process.env.STUDENT_PRIVACY_MIGRATION_MAX_DURATION_MS;
   let calls = 0;
   let listenCalls = 0;
-  const migration = async (_models, { mode }) => {
+  const errorLogs = [];
+  const failureReport = {
+    mode: "dry-run",
+    retiredDrain: { status: "failed", reason: "time-limit" },
+  };
+  const migration = async (_models, { mode, maxRetiredRecords, maxDurationMs }) => {
     calls += 1;
     assert.equal(mode, "dry-run");
-    throw new Error("privacy migration failed");
+    assert.equal(maxRetiredRecords, "100");
+    assert.equal(maxDurationMs, "1500");
+    const error = new Error("privacy migration failed");
+    error.report = failureReport;
+    throw error;
   };
   try {
     delete process.env.STUDENT_PRIVACY_MIGRATION_MODE;
@@ -763,6 +874,8 @@ test("Student privacy migration defaults off and active modes fail closed", asyn
     assert.equal(calls, 0);
 
     process.env.STUDENT_PRIVACY_MIGRATION_MODE = "dry-run";
+    process.env.STUDENT_PRIVACY_MIGRATION_MAX_TOTAL = "100";
+    process.env.STUDENT_PRIVACY_MIGRATION_MAX_DURATION_MS = "1500";
     await assert.rejects(
       createStartServer(startupOptions({
         studentEnabled: true,
@@ -773,13 +886,31 @@ test("Student privacy migration defaults off and active modes fail closed", asyn
           listenCalls += 1;
           return { once() {} };
         },
+        logger: {
+          error(message) { errorLogs.push(JSON.parse(message)); },
+          log() {},
+        },
       }))(),
       /privacy migration failed/,
     );
     assert.equal(calls, 1);
     assert.equal(listenCalls, 0);
+    assert.deepEqual(errorLogs, [{
+      event: "student-privacy-migration-failed",
+      report: failureReport,
+    }]);
   } finally {
     if (previousMode === undefined) delete process.env.STUDENT_PRIVACY_MIGRATION_MODE;
     else process.env.STUDENT_PRIVACY_MIGRATION_MODE = previousMode;
+    if (previousMaxTotal === undefined) {
+      delete process.env.STUDENT_PRIVACY_MIGRATION_MAX_TOTAL;
+    } else {
+      process.env.STUDENT_PRIVACY_MIGRATION_MAX_TOTAL = previousMaxTotal;
+    }
+    if (previousMaxDuration === undefined) {
+      delete process.env.STUDENT_PRIVACY_MIGRATION_MAX_DURATION_MS;
+    } else {
+      process.env.STUDENT_PRIVACY_MIGRATION_MAX_DURATION_MS = previousMaxDuration;
+    }
   }
 });

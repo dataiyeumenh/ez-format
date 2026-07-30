@@ -39,6 +39,8 @@ const RETIRED_STUDENT_COLLECTION_NAMES = Object.freeze([
   "studentattempts",
   "studentskillprogresses",
 ]);
+const DEFAULT_RETIRED_MAX_TOTAL = 10_000;
+const DEFAULT_RETIRED_MAX_DURATION_MS = 30_000;
 
 function normalizeStudentPrivacyMigrationMode(value) {
   const mode = String(value || "off").trim().toLowerCase();
@@ -50,6 +52,12 @@ function normalizeStudentPrivacyMigrationMode(value) {
 
 function boundedBatchSize(value) {
   return Math.min(Math.max(Math.floor(Number(value) || 100), 1), 1000);
+}
+
+function boundedPositiveInteger(value, fallback, maximum) {
+  const parsed = Math.floor(Number(value));
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.min(Math.max(parsed, 1), maximum);
 }
 
 async function findBounded(model, filter, batchSize, projection) {
@@ -174,7 +182,14 @@ async function migrateStudentPrivacy(
     sessionModel,
     retiredCollections,
   } = {},
-  { mode: requestedMode = "off", batchSize = 100, now = new Date() } = {},
+  {
+    mode: requestedMode = "off",
+    batchSize = 100,
+    now = new Date(),
+    maxRetiredRecords = DEFAULT_RETIRED_MAX_TOTAL,
+    maxDurationMs = DEFAULT_RETIRED_MAX_DURATION_MS,
+    clock = Date.now,
+  } = {},
 ) {
   const mode = normalizeStudentPrivacyMigrationMode(requestedMode);
   const report = {
@@ -224,23 +239,117 @@ async function migrateStudentPrivacy(
     report.scrubbed = Number(result?.modifiedCount || 0);
   }
 
-  for (const collectionName of RETIRED_STUDENT_COLLECTION_NAMES) {
-    const collection = retiredCollections?.[collectionName];
-    const candidates = await findRetiredCollectionBatch(collection, limit);
-    const candidateIds = candidates.map((item) => item?._id).filter(Boolean);
-    report.scanned += candidateIds.length;
-    report.retiredRawCandidates += candidateIds.length;
-    report.retiredCollections[collectionName].candidates = candidateIds.length;
-    if (mode !== "apply" || candidateIds.length === 0) continue;
-    if (typeof collection.deleteMany !== "function") {
-      throw new Error("Retired Student collection phải hỗ trợ deleteMany");
+  if (mode !== "apply") {
+    for (const collectionName of RETIRED_STUDENT_COLLECTION_NAMES) {
+      const collection = retiredCollections?.[collectionName];
+      const candidates = await findRetiredCollectionBatch(collection, limit);
+      const candidateIds = candidates.map((item) => item?._id).filter(Boolean);
+      report.scanned += candidateIds.length;
+      report.retiredRawCandidates += candidateIds.length;
+      report.retiredCollections[collectionName].candidates = candidateIds.length;
     }
-    const deletion = await collection.deleteMany({
-      _id: { $in: candidateIds },
-    });
-    const purged = Number(deletion?.deletedCount || 0);
-    report.retiredRawPurged += purged;
-    report.retiredCollections[collectionName].purged = purged;
+  } else {
+    const maxTotal = boundedPositiveInteger(
+      maxRetiredRecords,
+      DEFAULT_RETIRED_MAX_TOTAL,
+      1_000_000,
+    );
+    const timeLimitMs = boundedPositiveInteger(
+      maxDurationMs,
+      DEFAULT_RETIRED_MAX_DURATION_MS,
+      10 * 60 * 1000,
+    );
+    if (typeof clock !== "function") {
+      throw new Error("Student privacy migration clock không hợp lệ");
+    }
+    const startedAt = Number(clock());
+    report.retiredDrain = {
+      status: "running",
+      reason: null,
+      batches: 0,
+      maxTotal,
+      maxDurationMs: timeLimitMs,
+      elapsedMs: 0,
+    };
+    const elapsedMs = () => Math.max(0, Number(clock()) - startedAt);
+    const failDrain = (code, reason, message) => {
+      report.retiredDrain.status = "failed";
+      report.retiredDrain.reason = reason;
+      report.retiredDrain.elapsedMs = elapsedMs();
+      const error = new Error(message);
+      error.code = code;
+      error.report = report;
+      throw error;
+    };
+    const assertTimeRemaining = () => {
+      if (elapsedMs() > timeLimitMs) {
+        failDrain(
+          "STUDENT_PRIVACY_TIME_LIMIT_EXCEEDED",
+          "time-limit",
+          "Student privacy retired drain vượt quá giới hạn thời gian",
+        );
+      }
+    };
+
+    try {
+      for (const collectionName of RETIRED_STUDENT_COLLECTION_NAMES) {
+        const collection = retiredCollections?.[collectionName];
+        if (typeof collection?.deleteMany !== "function") {
+          throw new Error("Retired Student collection phải hỗ trợ deleteMany");
+        }
+        while (true) {
+          assertTimeRemaining();
+          const remaining = maxTotal - report.retiredRawPurged;
+          const queryLimit = remaining >= limit ? limit : Math.max(1, remaining + 1);
+          const candidates = await findRetiredCollectionBatch(collection, queryLimit);
+          assertTimeRemaining();
+          const candidateIds = candidates.map((item) => item?._id).filter(Boolean);
+          report.scanned += candidateIds.length;
+          report.retiredRawCandidates += candidateIds.length;
+          report.retiredCollections[collectionName].candidates += candidateIds.length;
+          if (candidateIds.length === 0) break;
+          if (candidateIds.length !== candidates.length) {
+            failDrain(
+              "STUDENT_PRIVACY_INVALID_RETIRED_RECORD",
+              "invalid-record",
+              "Retired Student collection chứa record không có _id",
+            );
+          }
+          if (candidateIds.length > remaining) {
+            failDrain(
+              "STUDENT_PRIVACY_MAX_TOTAL_EXCEEDED",
+              "max-total",
+              "Student privacy retired drain vượt quá giới hạn tổng record",
+            );
+          }
+          const deletion = await collection.deleteMany({
+            _id: { $in: candidateIds },
+          });
+          const purged = Number(deletion?.deletedCount || 0);
+          report.retiredRawPurged += purged;
+          report.retiredCollections[collectionName].purged += purged;
+          report.retiredDrain.batches += 1;
+          if (purged !== candidateIds.length) {
+            failDrain(
+              "STUDENT_PRIVACY_DELETE_INCOMPLETE",
+              "delete-incomplete",
+              "Retired Student batch không được purge đầy đủ",
+            );
+          }
+          assertTimeRemaining();
+        }
+      }
+      report.retiredDrain.status = "completed";
+      report.retiredDrain.elapsedMs = elapsedMs();
+    } catch (error) {
+      if (error?.report) throw error;
+      report.retiredDrain.status = "failed";
+      report.retiredDrain.reason = "error";
+      report.retiredDrain.elapsedMs = elapsedMs();
+      error.code ||= "STUDENT_PRIVACY_RETIRED_DRAIN_FAILED";
+      error.report = report;
+      throw error;
+    }
   }
 
   for (const model of [questionEventModel, activityModel]) {
