@@ -1,5 +1,10 @@
 import { useCallback, useEffect, useState } from "react";
 import api from "../services/api.js";
+import {
+  DEFAULT_OPERATION_CAPABILITIES,
+  intersectOperationCapabilities,
+  normalizeOperationCapabilities,
+} from "../utils/operationSession.js";
 const STATUS_REFRESH_MS = 15000;
 
 export const DEFAULT_CONVERTER_TEMPLATES = [
@@ -92,11 +97,20 @@ export async function fetchConverterStatus(client = api) {
       : null;
 
   const serviceOnline = Boolean(health || templatesData);
+  const nodeCapabilities = normalizeOperationCapabilities(
+    backend?.capabilities?.operations,
+  );
+  const converterCapabilities = normalizeOperationCapabilities(health);
 
   return {
     serviceOnline,
     aiOnline: health ? aiStatusFromHealth(health) : null,
     backendCapabilities: backend?.capabilities || null,
+    capabilities: intersectOperationCapabilities(
+      nodeCapabilities,
+      converterCapabilities,
+    ),
+    capabilitiesOnline: Boolean(backend && health),
     templates: templatesData?.items?.length
       ? templatesData.items
       : DEFAULT_CONVERTER_TEMPLATES,
@@ -108,17 +122,23 @@ export function useConverterApi() {
   const [serviceOnline, setServiceOnline] = useState(null);
   const [aiOnline, setAiOnline] = useState(null); // null=loading, true=online, false=offline, "disabled"=không cấu hình
   const [backendCapabilities, setBackendCapabilities] = useState(null);
+  const [capabilities, setCapabilities] = useState(
+    DEFAULT_OPERATION_CAPABILITIES,
+  );
+  const [capabilitiesOnline, setCapabilitiesOnline] = useState(null);
 
   useEffect(() => {
     let cancelled = false;
 
     const refreshStatus = () => {
       fetchConverterStatus()
-        .then(({ serviceOnline, aiOnline, backendCapabilities, templates }) => {
+        .then(({ serviceOnline, aiOnline, backendCapabilities, capabilities, capabilitiesOnline, templates }) => {
           if (cancelled) return;
           setServiceOnline(serviceOnline);
           setAiOnline(aiOnline);
           setBackendCapabilities(backendCapabilities);
+          setCapabilities(capabilities);
+          setCapabilitiesOnline(capabilitiesOnline);
           setTemplates(templates);
         })
         .catch(() => {
@@ -126,6 +146,8 @@ export function useConverterApi() {
           setServiceOnline(false);
           setAiOnline(false);
           setBackendCapabilities(null);
+          setCapabilities(DEFAULT_OPERATION_CAPABILITIES);
+          setCapabilitiesOnline(false);
           setTemplates(DEFAULT_CONVERTER_TEMPLATES);
         });
     };
@@ -197,6 +219,8 @@ export function useConverterApi() {
     serviceOnline,
     aiOnline,
     backendCapabilities,
+    capabilities,
+    capabilitiesOnline,
     analyzeFile,
     previewMapping,
     confirmMapping,

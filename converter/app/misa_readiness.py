@@ -16,6 +16,7 @@ from app.models import (
     MisaReadinessSummary,
 )
 from app.master_data_resolver import MasterDataResolution
+from app.mapping_semantics import validate_mapping_semantics
 from app.normalization import is_blank, normalize_header
 from app.parsing import parse_date, parse_number
 
@@ -104,6 +105,18 @@ def build_readiness_report(
             formulas=formulas,
         )
         _check_source_parseable_values(issues, table, clean_mapping)
+    semantic_issues = validate_mapping_semantics(
+        target_template_id=target_template_id,
+        template_headers=template.headers,
+        source_headers=table.headers,
+        mapping=clean_mapping,
+        defaults=clean_defaults,
+        formulas=formulas,
+        sample_rows=table.rows[:20],
+    )
+    issues.extend(
+        issue for issue in semantic_issues if issue.code != "required_mapping_missing"
+    )
     _check_required_values(issues, rows, required_headers)
     _check_parseable_values(issues, rows)
     _check_amount_math(issues, rows)

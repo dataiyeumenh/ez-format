@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "test": "node --test src/utils/converterUx.test.mjs src/utils/masterData.test.mjs src/utils/reconstruction.test.mjs src/utils/studentAssistant.test.mjs src/utils/validationUi.test.mjs src/hooks/useConverterApi.status.test.mjs src/services/api.test.mjs",
+    "test": "node --test src/utils/converterUx.test.mjs src/utils/converterOperations.test.mjs src/utils/operationSession.test.mjs src/utils/converterFeatureSurfaces.test.mjs src/utils/masterData.test.mjs src/utils/reconstruction.test.mjs src/utils/studentAssistant.test.mjs src/utils/validationUi.test.mjs src/hooks/useConverterApi.status.test.mjs src/services/api.test.mjs",
     "test:student-rendered": "vitest run src/components/Navbar.studentAssistant.test.jsx src/hooks/useStudentAssistantAvailability.test.jsx",
     "build": "vite build",
     "preview": "vite preview",

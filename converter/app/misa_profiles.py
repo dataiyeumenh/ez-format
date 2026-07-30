@@ -59,6 +59,9 @@ class MappingProfile:
     usage_count: int
     owner_scope: str = ""
     workspace_id: str = ""
+    status: str = "active"
+    quarantined_at: str = ""
+    quarantine_reason: str = ""
 
 
 class ProfileStore:
@@ -91,6 +94,9 @@ class ProfileStore:
                     usage_count INTEGER NOT NULL DEFAULT 0,
                     owner_scope TEXT NOT NULL CHECK (length(trim(owner_scope)) > 0),
                     workspace_id TEXT NOT NULL DEFAULT '',
+                    status TEXT NOT NULL DEFAULT 'active',
+                    quarantined_at TEXT,
+                    quarantine_reason TEXT NOT NULL DEFAULT '',
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
@@ -122,6 +128,18 @@ class ProfileStore:
             if "workspace_id" not in columns:
                 connection.execute(
                     "ALTER TABLE mapping_profiles ADD COLUMN workspace_id TEXT NOT NULL DEFAULT ''"
+                )
+            if "status" not in columns:
+                connection.execute(
+                    "ALTER TABLE mapping_profiles ADD COLUMN status TEXT NOT NULL DEFAULT 'active'"
+                )
+            if "quarantined_at" not in columns:
+                connection.execute(
+                    "ALTER TABLE mapping_profiles ADD COLUMN quarantined_at TEXT"
+                )
+            if "quarantine_reason" not in columns:
+                connection.execute(
+                    "ALTER TABLE mapping_profiles ADD COLUMN quarantine_reason TEXT NOT NULL DEFAULT ''"
                 )
             owner_scope_added = "owner_scope" not in columns
             if owner_scope_added:
@@ -192,6 +210,7 @@ class ProfileStore:
                 """
                 SELECT * FROM mapping_profiles
                 WHERE owner_scope = ? AND target_template_id = ? AND source_signature_hash = ?
+                  AND status = 'active'
                 ORDER BY updated_at DESC
                 LIMIT 1
                 """,
@@ -321,7 +340,7 @@ class ProfileStore:
         )
         with self._connect() as connection:
             row = connection.execute(
-                "SELECT * FROM mapping_profiles WHERE id = ? AND owner_scope = ?",
+                "SELECT * FROM mapping_profiles WHERE id = ? AND owner_scope = ? AND status = 'active'",
                 (profile_id, resolved_owner_scope),
             ).fetchone()
             if row is None and resolved_owner_scope == "local:default":
@@ -346,12 +365,38 @@ class ProfileStore:
                 """
                 UPDATE mapping_profiles
                 SET usage_count = usage_count + 1, updated_at = ?
-                WHERE id = ? AND owner_scope = ?
+                WHERE id = ? AND owner_scope = ? AND status = 'active'
                 """,
                 (utc_now(), profile_id, resolved_owner_scope),
             )
             if cursor.rowcount != 1:
                 raise KeyError(f"Mapping profile not found: {profile_id}")
+
+    def quarantine_profile(
+        self,
+        profile_id: str,
+        *,
+        reason: str,
+        owner_scope: str | None = None,
+        workspace_id: str = "",
+    ) -> None:
+        resolved_owner_scope = resolve_owner_scope(
+            owner_scope,
+            workspace_id=workspace_id,
+        )
+        normalized_reason = str(reason or "semantic_validation_failed").strip()[:500]
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE mapping_profiles
+                SET status = 'quarantined', quarantined_at = ?, quarantine_reason = ?,
+                    updated_at = ?
+                WHERE id = ? AND owner_scope = ? AND status = 'active'
+                """,
+                (utc_now(), normalized_reason, utc_now(), profile_id, resolved_owner_scope),
+            )
+            if cursor.rowcount != 1:
+                raise KeyError(f"Mapping profile not found or already inactive: {profile_id}")
 
     @staticmethod
     def _claim_legacy_profile_by_signature(
@@ -364,6 +409,7 @@ class ProfileStore:
             """
             SELECT id FROM mapping_profiles
             WHERE owner_scope = 'local:legacy'
+              AND status = 'active'
               AND target_template_id = ?
               AND source_signature_hash = ?
             ORDER BY updated_at DESC
@@ -377,12 +423,12 @@ class ProfileStore:
             """
             UPDATE mapping_profiles
             SET owner_scope = 'local:default'
-            WHERE id = ? AND owner_scope = 'local:legacy'
+            WHERE id = ? AND owner_scope = 'local:legacy' AND status = 'active'
             """,
             (legacy["id"],),
         )
         return connection.execute(
-            "SELECT * FROM mapping_profiles WHERE id = ? AND owner_scope = 'local:default'",
+            "SELECT * FROM mapping_profiles WHERE id = ? AND owner_scope = 'local:default' AND status = 'active'",
             (legacy["id"],),
         ).fetchone()
 
@@ -400,7 +446,7 @@ class ProfileStore:
             (profile_id,),
         )
         return connection.execute(
-            "SELECT * FROM mapping_profiles WHERE id = ? AND owner_scope = 'local:default'",
+            "SELECT * FROM mapping_profiles WHERE id = ? AND owner_scope = 'local:default' AND status = 'active'",
             (profile_id,),
         ).fetchone()
 
@@ -452,4 +498,7 @@ class ProfileStore:
             usage_count=int(row["usage_count"]),
             owner_scope=str(row["owner_scope"] or ""),
             workspace_id=str(row["workspace_id"] or ""),
+            status=str(row["status"] or "active"),
+            quarantined_at=str(row["quarantined_at"] or ""),
+            quarantine_reason=str(row["quarantine_reason"] or ""),
         )

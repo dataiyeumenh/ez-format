@@ -27,6 +27,7 @@ import WorkspaceSetupModal from "../components/accounting/WorkspaceSetupModal";
 import MasterDataManager from "../components/accounting/MasterDataManager";
 import MasterDataResolutionTable from "../components/accounting/MasterDataResolutionTable";
 import SmartReconstructionPanel from "../components/reconstruction/SmartReconstructionPanel";
+import MappingProfileV2Card from "../components/converter/MappingProfileV2Card";
 import { useConverterApi } from "../hooks/useConverterApi";
 import { useAccountingWorkspaces } from "../hooks/useAccountingWorkspaces";
 import { useAuth } from "../context/AuthContext";
@@ -38,6 +39,7 @@ import {
   summarizeMappingFields,
 } from "../utils/converterUx";
 import { getReconstructionAvailability } from "../utils/reconstruction";
+import { extractProfileMatch } from "../utils/converterOperations.js";
 
 const STATUS = {
   IDLE: "idle",
@@ -190,6 +192,8 @@ const ConvertPage = () => {
     serviceOnline,
     aiOnline,
     backendCapabilities,
+    capabilities,
+    capabilitiesOnline,
     analyzeFile,
     previewMapping,
     confirmMapping,
@@ -295,6 +299,7 @@ const ConvertPage = () => {
   );
   const mappingSource = analyzePayload?.mapping_suggestion?.source;
   const confidence = analyzePayload?.mapping_suggestion?.confidence;
+  const profileV2Match = extractProfileMatch(analyzePayload);
   const extractTargetsFromText = (text) => {
     if (!text) return [];
     return [...targetHeaders]
@@ -1281,6 +1286,17 @@ const ConvertPage = () => {
                           </p>
                         </div>
                       </div>
+
+                      {capabilities.mapping_profile_v2 && (
+                        <div className="border-b border-gray-100 px-5 py-4 sm:px-6">
+                          <MappingProfileV2Card
+                            profileMatch={profileV2Match}
+                            serviceOnline={capabilitiesOnline !== false}
+                            busy={convStatus === STATUS.ANALYZING}
+                            onUse={handlePreview}
+                          />
+                        </div>
+                      )}
 
                       {keyMappingValues.length > 0 && (
                         <div className="border-b border-blue-100 bg-blue-50/60 px-5 py-4 sm:px-6">

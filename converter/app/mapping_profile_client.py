@@ -80,6 +80,15 @@ def mark_mapping_profile_used(token: str, profile_id: str) -> None:
     _request("POST", f"/mapping-profiles/{profile_id}/used", token)
 
 
+def quarantine_mapping_profile(token: str, profile_id: str, reason: str) -> None:
+    _request(
+        "POST",
+        f"/mapping-profiles/{profile_id}/quarantine",
+        token,
+        json_body={"reason": str(reason or "semantic_validation_failed")[:500]},
+    )
+
+
 def _request(
     method: str,
     path: str,
@@ -147,4 +156,7 @@ def _profile_from_payload(payload: dict[str, Any]) -> MappingProfile:
         usage_count=int(payload.get("usageCount") or 0),
         owner_scope=owner_scope,
         workspace_id=workspace_id,
+        status=str(payload.get("status") or "active"),
+        quarantined_at=str(payload.get("quarantinedAt") or ""),
+        quarantine_reason=str(payload.get("quarantineReason") or ""),
     )

@@ -305,6 +305,285 @@ rules:
   - path: scripts/tests/verify-transplant-manifest.test.ps1
     owner: main
     reason: canonical reconstruction route and model verifier regression
+  - path: .github/workflows/qa.yml
+    owner: compose
+    reason: reviewed integration ownership
+  - path: backend/config/db.js
+    owner: compose
+    reason: reviewed integration ownership
+  - path: backend/controllers/mappingProfileV2Controller.js
+    owner: compose
+    reason: reviewed integration ownership
+  - path: backend/controllers/paymentController.js
+    owner: compose
+    reason: reviewed integration ownership
+  - path: backend/models/ConversionArtifact.js
+    owner: compose
+    reason: reviewed integration ownership
+  - path: backend/models/CouponUsage.js
+    owner: compose
+    reason: reviewed integration ownership
+  - path: backend/models/MappingProfileV2.js
+    owner: compose
+    reason: reviewed integration ownership
+  - path: backend/routes/conversionContext.js
+    owner: compose
+    reason: reviewed integration ownership
+  - path: backend/routes/convert.js
+    owner: compose
+    reason: reviewed integration ownership
+  - path: backend/routes/internalConverterSessions.js
+    owner: compose
+    reason: reviewed integration ownership
+  - path: backend/routes/mappingProfilesV2.js
+    owner: compose
+    reason: reviewed integration ownership
+  - path: backend/services/conversionArtifactService.js
+    owner: compose
+    reason: reviewed integration ownership
+  - path: backend/services/converterGatewayService.js
+    owner: compose
+    reason: reviewed integration ownership
+  - path: backend/services/couponService.js
+    owner: compose
+    reason: reviewed integration ownership
+  - path: backend/services/mappingProfileV2MigrationService.js
+    owner: compose
+    reason: reviewed integration ownership
+  - path: backend/services/mappingProfileV2Service.js
+    owner: compose
+    reason: reviewed integration ownership
+  - path: backend/services/mongoGridFsArtifactStorage.js
+    owner: compose
+    reason: reviewed integration ownership
+  - path: backend/services/paymentStatusSync.js
+    owner: compose
+    reason: reviewed integration ownership
+  - path: backend/services/runtimeCapabilitiesService.js
+    owner: compose
+    reason: reviewed integration ownership
+  - path: backend/tests/adminContracts.test.js
+    owner: compose
+    reason: reviewed integration ownership
+  - path: backend/tests/authContracts.test.js
+    owner: compose
+    reason: reviewed integration ownership
+  - path: backend/tests/conversionArtifacts.test.js
+    owner: compose
+    reason: reviewed integration ownership
+  - path: backend/tests/converterGatewayStartup.test.js
+    owner: compose
+    reason: reviewed integration ownership
+  - path: backend/tests/coupons.test.js
+    owner: compose
+    reason: reviewed integration ownership
+  - path: backend/tests/internalConverterSessions.test.js
+    owner: compose
+    reason: reviewed integration ownership
+  - path: backend/tests/mappingProfileV2.test.js
+    owner: compose
+    reason: reviewed integration ownership
+  - path: backend/tests/mappingProfileV2Contract.test.js
+    owner: compose
+    reason: reviewed integration ownership
+  - path: backend/tests/mappingProfileV2Migration.test.js
+    owner: compose
+    reason: reviewed integration ownership
+  - path: backend/tests/mongoGridFsArtifactStorage.test.js
+    owner: compose
+    reason: reviewed integration ownership
+  - path: backend/tests/paymentControllerZeroTotal.test.js
+    owner: compose
+    reason: reviewed integration ownership
+  - path: backend/tests/paymentReplicaSet.integration.test.js
+    owner: compose
+    reason: reviewed integration ownership
+  - path: backend/tests/paymentSettlementReadiness.test.js
+    owner: compose
+    reason: reviewed integration ownership
+  - path: backend/tests/paymentStatusSync.test.js
+    owner: compose
+    reason: reviewed integration ownership
+  - path: backend/tests/paymentWebhookTransition.test.js
+    owner: compose
+    reason: reviewed integration ownership
+  - path: backend/tests/releaseReplicaGate.test.js
+    owner: compose
+    reason: reviewed integration ownership
+  - path: backend/tests/runtimeCapabilities.test.js
+    owner: compose
+    reason: reviewed integration ownership
+  - path: converter/app/accounting_assistant.py
+    owner: compose
+    reason: reviewed integration ownership
+  - path: converter/app/ai_mapping_client.py
+    owner: source
+    reason: reviewed integration ownership
+  - path: converter/app/anomaly_rules.py
+    owner: compose
+    reason: reviewed integration ownership
+  - path: converter/app/anomaly_workflow.py
+    owner: compose
+    reason: reviewed integration ownership
+  - path: converter/app/context_secrets.py
+    owner: compose
+    reason: reviewed integration ownership
+  - path: converter/app/correction_workflow.py
+    owner: compose
+    reason: reviewed integration ownership
+  - path: converter/app/evidence_packets.py
+    owner: compose
+    reason: reviewed integration ownership
+  - path: converter/app/internal_auth.py
+    owner: source
+    reason: reviewed integration ownership
+  - path: converter/app/mapping_profile_v2.py
+    owner: compose
+    reason: reviewed integration ownership
+  - path: converter/app/mapping_semantics.py
+    owner: compose
+    reason: reviewed integration ownership
+  - path: converter/app/misa_field_semantics.py
+    owner: compose
+    reason: reviewed integration ownership
+  - path: converter/app/misa_mapping.py
+    owner: source
+    reason: reviewed integration ownership
+  - path: converter/app/operation_models.py
+    owner: source
+    reason: reviewed integration ownership
+  - path: converter/app/operation_store_client.py
+    owner: source
+    reason: reviewed integration ownership
+  - path: converter/app/operation_store.py
+    owner: source
+    reason: reviewed integration ownership
+  - path: converter/app/parsing.py
+    owner: source
+    reason: reviewed integration ownership
+  - path: converter/app/reconciliation_workflow_v2.py
+    owner: compose
+    reason: reviewed integration ownership
+  - path: converter/tests/conftest.py
+    owner: compose
+    reason: reviewed integration ownership
+  - path: converter/tests/test_accounting_assistant.py
+    owner: compose
+    reason: reviewed integration ownership
+  - path: converter/tests/test_accounting_operations_performance.py
+    owner: compose
+    reason: reviewed integration ownership
+  - path: converter/tests/test_ai_gateway_assistant.py
+    owner: compose
+    reason: reviewed integration ownership
+  - path: converter/tests/test_ai_mapping_boundary.py
+    owner: compose
+    reason: reviewed integration ownership
+  - path: converter/tests/test_anomaly_workflow.py
+    owner: compose
+    reason: reviewed integration ownership
+  - path: converter/tests/test_correction_workflow.py
+    owner: compose
+    reason: reviewed integration ownership
+  - path: converter/tests/test_internal_auth.py
+    owner: compose
+    reason: reviewed integration ownership
+  - path: converter/tests/test_mapping_profile_v2.py
+    owner: compose
+    reason: reviewed integration ownership
+  - path: converter/tests/test_mapping_semantics.py
+    owner: compose
+    reason: reviewed integration ownership
+  - path: converter/tests/test_misa_mapping.py
+    owner: compose
+    reason: reviewed integration ownership
+  - path: converter/tests/test_operation_session_api.py
+    owner: compose
+    reason: reviewed integration ownership
+  - path: converter/tests/test_operation_store.py
+    owner: compose
+    reason: reviewed integration ownership
+  - path: converter/tests/test_reconciliation_workflow_v2.py
+    owner: compose
+    reason: reviewed integration ownership
+  - path: docs/AI_NGROK_RENDER_GUIDE.md
+    owner: compose
+    reason: reviewed integration ownership
+  - path: docs/MISA_WORKSPACE_DEPLOYMENT.md
+    owner: compose
+    reason: reviewed integration ownership
+  - path: docs/SMART_VOUCHER_RECONSTRUCTION_DEPLOYMENT.md
+    owner: compose
+    reason: reviewed integration ownership
+  - path: docs/superpowers/specs/2026-05-29-python-node-integration-design.md
+    owner: compose
+    reason: reviewed integration ownership
+  - path: frontend/package-lock.json
+    owner: compose
+    reason: reviewed integration ownership
+  - path: frontend/scripts/check-production-env.mjs
+    owner: source
+    reason: reviewed integration ownership
+  - path: frontend/src/components/converter/AccountingAssistantDrawer.jsx
+    owner: compose
+    reason: reviewed integration ownership
+  - path: frontend/src/components/converter/AnomalyWorkspace.jsx
+    owner: compose
+    reason: reviewed integration ownership
+  - path: frontend/src/components/converter/BulkCorrectionDialog.jsx
+    owner: compose
+    reason: reviewed integration ownership
+  - path: frontend/src/components/converter/MappingProfileV2Card.jsx
+    owner: compose
+    reason: reviewed integration ownership
+  - path: frontend/src/components/converter/ReconciliationWorkspace.jsx
+    owner: compose
+    reason: reviewed integration ownership
+  - path: frontend/src/components/ui/StepProgress.jsx
+    owner: source
+    reason: reviewed integration ownership
+  - path: frontend/src/pages/PaymentPage.contract.test.mjs
+    owner: compose
+    reason: reviewed integration ownership
+  - path: frontend/src/pages/PaymentPage.jsx
+    owner: compose
+    reason: reviewed integration ownership
+  - path: frontend/src/services/api.test.mjs
+    owner: compose
+    reason: reviewed integration ownership
+  - path: frontend/src/utils/converterContractFixtures.js
+    owner: compose
+    reason: reviewed integration ownership
+  - path: frontend/src/utils/converterFeatureSurfaces.test.mjs
+    owner: compose
+    reason: reviewed integration ownership
+  - path: frontend/src/utils/converterOperations.js
+    owner: compose
+    reason: reviewed integration ownership
+  - path: frontend/src/utils/converterOperations.test.mjs
+    owner: compose
+    reason: reviewed integration ownership
+  - path: frontend/src/utils/operationSession.js
+    owner: compose
+    reason: reviewed integration ownership
+  - path: frontend/src/utils/operationSession.test.mjs
+    owner: compose
+    reason: reviewed integration ownership
+  - path: frontend/tests/converter-gateway.journey.spec.mjs
+    owner: compose
+    reason: reviewed integration ownership
+  - path: frontend/vite.config.js
+    owner: source
+    reason: reviewed integration ownership
+  - path: README.md
+    owner: compose
+    reason: reviewed integration ownership
+  - path: scripts/qa-main-contracts.ps1
+    owner: compose
+    reason: reviewed integration ownership
+  - path: scripts/qa-release.ps1
+    owner: compose
+    reason: reviewed integration ownership
 excluded:
   - .superpowers/sdd/**
   - frontend/test-results/**

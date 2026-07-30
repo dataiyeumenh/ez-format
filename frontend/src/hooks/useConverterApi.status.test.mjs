@@ -20,10 +20,25 @@ test("converter status is online when health and templates are available", async
   const fetchImpl = async (url) => {
     if (url.endsWith("/api/health")) {
       return response(true, {
-        capabilities: { voucherReconstruction: true, converterGateway: true },
+        capabilities: {
+          voucherReconstruction: true,
+          converterGateway: true,
+          operations: {
+            mapping_profile_v2: true,
+            anomaly_detection: true,
+            limits: { comparison_files: 2, raw_ttl_minutes: 60, max_rows_per_file: 50000 },
+          },
+        },
       });
     }
-    if (url.endsWith("/healthz")) return response(true, { ai: "online" });
+    if (url.endsWith("/healthz")) return response(true, {
+      ai: "online",
+      capabilities: {
+        mapping_profile_v2: true,
+        anomaly_detection: false,
+        limits: { comparison_files: 2, raw_ttl_minutes: 30, max_rows_per_file: 40000 },
+      },
+    });
     return response(true, { items: [{ id: "bsn_sales" }] });
   };
 
@@ -31,10 +46,11 @@ test("converter status is online when health and templates are available", async
 
   assert.equal(status.serviceOnline, true);
   assert.equal(status.aiOnline, true);
-  assert.deepEqual(status.backendCapabilities, {
-    voucherReconstruction: true,
-    converterGateway: true,
-  });
+  assert.equal(status.backendCapabilities.voucherReconstruction, true);
+  assert.equal(status.capabilities.mapping_profile_v2, true);
+  assert.equal(status.capabilities.anomaly_detection, false);
+  assert.equal(status.capabilities.limits.raw_ttl_minutes, 30);
+  assert.equal(status.capabilitiesOnline, true);
   assert.deepEqual(status.templates, [{ id: "bsn_sales" }]);
 });
 

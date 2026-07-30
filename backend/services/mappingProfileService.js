@@ -35,11 +35,22 @@ function mappingProfileOwnerFromClaims(claims = {}) {
   if (!["misa_conversion", "misa_reconstruction"].includes(purpose)) {
     throw new Error("Conversion context token không hợp lệ");
   }
-  if (!workspaceId || !userId) {
-    throw new Error("Conversion context thiếu workspace hoặc user");
+  if (!userId) throw new Error("Conversion context thiếu user");
+  if (purpose === "misa_reconstruction" && !workspaceId) {
+    throw new Error("Reconstruction context thiếu workspace");
+  }
+  const expectedOwnerScope = workspaceId
+    ? `workspace:${workspaceId}`
+    : `user:${userId}`;
+  const claimedOwnerScope = String(claims.owner_scope || "").trim();
+  if (
+    (claimedOwnerScope && claimedOwnerScope !== expectedOwnerScope) ||
+    (!workspaceId && claimedOwnerScope !== expectedOwnerScope)
+  ) {
+    throw new Error("Conversion context owner scope không hợp lệ");
   }
   return {
-    ownerScope: `workspace:${workspaceId}`,
+    ownerScope: expectedOwnerScope,
     userId,
     workspaceId,
   };
@@ -87,6 +98,9 @@ function serializeMappingProfile(profile) {
     confidence: Number(profile.confidence || 0),
     usageCount: Number(profile.usageCount || 0),
     lastUsedAt: profile.lastUsedAt || null,
+    status: profile.status || "active",
+    quarantinedAt: profile.quarantinedAt || null,
+    quarantineReason: profile.quarantineReason || "",
     createdAt: profile.createdAt || null,
     updatedAt: profile.updatedAt || null,
   };

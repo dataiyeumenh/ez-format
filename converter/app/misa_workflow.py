@@ -1,12 +1,17 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
+import threading
+import time
 import uuid
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
+from app import ai_mapping_client
 from app.ai_mapping_client import (
     AiMappingError,
     ai_enabled,
@@ -32,6 +37,7 @@ from app.misa_mapping import (
 )
 from app.master_data_client import (
     ConversionContextError,
+    conversion_context_owner_scope,
     fetch_master_data_context,
     verify_conversion_context_token,
 )
@@ -41,13 +47,34 @@ from app.mapping_profile_client import (
     find_mapping_profile,
     get_mapping_profile,
     mark_mapping_profile_used,
+    quarantine_mapping_profile,
     save_mapping_profile,
 )
+from app.mapping_profile_v2 import (
+    MappingProfileV2Error,
+    MappingProfileV2UnavailableError,
+    build_profile_identity,
+    confirm_mapping_profile_v2,
+    get_mapping_profile_v2,
+    mapping_profile_v2_enabled,
+    match_mapping_profile_v2,
+    quarantine_mapping_profile_v2,
+    record_confirmed_export_v2,
+    template_version,
+)
+from app.mapping_semantics import validate_mapping_semantics
 from app.misa_readiness import add_master_data_resolutions, build_readiness_report
 from app.misa_profiles import ProfileStore, local_mapping_owner_scope
 from app.misa_templates import get_misa_template, list_misa_templates
 from app.models import MisaReadinessReport
 from app.normalization import normalize_header
+from app.operation_store import (
+    OperationStore,
+    OperationStoreConflictError,
+    OperationStoreError,
+    operation_context_required,
+    unauthenticated_local_operations_enabled,
+)
 from app.student_context import StudentContextClaims, verify_student_context
 from app.student_store import (
     assert_upload_owner,
@@ -58,7 +85,9 @@ from app.student_store import (
 
 
 UPLOAD_ROOT = BACKEND_ROOT / ".artifacts" / "uploads"
+_UPLOAD_CACHE_LOCK = threading.RLock()
 EXPORT_MEDIA_TYPE = "application/vnd.ms-excel"
+UPLOAD_METADATA_CONTEXT_KEY = "upload_metadata"
 DETERMINISTIC_BSN_SALES_RAW_HEADERS = (
     "Mã hóa đơn",
     "Thời gian",
@@ -103,21 +132,26 @@ def save_upload(
     if suffix not in {".xls", ".xlsx"}:
         raise ValueError("Only .xls and .xlsx files are supported.")
     upload_id = str(uuid.uuid4())
+    now = int(time.time())
     directory = _upload_dir(upload_id)
-    directory.mkdir(parents=True, exist_ok=True)
-    if student_claims is not None:
-        if student_ttl_seconds is None:
-            raise ValueError("Student upload TTL là bắt buộc")
-        bind_upload_to_student(upload_id, student_claims, student_ttl_seconds)
-    input_path = directory / f"input{suffix}"
-    input_path.write_bytes(content)
-    persisted_filename = f"student-workbook{suffix}" if student_claims else filename
-    metadata = {
-        "upload_id": upload_id,
-        "filename": persisted_filename,
-        "input_path": str(input_path),
-    }
-    _write_metadata(upload_id, metadata)
+    with _UPLOAD_CACHE_LOCK:
+        directory.mkdir(parents=True, exist_ok=True)
+        if student_claims is not None:
+            if student_ttl_seconds is None:
+                raise ValueError("Student upload TTL là bắt buộc")
+            bind_upload_to_student(upload_id, student_claims, student_ttl_seconds)
+        input_path = directory / f"input{suffix}"
+        input_path.write_bytes(content)
+        persisted_filename = f"student-workbook{suffix}" if student_claims else filename
+        metadata = {
+            "upload_id": upload_id,
+            "filename": persisted_filename,
+            "input_path": str(input_path),
+            "raw_sha256": hashlib.sha256(content).hexdigest(),
+            "created_at": now,
+            "expires_at": now + _upload_cache_ttl_seconds(),
+        }
+        _write_metadata(upload_id, metadata)
     return upload_id, input_path
 
 
@@ -127,8 +161,16 @@ def analyze_upload(
     content: bytes,
     requested_target_template_id: str | None = None,
     conversion_context_token: str | None = None,
+    operation_session_id: str | None = None,
+    conversion_run_id: str | None = None,
     student_context_token: str | None = None,
+    use_ai: bool = False,
+    ai_mapping_opt_in: bool = False,
 ) -> dict[str, Any]:
+    if operation_context_required() and not str(operation_session_id or "").strip():
+        raise OperationStoreError(
+            "Production conversion requires a preallocated operation_session_id"
+        )
     if student_context_token and conversion_context_token:
         raise ValueError("Không thể dùng student context và conversion context đồng thời")
     student_claims = _verify_student_token(student_context_token, "analyze")
@@ -140,20 +182,67 @@ def analyze_upload(
         student_ttl_seconds=student_ttl,
     )
     table = read_input_table(input_path)
+    purchase_adjustments: list[dict[str, Any]] = []
     target_template_id = detect_target_template_id(table, requested_target_template_id)
     template = get_misa_template(target_template_id)
     signature = source_signature(table)
     context, context_status, context_message, context_claims = _context_for_analyze(
         conversion_context_token
     )
+    trusted_session_id, trusted_run_id = _trusted_preallocated_session_binding(
+        context_claims,
+        operation_session_id=operation_session_id,
+        conversion_run_id=conversion_run_id,
+    )
     workspace_id = str((context_claims or {}).get("workspace_id") or "")
-    owner_scope = student_claims.owner_scope if student_claims else (
-        f"workspace:{workspace_id}" if workspace_id else local_mapping_owner_scope()
+    owner_scope = (
+        student_claims.owner_scope
+        if student_claims
+        else (
+            conversion_context_owner_scope(context_claims)
+            if context_claims
+            else local_mapping_owner_scope()
+        )
     )
     profile_token = student_context_token or conversion_context_token
     store = ProfileStore()
     profile_warning: str | None = None
-    if profile_token:
+    profile = None
+    v2_profile = None
+    v2_match = None
+    v2_match_tier: str | None = None
+    resolved_template_version = template_version(template.workbook.path)
+    if profile_token and mapping_profile_v2_enabled():
+        try:
+            v2_match = match_mapping_profile_v2(
+                profile_token,
+                build_profile_identity(
+                    table,
+                    target_template_id=target_template_id,
+                    target_template_version=resolved_template_version,
+                ),
+            )
+            if v2_match is not None:
+                v2_match_tier = v2_match.match_tier
+                candidate = v2_match.profile
+                if candidate.owner_scope != owner_scope:
+                    raise MappingProfileV2Error(
+                        "Backend trả về mapping profile V2 sai owner scope"
+                    )
+                if (
+                    v2_match.match_tier == "exact"
+                    and candidate.status == "active"
+                    and v2_match.can_suggest
+                ):
+                    v2_profile = candidate
+                else:
+                    profile_warning = (
+                        "Mapping Profile V2 chưa được áp dụng do schema drift hoặc "
+                        "thiếu phê duyệt rõ ràng."
+                    )
+        except MappingProfileV2Error as exc:
+            profile_warning = f"Mapping Profile V2 không khả dụng; dùng V1/heuristic: {exc}"
+    if profile_token and v2_profile is None and v2_match_tier is None:
         try:
             profile = find_mapping_profile(
                 profile_token,
@@ -164,78 +253,229 @@ def analyze_upload(
                 raise MappingProfileClientError(
                     "Backend trả về mapping profile sai owner scope"
                 )
-            if profile:
-                try:
-                    mark_mapping_profile_used(profile_token, profile.id)
-                except MappingProfileClientError as exc:
-                    profile_warning = f"Không cập nhật được lượt dùng mapping profile: {exc}"
         except MappingProfileClientError as exc:
             profile = None
             profile_warning = f"Không tải được mapping profile doanh nghiệp; dùng heuristic: {exc}"
-    else:
+    elif not profile_token:
         profile = store.find_by_signature(
             target_template_id=target_template_id,
             source_signature_hash=signature.hash,
             owner_scope=owner_scope,
         )
-    if profile:
-        if not profile_token:
-            store.mark_used(profile.id, owner_scope=owner_scope)
+    ai_state: dict[str, str] | None = None
+    nearby_ai_profiles = (
+        [
+            {
+                "target_template_id": v2_match.profile.target_template_id,
+                "source_headers": list(v2_match.profile.mapping),
+                "confidence": v2_match.profile.confidence,
+            }
+        ]
+        if v2_match is not None
+        else []
+    )
+    if v2_profile:
+        suggestion = MappingSuggestion(
+            source="profile_v2",
+            confidence=v2_profile.confidence,
+            mapping=v2_profile.mapping,
+            defaults=v2_profile.defaults,
+            formulas=v2_profile.formulas,
+            warnings=list(v2_match.warnings if v2_match is not None else ()),
+            profile_id=v2_profile.id,
+        )
+    elif profile:
         suggestion = profile_suggestion(profile)
-        profile_issues = validate_mapping(target_template_id, suggestion.mapping, template.headers)
-        if _has_missing_required_mapping(profile_issues):
-            suggestion = _repair_profile_suggestion_with_heuristic(
-                table=table,
-                target_template_id=target_template_id,
-                template_headers=template.headers,
-                suggestion=suggestion,
-            )
     else:
         suggestion = heuristic_suggestion(table, target_template_id, template.headers)
-        heuristic_issues = validate_mapping(target_template_id, suggestion.mapping, template.headers)
-        if ai_enabled() and _should_request_ai_mapping(
+        heuristic_issues = validate_mapping(
+            target_template_id,
+            suggestion.mapping,
+            template.headers,
+            suggestion.defaults,
+            suggestion.formulas,
+        )
+        effective_ai_mapping_opt_in = bool(
+            ai_mapping_opt_in
+            or (context_claims or {}).get("ai_mapping_opt_in")
+            or (not context_claims and unauthenticated_local_operations_enabled())
+        )
+        suggestion, ai_state = apply_optional_ai_mapping(
             table=table,
             target_template_id=target_template_id,
-            suggestion=suggestion,
+            template_headers=template.headers,
+            fallback=suggestion,
             issues=heuristic_issues,
-        ):
-            try:
-                ai_payload = request_mapping_suggestion(
-                    ai_suggestion_payload(table, target_template_id, template.headers)
+            use_ai=use_ai,
+            ai_mapping_opt_in=effective_ai_mapping_opt_in,
+            nearby_profiles=nearby_ai_profiles,
+        )
+    semantic_issues = validate_mapping_semantics(
+        target_template_id=target_template_id,
+        template_headers=template.headers,
+        source_headers=table.headers,
+        mapping=suggestion.mapping,
+        defaults=suggestion.defaults,
+        formulas=suggestion.formulas,
+        sample_rows=table.rows[:20],
+    )
+    if suggestion.source in {"profile", "profile_v2"} and any(
+        issue.severity == "blocker" for issue in semantic_issues
+    ):
+        rejected_profile_id = suggestion.profile_id or "unknown"
+        rejection_codes = sorted(
+            {
+                issue.code
+                for issue in semantic_issues
+                if issue.severity == "blocker"
+            }
+        )
+        rejection_reason = "semantic_validation_failed:" + ",".join(rejection_codes)
+        try:
+            if profile_token and suggestion.source == "profile_v2":
+                quarantine_mapping_profile_v2(
+                    profile_token,
+                    profile_id=rejected_profile_id,
+                    reason=rejection_reason,
                 )
-                suggestion = normalize_ai_suggestion(
-                    ai_payload,
-                    suggestion,
-                    target_template_id=target_template_id,
-                    target_headers=template.headers,
+            elif profile_token and suggestion.source == "profile":
+                quarantine_mapping_profile(
+                    profile_token,
+                    rejected_profile_id,
+                    rejection_reason,
                 )
-            except AiMappingError as exc:
-                if ai_required():
-                    raise
-                suggestion.warnings.append(f"AI Gateway unavailable, dùng heuristic: {exc}")
+            elif not profile_token and suggestion.source == "profile":
+                store.quarantine_profile(
+                    rejected_profile_id,
+                    reason=rejection_reason,
+                    owner_scope=owner_scope,
+                )
+        except (KeyError, MappingProfileClientError, MappingProfileV2Error):
+            pass
+        profile_warning = (
+            f"Mapping profile {rejected_profile_id} bị loại vì không an toàn về ngữ nghĩa; "
+            "đã chuyển sang heuristic để người dùng kiểm tra lại."
+        )
+        profile = None
+        v2_profile = None
+        suggestion = heuristic_suggestion(table, target_template_id, template.headers)
+        semantic_issues = validate_mapping_semantics(
+            target_template_id=target_template_id,
+            template_headers=template.headers,
+            source_headers=table.headers,
+            mapping=suggestion.mapping,
+            defaults=suggestion.defaults,
+            formulas=suggestion.formulas,
+            sample_rows=table.rows[:20],
+        )
     if profile_warning:
         suggestion.warnings.append(profile_warning)
+    if purchase_adjustments:
+        suggestion.warnings.append(
+            f"Phát hiện {len(purchase_adjustments)} hóa đơn có ngữ cảnh điều chỉnh; "
+            "cần kiểm tra chứng từ gốc/tham chiếu trước khi xác nhận mapping."
+        )
 
-    issues = validate_mapping(target_template_id, suggestion.mapping, template.headers)
+    issues = validate_mapping(
+        target_template_id,
+        suggestion.mapping,
+        template.headers,
+        suggestion.defaults,
+        suggestion.formulas,
+    )
+    issues.extend(issue.model_dump(mode="json") for issue in semantic_issues)
     metadata = _read_metadata(upload_id)
-    signature_payload = signature.__dict__.copy()
     metadata.update(
         {
             "target_template_id": target_template_id,
-            "signature": signature_payload,
+            "signature": signature.__dict__,
             "suggestion": suggestion.model_dump(),
             "issues": issues,
+            "review_context": {
+                "purchase_adjustments": purchase_adjustments,
+            },
             "conversion_context": (
                 {
+                    "user_id": context_claims.get("user_id"),
+                    "owner_scope": owner_scope,
                     "workspace_id": workspace_id,
                     "snapshot_set_hash": context_claims.get("snapshot_set_hash"),
+                    "conversion_run_id": context_claims.get("conversion_run_id"),
                 }
                 if context_claims
                 else None
             ),
             "owner_scope": owner_scope,
+            "conversion_run_id": str(
+                (context_claims or {}).get("conversion_run_id") or ""
+            )
+            or None,
+            "operation_session_id": trusted_session_id,
+            "mapping_profile_kind": (
+                "v2" if v2_profile else ("v1" if profile else None)
+            ),
+            "mapping_profile_version": v2_profile.version if v2_profile else None,
+            "profile_state_hash": v2_profile.state_hash if v2_profile else None,
+            "mapping_profile_v2_candidate": (
+                {
+                    "profile_id": v2_profile.id,
+                    "version": v2_profile.version,
+                    "state_hash": v2_profile.state_hash,
+                    "source_signature_hash": v2_profile.header_fingerprint,
+                }
+                if v2_profile
+                else None
+            ),
         }
     )
+    session = None
+    if student_claims or context_claims or unauthenticated_local_operations_enabled():
+        operation_store = OperationStore(
+            conversion_context_token=conversion_context_token
+        )
+        session = operation_store.create_session(
+            session_id=trusted_session_id,
+            upload_id=upload_id,
+            owner_scope=owner_scope,
+            user_id=str(
+                (
+                    student_claims.user_id
+                    if student_claims
+                    else (context_claims or {}).get("user_id")
+                )
+                or ""
+            )
+            or None,
+            workspace_id=workspace_id or None,
+            target_template_id=target_template_id,
+            target_template_version=resolved_template_version,
+            source_signature=signature.__dict__,
+            table=table,
+            raw_sha256=hashlib.sha256(content).hexdigest(),
+            conversion_run_id=trusted_run_id,
+            initial_context={
+                "mapping": suggestion.mapping,
+                "defaults": suggestion.defaults,
+                "formulas": suggestion.formulas,
+                UPLOAD_METADATA_CONTEXT_KEY: _portable_upload_metadata(metadata),
+            },
+        )
+        metadata["operation_session_id"] = session.session_id
+        session_expires_at = int(session.expires_at.timestamp())
+        metadata.update(
+            {
+                "raw_sha256": session.raw_sha256,
+                "expires_at": session_expires_at,
+                "operation_session_expires_at": session_expires_at,
+            }
+        )
+        operation_store.put_artifact(
+            session.session_id,
+            kind="upload",
+            revision=1,
+            content=content,
+            content_type=_upload_content_type(filename),
+        )
     _write_metadata(upload_id, metadata)
     store.record_run(
         run_id=upload_id,
@@ -258,7 +498,22 @@ def analyze_upload(
         "target_template_id": target_template_id,
         "target_headers": template.headers,
         "mapping_suggestion": suggestion.model_dump(),
+        "ai": ai_state,
+        "mapping_profile_v2": _mapping_profile_v2_payload(v2_match, suggestion.source),
         "issues": issues,
+        "review_context": {
+            "purchase_adjustments": purchase_adjustments,
+        },
+        "session": (
+            {
+                "session_id": session.session_id,
+                "active_revision": session.active_revision,
+                "state_hash": session.state_hash,
+                "expires_at": session.expires_at.isoformat(),
+            }
+            if session
+            else None
+        ),
         "master_data": _master_data_payload(
             context,
             [],
@@ -277,11 +532,31 @@ def preview_mapping(
     formulas: dict[str, str] | None = None,
     conversion_context_token: str | None = None,
     student_context_token: str | None = None,
+    session_id: str | None = None,
+    revision: int | None = None,
+    state_hash: str | None = None,
 ) -> dict[str, Any]:
-    _assert_student_upload_context(upload_id, student_context_token, "explain")
-    table = _read_upload_table(upload_id)
+    student_claims = _assert_student_upload_context(
+        upload_id, student_context_token, "explain"
+    )
+    _assert_operation_state(
+        upload_id,
+        session_id,
+        revision,
+        state_hash,
+        conversion_context_token=conversion_context_token,
+        student_owner_scope=student_claims.owner_scope if student_claims else None,
+        required_scope="preview",
+    )
+    table = _read_upload_table(upload_id, conversion_context_token=conversion_context_token)
     template = get_misa_template(target_template_id)
-    issues = validate_mapping(target_template_id, mapping, template.headers)
+    issues = validate_mapping(
+        target_template_id,
+        mapping,
+        template.headers,
+        defaults,
+        formulas,
+    )
     rows = apply_mapping(
         table,
         template.headers,
@@ -324,9 +599,25 @@ def readiness_mapping(
     edited_rows: list[dict[str, Any]] | None = None,
     conversion_context_token: str | None = None,
     student_context_token: str | None = None,
+    session_id: str | None = None,
+    revision: int | None = None,
+    state_hash: str | None = None,
 ) -> dict[str, Any]:
-    _assert_student_upload_context(upload_id, student_context_token, "explain")
-    table = _read_upload_table(upload_id)
+    student_claims = _assert_student_upload_context(
+        upload_id, student_context_token, "explain"
+    )
+    _assert_operation_state(
+        upload_id,
+        session_id,
+        revision,
+        state_hash,
+        conversion_context_token=conversion_context_token,
+        student_owner_scope=student_claims.owner_scope if student_claims else None,
+        required_scope="readiness",
+    )
+    if session_id:
+        edited_rows = None
+    table = _read_upload_table(upload_id, conversion_context_token=conversion_context_token)
     template = get_misa_template(target_template_id)
     rows = edited_rows or apply_mapping(
         table,
@@ -370,8 +661,22 @@ def confirm_mapping(
     profile_name: str | None = None,
     conversion_context_token: str | None = None,
     student_context_token: str | None = None,
+    session_id: str | None = None,
+    revision: int | None = None,
+    state_hash: str | None = None,
 ) -> dict[str, Any]:
-    _assert_student_upload_context(upload_id, student_context_token, "attempt")
+    student_claims = _assert_student_upload_context(
+        upload_id, student_context_token, "attempt"
+    )
+    _assert_operation_state(
+        upload_id,
+        session_id,
+        revision,
+        state_hash,
+        conversion_context_token=conversion_context_token,
+        student_owner_scope=student_claims.owner_scope if student_claims else None,
+        required_scope="confirm",
+    )
     metadata = _read_metadata(upload_id)
     _context_for_upload(upload_id, conversion_context_token)
     signature_payload = metadata.get("signature")
@@ -384,7 +689,9 @@ def confirm_mapping(
             hash=str(signature_payload.get("hash") or ""),
         )
     else:
-        signature = source_signature(_read_upload_table(upload_id))
+        signature = source_signature(
+            _read_upload_table(upload_id, conversion_context_token=conversion_context_token)
+        )
     previous = metadata.get("suggestion")
     template = get_misa_template(target_template_id)
     clean_defaults = sanitize_defaults_for_template(
@@ -394,7 +701,64 @@ def confirm_mapping(
     )
     owner_scope = _owner_scope_from_upload_metadata(metadata)
     profile_token = student_context_token or conversion_context_token
-    if profile_token:
+    confirmed_profile_kind = "v1"
+    confirmed_profile_version = None
+    confirmed_profile_state_hash = None
+    confirmed_profile_fallback = None
+    candidate_profile_id = str(
+        metadata.get("profile_id")
+        or (
+            (metadata.get("mapping_profile_v2_candidate") or {}).get("profile_id")
+            if isinstance(metadata.get("mapping_profile_v2_candidate"), dict)
+            else ""
+        )
+        or ((previous or {}).get("profile_id") if isinstance(previous, dict) else "")
+        or ""
+    ).strip()
+    v2_candidate = metadata.get("mapping_profile_v2_candidate")
+    is_v2_confirmation = str(metadata.get("mapping_profile_kind") or "") == "v2" or isinstance(v2_candidate, dict)
+    if is_v2_confirmation:
+        try:
+            profile_v2 = confirm_mapping_profile_v2(
+                profile_token or "",
+                candidate_profile_id=candidate_profile_id,
+                source_signature_hash=str(
+                    (v2_candidate or {}).get("source_signature_hash")
+                    or signature.hash
+                ),
+                target_template_id=target_template_id,
+                mapping=mapping,
+                defaults=clean_defaults,
+                formulas=formulas or {},
+                expected_version=int(
+                    metadata.get("mapping_profile_version")
+                    or (
+                        v2_candidate.get("version")
+                        if isinstance(v2_candidate, dict)
+                        else 0
+                    )
+                    or 0
+                ),
+            )
+        except MappingProfileV2UnavailableError as exc:
+            is_v2_confirmation = False
+            confirmed_profile_fallback = f"Mapping Profile V2 không khả dụng: {exc}"
+        except (MappingProfileV2Error, ValueError) as exc:
+            raise ValueError(f"Không thể xác nhận mapping profile V2: {exc}") from exc
+        if is_v2_confirmation:
+            profile = profile_v2
+            confirmed_profile_kind = "v2"
+            confirmed_profile_version = (
+                profile_v2.version
+                if hasattr(profile_v2, "version")
+                else profile_v2.get("version")
+            )
+            confirmed_profile_state_hash = (
+                profile_v2.state_hash
+                if hasattr(profile_v2, "state_hash")
+                else profile_v2.get("state_hash")
+            )
+    if not is_v2_confirmation and profile_token:
         try:
             profile = save_mapping_profile(
                 profile_token,
@@ -411,7 +775,7 @@ def confirm_mapping(
             )
         except MappingProfileClientError as exc:
             raise ValueError(str(exc)) from exc
-    else:
+    elif not is_v2_confirmation:
         profile = ProfileStore().save_profile(
             name=profile_name or f"{target_template_id} profile",
             target_template_id=target_template_id,
@@ -426,23 +790,72 @@ def confirm_mapping(
             previous=previous,
             owner_scope=owner_scope,
         )
-    metadata["profile_id"] = profile.id
+    confirmed_profile_id = (
+        profile.id
+        if hasattr(profile, "id")
+        else profile.get("profile_id") or profile.get("id")
+    )
+    metadata["profile_id"] = confirmed_profile_id
+    metadata["mapping_profile_kind"] = confirmed_profile_kind
+    metadata["mapping_profile_version"] = confirmed_profile_version
+    metadata["profile_state_hash"] = confirmed_profile_state_hash
+    metadata["mapping_profile_state_hash"] = confirmed_profile_state_hash
+    metadata["mapping_profile_fallback"] = (
+        "legacy_v1" if confirmed_profile_fallback else None
+    )
+    metadata["mapping_profile_fallback_reason"] = confirmed_profile_fallback
     metadata["confirmed"] = {
         "mapping": mapping,
         "defaults": clean_defaults,
         "formulas": formulas or {},
     }
+    derived = None
+    if session_id and revision is not None and state_hash:
+        derived = OperationStore(
+            conversion_context_token=conversion_context_token
+        ).create_revision(
+            session_id,
+            expected_revision=revision,
+            expected_state_hash=state_hash,
+            changes={},
+            context_changes={
+                "mapping": mapping,
+                "defaults": clean_defaults,
+                "formulas": formulas or {},
+                "profile_id": profile.id,
+                UPLOAD_METADATA_CONTEXT_KEY: _portable_upload_metadata(metadata),
+            },
+            created_by=owner_scope,
+            activate=True,
+        )
     _write_metadata(upload_id, metadata)
     ProfileStore().record_run(
         run_id=upload_id,
         upload_filename=metadata.get("filename", ""),
         target_template_id=target_template_id,
-        profile_id=profile.id,
+        profile_id=confirmed_profile_id,
         mapping_source="confirmed",
         status="confirmed",
         issues=[],
     )
-    return {"profile_id": profile.id, "saved": True}
+    payload = {
+        "profile_id": confirmed_profile_id,
+        "saved": True,
+        "mapping_profile_kind": confirmed_profile_kind,
+        "mapping_profile_version": confirmed_profile_version,
+        "profile_state_hash": confirmed_profile_state_hash,
+        "mapping_profile_fallback": (
+            "legacy_v1" if confirmed_profile_fallback else None
+        ),
+        "mapping_profile_fallback_reason": confirmed_profile_fallback,
+    }
+    if derived is not None:
+        payload["session"] = {
+            "session_id": session_id,
+            "active_revision": derived.revision,
+            "state_hash": derived.state_hash,
+        }
+    return payload
 
 
 def export_confirmed_profile(
@@ -452,29 +865,93 @@ def export_confirmed_profile(
     acknowledge_warnings: bool = False,
     conversion_context_token: str | None = None,
     student_context_token: str | None = None,
+    session_id: str | None = None,
+    revision: int | None = None,
+    state_hash: str | None = None,
+    requested_profile_version: int | None = None,
+    requested_profile_state_hash: str | None = None,
 ) -> tuple[bytes, str]:
-    _assert_student_upload_context(upload_id, student_context_token, "export")
-    table = _read_upload_table(upload_id)
+    student_claims = _assert_student_upload_context(
+        upload_id, student_context_token, "export"
+    )
+    _assert_operation_state(
+        upload_id,
+        session_id,
+        revision,
+        state_hash,
+        conversion_context_token=conversion_context_token,
+        student_owner_scope=student_claims.owner_scope if student_claims else None,
+        required_scope="export",
+        require_bound_session=True,
+    )
+    if session_id:
+        edited_rows = None
+    table = _read_upload_table(upload_id, conversion_context_token=conversion_context_token)
     metadata = _read_metadata(upload_id)
     context, context_status, context_message = _context_for_upload(
         upload_id, conversion_context_token
     )
     owner_scope = _owner_scope_from_upload_metadata(metadata)
     profile_token = student_context_token or conversion_context_token
-    if profile_token:
+    profile_kind = str(metadata.get("mapping_profile_kind") or "v1")
+    profile_version = int(metadata.get("mapping_profile_version") or 0)
+    profile_v2 = None
+    if profile_token and profile_kind == "v2":
+        try:
+            profile_v2 = get_mapping_profile_v2(profile_token, profile_id)
+        except MappingProfileV2Error as exc:
+            raise ValueError(str(exc)) from exc
+        if profile_v2.owner_scope != owner_scope:
+            raise ValueError("Mapping profile không thuộc hồ sơ doanh nghiệp đang xử lý")
+        expected_profile_state_hash = str(metadata.get("profile_state_hash") or "").strip()
+        if requested_profile_version is not None and int(requested_profile_version) != int(
+            metadata.get("mapping_profile_version") or 0
+        ):
+            raise MappingProfileV2Error(
+                "Mapping profile V2 version không khớp phiên đã xác nhận"
+            )
+        if requested_profile_state_hash and requested_profile_state_hash != expected_profile_state_hash:
+            raise MappingProfileV2Error(
+                "Mapping profile V2 state hash không khớp phiên đã xác nhận"
+            )
+        if (
+            profile_v2.version != profile_version
+            or not expected_profile_state_hash
+            or profile_v2.state_hash != expected_profile_state_hash
+        ):
+            raise MappingProfileV2Error(
+                "Mapping profile V2 đã thay đổi; vui lòng xác nhận lại mapping"
+            )
+        target_template_id = (
+            profile_v2.target_template_id
+            or str(metadata.get("target_template_id") or "")
+        )
+        profile_mapping = profile_v2.mapping
+        profile_defaults = profile_v2.defaults
+        profile_formulas = profile_v2.formulas
+        profile_version = profile_v2.version
+    elif profile_token:
         try:
             profile = get_mapping_profile(profile_token, profile_id)
         except MappingProfileClientError as exc:
             raise ValueError(str(exc)) from exc
         if profile.owner_scope != owner_scope:
             raise ValueError("Mapping profile không thuộc hồ sơ doanh nghiệp đang xử lý")
+        target_template_id = profile.target_template_id
+        profile_mapping = profile.mapping
+        profile_defaults = profile.defaults
+        profile_formulas = profile.formulas
     else:
         profile = ProfileStore().get_profile(profile_id, owner_scope=owner_scope)
-    template = get_misa_template(profile.target_template_id)
-    clean_mapping = sanitize_mapping_for_template(profile.target_template_id, profile.mapping)
+        target_template_id = profile.target_template_id
+        profile_mapping = profile.mapping
+        profile_defaults = profile.defaults
+        profile_formulas = profile.formulas
+    template = get_misa_template(target_template_id)
+    clean_mapping = sanitize_mapping_for_template(target_template_id, profile_mapping)
     clean_defaults = sanitize_defaults_for_template(
-        profile.target_template_id,
-        profile.defaults,
+        target_template_id,
+        profile_defaults,
         template.headers,
     )
     if edited_rows:
@@ -485,7 +962,7 @@ def export_confirmed_profile(
             template.headers,
             clean_mapping,
             clean_defaults,
-            profile.formulas,
+            profile_formulas,
         )
     resolution = resolve_master_data(
         rows,
@@ -495,10 +972,10 @@ def export_confirmed_profile(
     rows = resolution.rows
     readiness = build_readiness_report(
         table,
-        profile.target_template_id,
+        target_template_id,
         clean_mapping,
         clean_defaults,
-        profile.formulas,
+        profile_formulas,
         edited_rows=rows,
     )
     readiness = add_master_data_resolutions(
@@ -513,7 +990,55 @@ def export_confirmed_profile(
         raise ReadinessGateError(readiness)
     output_path = _upload_dir(upload_id) / "misa_export.xls"
     write_xls_from_template(template.workbook, rows, output_path)
-    return output_path.read_bytes(), f"Import misa {upload_id[:8]}.xls"
+    if profile_token and profile_kind == "v2":
+        confirmation_error = None
+        try:
+            if profile_v2 is None or not profile_v2.state_hash:
+                raise MappingProfileV2Error(
+                    "Mapping Profile V2 thiếu immutable profile state hash"
+                )
+            record_confirmed_export_v2(
+                profile_token,
+                profile_id=profile_id,
+                version=profile_version,
+                upload_id=upload_id,
+                state_hash=profile_v2.state_hash,
+            )
+            confirmation_status = "recorded"
+        except MappingProfileV2Error as exc:
+            confirmation_status = "failed"
+            confirmation_error = str(exc)
+        metadata["mapping_profile_v2_confirmation"] = {
+            "status": confirmation_status,
+            "profile_id": profile_id,
+            "profile_version": profile_version,
+            "profile_state_hash": profile_v2.state_hash if profile_v2 else "",
+            "error": confirmation_error,
+        }
+        _write_metadata(upload_id, metadata)
+        if confirmation_status != "recorded":
+            output_path.unlink(missing_ok=True)
+            raise MappingProfileV2Error(
+                "Không thể ghi nhận confirmed export cho Mapping Profile V2: "
+                f"{confirmation_error or 'lỗi không xác định'}"
+            )
+    elif profile_token:
+        try:
+            mark_mapping_profile_used(profile_token, profile_id)
+        except MappingProfileClientError:
+            pass
+    else:
+        ProfileStore().mark_used(profile_id, owner_scope=owner_scope)
+    output = output_path.read_bytes()
+    if session_id:
+        OperationStore(conversion_context_token=conversion_context_token).put_artifact(
+            session_id,
+            kind="output",
+            revision=int(revision or 1),
+            content=output,
+            content_type="application/vnd.ms-excel",
+        )
+    return output, f"Import misa {upload_id[:8]}.xls"
 
 
 def _context_for_analyze(
@@ -522,6 +1047,8 @@ def _context_for_analyze(
     if not token:
         return None, "not_configured", None, None
     claims = verify_conversion_context_token(token)
+    if not claims.get("workspace_id"):
+        return None, "not_configured", None, claims
     try:
         return fetch_master_data_context(token), "connected", None, claims
     except ConversionContextError as exc:
@@ -592,11 +1119,16 @@ def _context_for_upload(
         raise ValueError("Thiếu conversion context của hồ sơ doanh nghiệp")
     claims = verify_conversion_context_token(token)
     if (
-        str(claims.get("workspace_id")) != str(expected.get("workspace_id"))
+        conversion_context_owner_scope(claims)
+        != str(expected.get("owner_scope") or "")
+        or str(claims.get("workspace_id") or "")
+        != str(expected.get("workspace_id") or "")
         or str(claims.get("snapshot_set_hash"))
         != str(expected.get("snapshot_set_hash"))
     ):
         raise ValueError("Conversion context không khớp với lần phân tích ban đầu")
+    if not claims.get("workspace_id"):
+        return None, "not_configured", None
     try:
         return fetch_master_data_context(token), "connected", None
     except ConversionContextError as exc:
@@ -732,8 +1264,15 @@ def _is_known_deterministic_schema(
     return True
 
 
-def _read_upload_table(upload_id: str) -> InputTable:
+def _read_upload_table(
+    upload_id: str, *, conversion_context_token: str | None = None
+) -> InputTable:
     metadata = _read_metadata(upload_id)
+    session_id = str(metadata.get("operation_session_id") or "")
+    if session_id:
+        return OperationStore(
+            conversion_context_token=conversion_context_token
+        ).materialize_table(session_id)
     return read_input_table(Path(metadata["input_path"]))
 
 
@@ -745,14 +1284,506 @@ def _metadata_path(upload_id: str) -> Path:
     return _upload_dir(upload_id) / "metadata.json"
 
 
-def _read_metadata(upload_id: str) -> dict[str, Any]:
+def _read_metadata(
+    upload_id: str,
+    *,
+    operation_store: OperationStore | None = None,
+    session: Any | None = None,
+) -> dict[str, Any]:
     path = _metadata_path(upload_id)
-    if not path.exists():
+    if path.exists():
+        metadata = json.loads(path.read_text(encoding="utf-8"))
+        if operation_store is not None and session is not None:
+            _assert_upload_metadata_binding(metadata, upload_id, session)
+            _restore_upload_bytes_if_missing(metadata, operation_store, session)
+        return metadata
+    if operation_store is None or session is None:
         raise KeyError(f"Upload not found: {upload_id}")
-    return json.loads(path.read_text(encoding="utf-8"))
+    return _restore_upload_from_session(upload_id, operation_store, session)
 
 
 def _write_metadata(upload_id: str, metadata: dict[str, Any]) -> None:
     path = _metadata_path(upload_id)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
+
+def apply_optional_ai_mapping(
+    *,
+    table: InputTable,
+    target_template_id: str,
+    template_headers: list[str],
+    fallback: MappingSuggestion,
+    issues: list[dict[str, Any]],
+    use_ai: bool,
+    ai_mapping_opt_in: bool,
+    nearby_profiles: list[dict[str, Any]] | None = None,
+) -> tuple[MappingSuggestion, dict[str, str] | None]:
+    """Apply an explicitly authorized AI suggestion, never AI severity."""
+    if not use_ai or not ai_mapping_opt_in or not ai_mapping_client.ai_enabled():
+        return fallback, None
+    if not _should_request_ai_mapping(
+        table=table,
+        target_template_id=target_template_id,
+        suggestion=fallback,
+        issues=issues,
+    ):
+        return fallback, None
+
+    try:
+        ai_payload = ai_mapping_client.request_mapping_suggestion(
+            ai_suggestion_payload(
+                table,
+                target_template_id,
+                template_headers,
+                nearby_profiles=nearby_profiles,
+            )
+        )
+        candidate = normalize_ai_suggestion(
+            ai_payload,
+            fallback,
+            target_template_id=target_template_id,
+            target_headers=template_headers,
+        )
+        semantic_issues = validate_mapping_semantics(
+            target_template_id=target_template_id,
+            template_headers=template_headers,
+            source_headers=table.headers,
+            mapping=candidate.mapping,
+            defaults=candidate.defaults,
+            formulas=candidate.formulas,
+            sample_rows=table.rows[:20],
+        )
+        if any(issue.severity == "blocker" for issue in semantic_issues):
+            raise ai_mapping_client.AiMappingError(
+                "AI mapping không vượt qua kiểm tra ngữ nghĩa.",
+                gateway="online",
+                model="available",
+            )
+        mapping_state = candidate.source if candidate.source in {"ai", "mixed"} else "heuristic"
+        return candidate, {
+            "gateway": "online",
+            "model": "available",
+            "mapping": mapping_state,
+        }
+    except ai_mapping_client.AiMappingError as exc:
+        return replace(
+            fallback,
+            warnings=[*fallback.warnings, "ai_unavailable"],
+        ), {
+            "gateway": exc.gateway,
+            "model": exc.model,
+            "mapping": "failed",
+        }
+    except (TypeError, ValueError):
+        return replace(
+            fallback,
+            warnings=[*fallback.warnings, "ai_unavailable"],
+        ), {
+            "gateway": "online",
+            "model": "unknown",
+            "mapping": "failed",
+        }
+
+def _trusted_preallocated_session_binding(
+    claims: dict[str, Any] | None,
+    *,
+    operation_session_id: str | None,
+    conversion_run_id: str | None,
+) -> tuple[str | None, str | None]:
+    supplied_session_id = str(operation_session_id or "").strip()
+    supplied_run_id = str(conversion_run_id or "").strip()
+    claimed_session_id = str((claims or {}).get("operation_session_id") or "").strip()
+    claimed_run_id = str((claims or {}).get("conversion_run_id") or "").strip()
+    if not supplied_session_id and not claimed_session_id:
+        return None, claimed_run_id or None
+    if (
+        not supplied_session_id
+        or not claimed_session_id
+        or supplied_session_id != claimed_session_id
+    ):
+        raise ValueError("Operation session không khớp conversion context")
+    if not supplied_run_id or supplied_run_id != claimed_run_id:
+        raise ValueError("Conversion run không khớp conversion context")
+    return supplied_session_id, supplied_run_id
+
+def sync_mapping_session(
+    *,
+    upload_id: str,
+    target_template_id: str,
+    mapping: dict[str, Any],
+    defaults: dict[str, Any] | None = None,
+    formulas: dict[str, str] | None = None,
+    conversion_context_token: str | None = None,
+    student_context_token: str | None = None,
+    session_id: str,
+    revision: int,
+    state_hash: str,
+) -> dict[str, Any]:
+    student_claims = _assert_student_upload_context(
+        upload_id, student_context_token, "attempt"
+    )
+    _assert_operation_state(
+        upload_id,
+        session_id,
+        revision,
+        state_hash,
+        conversion_context_token=conversion_context_token,
+        student_owner_scope=student_claims.owner_scope if student_claims else None,
+        required_scope="confirm",
+    )
+    metadata = _read_metadata(upload_id)
+    if str(metadata.get("target_template_id") or "") != target_template_id:
+        raise ValueError("Template không khớp với lần phân tích ban đầu")
+    template = get_misa_template(target_template_id)
+    clean_defaults = sanitize_defaults_for_template(
+        target_template_id, defaults, template.headers
+    )
+    clean_formulas = dict(formulas or {})
+    desired = {
+        "mapping": dict(mapping),
+        "defaults": clean_defaults,
+        "formulas": clean_formulas,
+    }
+    store = OperationStore(conversion_context_token=conversion_context_token)
+    current = store.active_context(session_id)
+    if all(current.get(key) == value for key, value in desired.items()):
+        session = store.assert_current(
+            session_id,
+            expected_revision=revision,
+            expected_state_hash=state_hash,
+        )
+        return {
+            "session": {
+                "session_id": session.session_id,
+                "active_revision": session.active_revision,
+                "state_hash": session.state_hash,
+            },
+            "changed": False,
+        }
+    derived = store.create_revision(
+        session_id,
+        expected_revision=revision,
+        expected_state_hash=state_hash,
+        changes={},
+        context_changes=desired,
+        created_by=_owner_scope_from_upload_metadata(metadata),
+        activate=True,
+    )
+    return {
+        "session": {
+            "session_id": session_id,
+            "active_revision": derived.revision,
+            "state_hash": derived.state_hash,
+        },
+        "changed": True,
+    }
+
+def _mapping_profile_v2_payload(
+    match: Any | None, mapping_source: str
+) -> dict[str, Any] | None:
+    if match is None:
+        return None
+    profile = match.profile
+    drift = [
+        {
+            "id": field,
+            "current": field,
+            "suggestion": "Cần người dùng xác nhận thay đổi cấu trúc",
+        }
+        for field in match.warnings
+    ]
+    return {
+        "match_tier": match.match_tier,
+        "mapping_source": mapping_source,
+        "profile_id": profile.id,
+        "confidence": profile.confidence,
+        "drift": drift,
+        "drift_count": len(drift),
+        "risk_flags": list(profile.risk_flags),
+        "approved_risk_flags": list(match.approved_risk_flags),
+        "unapproved_risk_flags": list(match.unapproved_risk_flags),
+        "approval_state": match.approval_state,
+        "approval_applies_to_match": match.approval_applies_to_match,
+        "can_suggest": match.can_suggest,
+        "requires_preview": match.requires_preview,
+        "warnings": list(match.warnings),
+        "profile": {
+            "id": profile.id,
+            "name": profile.name,
+            "version": profile.version,
+            "status": profile.status,
+            "source_family": profile.source_family,
+            "document_type": profile.document_type,
+            "target_template_id": profile.target_template_id,
+            "target_template_version": profile.target_template_version,
+            "risk_flags": list(profile.risk_flags),
+            "state_hash": profile.state_hash,
+            "approved_by": profile.approved_by or None,
+            "confidence": profile.confidence,
+        },
+    }
+
+def _upload_cache_ttl_seconds() -> int:
+    configured = os.getenv(
+        "UPLOAD_CACHE_TTL_SECONDS",
+        os.getenv("OPERATION_SESSION_TTL_SECONDS", "3600"),
+    )
+    try:
+        seconds = int(configured)
+    except (TypeError, ValueError):
+        seconds = 3600
+    return min(24 * 60 * 60, max(60, seconds))
+
+def _assert_operation_state(
+    upload_id: str,
+    session_id: str | None,
+    revision: int | None,
+    state_hash: str | None,
+    *,
+    conversion_context_token: str | None = None,
+    student_owner_scope: str | None = None,
+    required_scope: str,
+    require_bound_session: bool = False,
+) -> None:
+    if not session_id or revision is None or not state_hash:
+        if student_owner_scope:
+            metadata = _read_metadata(upload_id)
+            if _owner_scope_from_upload_metadata(metadata) != student_owner_scope:
+                raise ConversionContextError(
+                    "Student owner không khớp upload", status_code=403
+                )
+            bound_session_id = str(metadata.get("operation_session_id") or "")
+            if require_bound_session and not bound_session_id:
+                raise OperationStoreConflictError("Upload chưa gắn operation session")
+            if bound_session_id:
+                session = OperationStore().load_session(bound_session_id)
+                if session.upload_id != upload_id or session.owner_scope != student_owner_scope:
+                    raise KeyError("Operation session not found")
+            return
+        raise OperationStoreConflictError(
+            "Mapping operation phải gửi session_id, revision và state_hash"
+        )
+    store = OperationStore(conversion_context_token=conversion_context_token)
+    session = store.assert_current(
+        session_id,
+        expected_revision=revision,
+        expected_state_hash=state_hash,
+    )
+    if session.upload_id != upload_id:
+        raise KeyError("Operation session not found")
+    if student_owner_scope == session.owner_scope:
+        metadata = _read_metadata(
+            upload_id,
+            operation_store=store,
+            session=session,
+        )
+    else:
+        if not conversion_context_token:
+            raise ConversionContextError(
+                "Conversion context token là bắt buộc", status_code=401
+            )
+        claims = verify_conversion_context_token(conversion_context_token)
+        store.assert_context_binding(
+            session_id,
+            claims,
+            required_scope=required_scope,
+        )
+        metadata = _read_metadata(
+            upload_id,
+            operation_store=store,
+            session=session,
+        )
+    if str(metadata.get("operation_session_id") or "") != session_id:
+        raise KeyError("Operation session not found")
+
+def _portable_upload_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: value
+        for key, value in metadata.items()
+        if key != "input_path"
+    }
+
+def _restore_upload_from_session(
+    upload_id: str,
+    operation_store: OperationStore,
+    session: Any,
+) -> dict[str, Any]:
+    context = operation_store.context_for_revision(
+        session.session_id,
+        session.active_revision,
+    )
+    portable = context.get(UPLOAD_METADATA_CONTEXT_KEY)
+    if not isinstance(portable, dict):
+        raise OperationStoreError("Session thiếu upload metadata")
+    metadata = dict(portable)
+    _assert_upload_metadata_binding(metadata, upload_id, session)
+    filename = str(metadata.get("filename") or "").strip()
+    suffix = Path(filename).suffix.lower()
+    if suffix not in {".xls", ".xlsx"}:
+        raise OperationStoreError("Upload metadata có định dạng file không hợp lệ")
+    input_path = _upload_dir(upload_id) / f"input{suffix}"
+    metadata["input_path"] = str(input_path)
+    metadata["raw_sha256"] = session.raw_sha256
+    session_expires_at = int(session.expires_at.timestamp())
+    metadata["expires_at"] = session_expires_at
+    metadata["operation_session_expires_at"] = session_expires_at
+    _restore_upload_bytes_if_missing(metadata, operation_store, session)
+    _write_metadata(upload_id, metadata)
+    return metadata
+
+def _restore_upload_bytes_if_missing(
+    metadata: dict[str, Any],
+    operation_store: OperationStore,
+    session: Any,
+) -> None:
+    input_path = Path(str(metadata.get("input_path") or ""))
+    expected_sha256 = str(getattr(session, "raw_sha256", "") or "").strip().lower()
+    if not _is_sha256(expected_sha256):
+        raise OperationStoreError("Upload metadata checksum không hợp lệ")
+    if input_path.is_file():
+        try:
+            local_sha256 = _sha256_file(input_path)
+        except OSError:
+            local_sha256 = ""
+        if local_sha256 == expected_sha256:
+            return
+
+    content = operation_store.get_artifact(
+        session.session_id,
+        kind="upload",
+        revision=1,
+    )
+    if content is None:
+        raise OperationStoreError("Upload artifact không khả dụng")
+    if hashlib.sha256(content).hexdigest() != expected_sha256:
+        raise OperationStoreConflictError("Upload artifact checksum không khớp")
+    input_path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = input_path.with_name(f".{input_path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        temporary.write_bytes(content)
+        temporary.replace(input_path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+def _is_sha256(value: str) -> bool:
+    return len(value) == 64 and all(char in "0123456789abcdef" for char in value)
+
+def _assert_upload_metadata_binding(
+    metadata: dict[str, Any],
+    upload_id: str,
+    session: Any,
+) -> None:
+    context = metadata.get("conversion_context")
+    context = context if isinstance(context, dict) else {}
+    expected = {
+        "upload_id": session.upload_id,
+        "operation_session_id": session.session_id,
+        "target_template_id": session.target_template_id,
+        "conversion_run_id": str(
+            session.revisions[0].context.get("conversion_run_id") or ""
+        ),
+        "owner_scope": session.owner_scope,
+    }
+    actual = {
+        "upload_id": str(metadata.get("upload_id") or ""),
+        "operation_session_id": str(metadata.get("operation_session_id") or ""),
+        "target_template_id": str(metadata.get("target_template_id") or ""),
+        "conversion_run_id": str(
+            metadata.get("conversion_run_id") or context.get("conversion_run_id") or ""
+        ),
+        "owner_scope": str(
+            metadata.get("owner_scope") or context.get("owner_scope") or ""
+        ),
+    }
+    context_binding_invalid = bool(context) and (
+        str(context.get("user_id") or "") != str(session.user_id or "")
+        or str(context.get("workspace_id") or "") != str(session.workspace_id or "")
+    )
+    if upload_id != session.upload_id or actual != expected or context_binding_invalid:
+        raise OperationStoreError("Upload metadata binding không hợp lệ")
+
+def _upload_content_type(filename: str) -> str:
+    if Path(filename or "").suffix.lower() == ".xls":
+        return "application/vnd.ms-excel"
+    return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+def cleanup_expired_uploads(now: float | int | None = None) -> list[str]:
+    """Delete expired converter cache entries without deleting active sessions."""
+    current_time = float(time.time() if now is None else now)
+    if not UPLOAD_ROOT.is_dir():
+        return []
+
+    deleted: list[str] = []
+    with _UPLOAD_CACHE_LOCK:
+        for upload_dir in sorted(UPLOAD_ROOT.iterdir(), key=lambda path: path.name):
+            if not upload_dir.is_dir():
+                continue
+            metadata_path = upload_dir / "metadata.json"
+            if not metadata_path.is_file():
+                continue
+            try:
+                metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+                if not isinstance(metadata, dict):
+                    continue
+            except (OSError, json.JSONDecodeError):
+                # Preserve malformed entries for forensic cleanup instead of guessing.
+                continue
+
+            expires_at = _metadata_timestamp(metadata.get("expires_at"))
+            if expires_at is None:
+                created_at = _metadata_timestamp(metadata.get("created_at"))
+                if created_at is None:
+                    try:
+                        created_at = metadata_path.stat().st_mtime
+                    except OSError:
+                        continue
+                expires_at = created_at + _upload_cache_ttl_seconds()
+            if expires_at > current_time:
+                continue
+            if _upload_cache_is_active(metadata, upload_dir, current_time):
+                continue
+
+            try:
+                shutil.rmtree(upload_dir)
+            except OSError:
+                continue
+            if not upload_dir.exists():
+                deleted.append(upload_dir.name)
+    return deleted
+
+def _upload_cache_is_active(
+    metadata: dict[str, Any], upload_dir: Path, current_time: float
+) -> bool:
+    student_metadata_path = upload_dir / "student_metadata.json"
+    if student_metadata_path.is_file():
+        try:
+            student_metadata = json.loads(
+                student_metadata_path.read_text(encoding="utf-8")
+            )
+            student_expires_at = _metadata_timestamp(student_metadata.get("expires_at"))
+            if student_expires_at is not None and student_expires_at > current_time:
+                return True
+        except (OSError, json.JSONDecodeError):
+            return True
+
+    if not str(metadata.get("operation_session_id") or "").strip():
+        return False
+    session_expires_at = _metadata_timestamp(
+        metadata.get("operation_session_expires_at")
+        or metadata.get("session_expires_at")
+    )
+    # Legacy bound entries have no trustworthy remote expiry. Keep them safe.
+    return session_expires_at is None
+
+def _metadata_timestamp(value: Any) -> float | None:
+    try:
+        timestamp = float(value)
+    except (TypeError, ValueError):
+        return None
+    return timestamp if timestamp >= 0 else None

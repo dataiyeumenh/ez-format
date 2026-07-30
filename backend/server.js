@@ -8,6 +8,13 @@ const { getPaymentSettlementReadiness } = require("./config/db");
 const {
   migrateMappingProfileOwnerScope,
 } = require("./services/mappingProfileMigrationService");
+const {
+  ensureMappingProfileV2Indexes,
+  migrateMappingProfilesV1ToV2,
+} = require("./services/mappingProfileV2MigrationService");
+const {
+  getRuntimeCapabilities,
+} = require("./services/runtimeCapabilitiesService");
 const { getRevenue } = require("./controllers/adminController");
 const { protect, adminOnly } = require("./middleware/auth");
 const requireDb = require("./middleware/requireDb");
@@ -45,6 +52,8 @@ const voucherReconstructionEnabled =
   "true";
 const studentAssistantEnabled =
   String(process.env.STUDENT_ASSISTANT_ENABLED || "false").toLowerCase() === "true";
+const runtimeCapabilities = getRuntimeCapabilities();
+const mappingProfileV2Enabled = runtimeCapabilities.mapping_profile_v2;
 const converterGatewayUsageReady = isConverterGatewayUsageReady();
 
 // CORS config: allow localhost for dev + Vercel production URL
@@ -100,17 +109,31 @@ if (voucherReconstructionEnabled) {
 if (studentAssistantEnabled) {
   app.use("/api/student", require("./routes/student"));
 }
+if (mappingProfileV2Enabled) {
+  app.use("/api/mapping-profiles/v2", require("./routes/mappingProfilesV2"));
+}
 if (
   masterDataWorkspacesEnabled ||
   voucherReconstructionEnabled ||
-  studentAssistantEnabled
+  studentAssistantEnabled ||
+  mappingProfileV2Enabled
 ) {
   app.use("/api/internal", require("./routes/internal"));
+}
+if (mappingProfileV2Enabled) {
+  app.use(
+    "/api/internal/mapping-profiles/v2",
+    require("./routes/mappingProfilesV2").internalRouter,
+  );
 }
 
 // Backward-compatible alias for older admin revenue bundles.
 app.get("/api/revenue", requireDb, protect, adminOnly, getRevenue);
 app.get("/admin/revenue", requireDb, protect, adminOnly, getRevenue);
+
+app.get("/api/converter/capabilities", requireDb, protect, (_req, res) => {
+  res.json(runtimeCapabilities);
+});
 
 // Health check
 app.get("/api/health", (req, res) => {
@@ -122,6 +145,7 @@ app.get("/api/health", (req, res) => {
       voucherReconstruction: voucherReconstructionEnabled,
       converterGateway: converterGatewayUsageReady,
       studentAssistant: studentAssistantEnabled,
+      operations: runtimeCapabilities,
       paymentSettlement: getPaymentSettlementReadiness().ready,
     },
   });
@@ -132,6 +156,8 @@ const PORT = process.env.PORT || 5000;
 function createStartServer({
   connectDatabase = connectDB,
   migrateMappingProfiles = migrateMappingProfileOwnerScope,
+  ensureV2Indexes = ensureMappingProfileV2Indexes,
+  migrateMappingProfilesV2 = migrateMappingProfilesV1ToV2,
   migrateQuestionEvents = migrateStudentQuestionEventPrivacy,
   questionEventModel = StudentQuestionEvent,
   startArtifactSweeper = startConversionArtifactSweeper,
@@ -154,6 +180,18 @@ function createStartServer({
     if (!migration.skipped) {
       logger.log(
         `[DB] MappingProfile owner migration: ${migration.backfilled} backfilled, ${migration.droppedIndexes.length} obsolete index(es) dropped`,
+      );
+    }
+    const v2MigrationMode = String(
+      process.env.MAPPING_PROFILE_V2_MIGRATION_MODE || "off",
+    ).trim().toLowerCase();
+    if (mappingProfileV2Enabled || v2MigrationMode === "apply") {
+      await ensureV2Indexes();
+    }
+    const v2Migration = await migrateMappingProfilesV2({ mode: v2MigrationMode });
+    if (!v2Migration.skipped) {
+      logger.log(
+        `[DB] MappingProfile V2 migration (${v2Migration.mode}): ${v2Migration.created} created, ${v2Migration.skippedExisting} existing, ${v2Migration.quarantined} quarantined`,
       );
     }
     try {
