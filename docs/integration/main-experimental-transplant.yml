@@ -52,7 +52,7 @@ rules:
     reason: shared AI gateway boundary
   - path: converter/app/excel_io.py
     owner: compose
-    reason: shared spreadsheet I/O boundary
+    reason: Task 8 reviewed integration composition
   - path: converter/app/import_result_parser.py
     owner: source
     reason: final-reviewed MISA repair parser
@@ -70,10 +70,10 @@ rules:
     reason: shared MISA profiles boundary
   - path: converter/app/misa_readiness.py
     owner: compose
-    reason: shared MISA readiness boundary
+    reason: Task 8 reviewed integration composition
   - path: converter/app/misa_workflow.py
     owner: compose
-    reason: shared MISA workflow boundary
+    reason: Task 8 reviewed integration composition
   - path: frontend/.env.example
     owner: compose
     reason: shared frontend environment boundary
@@ -100,7 +100,7 @@ rules:
     reason: reconstruction availability must gate run creation
   - path: frontend/src/hooks/useConverterApi.js
     owner: compose
-    reason: frontend availability requires backend capability status
+    reason: Task 8 reviewed integration composition
   - path: frontend/src/hooks/useConverterApi.status.test.mjs
     owner: compose
     reason: converter and backend capability status regression coverage
@@ -136,7 +136,7 @@ rules:
     reason: remove unsupported student score persistence
   - path: backend/routes/converterGateway.js
     owner: compose
-    reason: expose authenticated converter capability state
+    reason: Task 8 reviewed integration composition
   - path: backend/routes/student.js
     owner: compose
     reason: bind source student routes to deploy-safe gateway
@@ -285,8 +285,8 @@ rules:
     owner: source
     reason: source-tested reconstruction payload redaction and endpoint validation
   - path: converter/app/document_grouping.py
-    owner: source
-    reason: source grouping helper required by canonical export manifests
+    owner: compose
+    reason: Task 8 reviewed integration composition
   - path: converter/app/document_totals.py
     owner: source
     reason: source-tested document total aggregation
@@ -319,7 +319,7 @@ rules:
     reason: reviewed integration ownership
   - path: backend/models/ConversionArtifact.js
     owner: compose
-    reason: reviewed integration ownership
+    reason: Task 8 reviewed integration composition
   - path: backend/models/CouponUsage.js
     owner: compose
     reason: reviewed integration ownership
@@ -340,10 +340,10 @@ rules:
     reason: reviewed integration ownership
   - path: backend/services/conversionArtifactService.js
     owner: compose
-    reason: reviewed integration ownership
+    reason: Task 8 reviewed integration composition
   - path: backend/services/converterGatewayService.js
     owner: compose
-    reason: reviewed integration ownership
+    reason: Task 8 reviewed integration composition
   - path: backend/services/couponService.js
     owner: compose
     reason: reviewed integration ownership
@@ -584,6 +584,129 @@ rules:
   - path: scripts/qa-release.ps1
     owner: compose
     reason: reviewed integration ownership
+  - path: backend/constants/misaImportRepair.js
+    owner: source
+    reason: Task 8 final-reviewed MISA import repair
+  - path: backend/models/MisaImportIssue.js
+    owner: source
+    reason: Task 8 final-reviewed MISA import repair
+  - path: backend/models/MisaImportRepairConfirmation.js
+    owner: source
+    reason: Task 8 final-reviewed MISA import repair
+  - path: backend/models/MisaImportRepairSession.js
+    owner: source
+    reason: Task 8 final-reviewed MISA import repair
+  - path: backend/models/MisaRetryBatch.js
+    owner: source
+    reason: Task 8 final-reviewed MISA import repair
+  - path: backend/services/misaImportRepairMigrationService.js
+    owner: source
+    reason: Task 8 final-reviewed MISA import repair
+  - path: backend/services/misaImportRepairService.js
+    owner: source
+    reason: Task 8 final-reviewed MISA import repair
+  - path: backend/services/misaImportRepairSweeper.js
+    owner: source
+    reason: Task 8 final-reviewed MISA import repair
+  - path: backend/services/misaManifestService.js
+    owner: source
+    reason: Task 8 final-reviewed MISA import repair
+  - path: backend/tests/misaImportRetry.test.js
+    owner: source
+    reason: Task 8 final-reviewed MISA import repair
+  - path: converter/app/export_manifest.py
+    owner: source
+    reason: Task 8 final-reviewed MISA import repair
+  - path: converter/app/import_repair_export.py
+    owner: source
+    reason: Task 8 final-reviewed MISA import repair
+  - path: converter/app/import_result_matching.py
+    owner: source
+    reason: Task 8 final-reviewed MISA import repair
+  - path: converter/app/import_result_models.py
+    owner: source
+    reason: Task 8 final-reviewed MISA import repair
+  - path: converter/app/import_result_workflow.py
+    owner: source
+    reason: Task 8 final-reviewed MISA import repair
+  - path: converter/tests/helpers/import_result_workbooks.py
+    owner: source
+    reason: Task 8 final-reviewed MISA import repair
+  - path: converter/tests/test_excel_security.py
+    owner: source
+    reason: Task 8 final-reviewed MISA import repair
+  - path: converter/tests/test_export_manifest.py
+    owner: source
+    reason: Task 8 final-reviewed MISA import repair
+  - path: converter/tests/test_import_repair_export.py
+    owner: source
+    reason: Task 8 final-reviewed MISA import repair
+  - path: converter/tests/test_import_result_api.py
+    owner: source
+    reason: Task 8 final-reviewed MISA import repair
+  - path: converter/tests/test_import_result_matching.py
+    owner: source
+    reason: Task 8 final-reviewed MISA import repair
+  - path: converter/tests/test_import_result_parser.py
+    owner: source
+    reason: Task 8 final-reviewed MISA import repair
+  - path: frontend/src/components/import-repair/ImportIssueWorkspace.jsx
+    owner: source
+    reason: Task 8 final-reviewed MISA import repair
+  - path: frontend/src/components/import-repair/ImportResultUploadStep.jsx
+    owner: source
+    reason: Task 8 final-reviewed MISA import repair
+  - path: frontend/src/components/import-repair/ImportSchemaMappingStep.jsx
+    owner: source
+    reason: Task 8 final-reviewed MISA import repair
+  - path: frontend/src/components/import-repair/MisaImportRepairPanel.jsx
+    owner: source
+    reason: Task 8 final-reviewed MISA import repair
+  - path: frontend/src/components/import-repair/MisaNewUserGuide.jsx
+    owner: source
+    reason: Task 8 final-reviewed MISA import repair
+  - path: frontend/src/components/import-repair/RetryBatchReview.jsx
+    owner: source
+    reason: Task 8 final-reviewed MISA import repair
+  - path: frontend/src/content/misaImportGuide.js
+    owner: source
+    reason: Task 8 final-reviewed MISA import repair
+  - path: frontend/src/utils/importRepairUx.js
+    owner: source
+    reason: Task 8 final-reviewed MISA import repair
+  - path: frontend/src/utils/importRepairUx.test.mjs
+    owner: source
+    reason: Task 8 final-reviewed MISA import repair
+  - path: frontend/tests/misa-import-repair.integration.spec.mjs
+    owner: source
+    reason: Task 8 final-reviewed MISA import repair
+  - path: backend/controllers/misaImportRepairController.js
+    owner: compose
+    reason: Task 8 final-reviewed MISA import repair
+  - path: backend/routes/admin.js
+    owner: compose
+    reason: Task 8 final-reviewed MISA import repair
+  - path: backend/tests/misaImportRepairGateway.test.js
+    owner: compose
+    reason: Task 8 final-reviewed MISA import repair
+  - path: backend/tests/misaImportRepairModels.test.js
+    owner: compose
+    reason: Task 8 final-reviewed MISA import repair
+  - path: backend/tests/misaImportRepairSecurity.test.js
+    owner: compose
+    reason: Task 8 final-reviewed MISA import repair
+  - path: converter/app/models.py
+    owner: compose
+    reason: Task 8 final-reviewed MISA import repair
+  - path: frontend/src/utils/converterGatewayContract.test.mjs
+    owner: compose
+    reason: Task 8 final-reviewed MISA import repair
+  - path: backend/models/MappingProfile.js
+    owner: compose
+    reason: preserve reviewed Task 7 integration ownership
+  - path: backend/models/MappingProfileV2MigrationAudit.js
+    owner: compose
+    reason: preserve reviewed Task 7 integration ownership
 excluded:
   - .superpowers/sdd/**
   - frontend/test-results/**

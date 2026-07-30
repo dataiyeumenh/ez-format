@@ -128,4 +128,11 @@ function forwardBinary({ path, body, contextToken, requestId, extraHeaders, meth
   return fetchConverter(path, { method, headers: internalHeaders({ contextToken, requestId, contentType: "application/json", extraHeaders }), body: JSON.stringify(body || {}) }, true);
 }
 
-module.exports = { assertConverterGatewayStartupConfig, converterBaseUrl, forwardBinary, forwardJson, forwardMultipart, internalHeaders, isConverterGatewayUsageReady, validateInterServiceUrl };
+function isConverterTimeoutError(error) {
+  return Number(error?.statusCode) === 504 ||
+    error?.name === "TimeoutError" ||
+    error?.name === "AbortError" ||
+    error?.code === "UND_ERR_CONNECT_TIMEOUT";
+}
+
+module.exports = { assertConverterGatewayStartupConfig, converterBaseUrl, forwardBinary, forwardJson, forwardMultipart, internalHeaders, isConverterGatewayUsageReady, isConverterTimeoutError, validateInterServiceUrl };

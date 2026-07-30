@@ -4,6 +4,19 @@ const multer = require("multer");
 const { protect } = require("../middleware/auth");
 const requireDb = require("../middleware/requireDb");
 const { forwardJson, forwardMultipart, forwardBinary } = require("../services/converterGatewayService");
+const {
+  applyMisaImportRepairBulk,
+  confirmMisaImportRepairMatch,
+  createMisaImportRetryBatch,
+  createMisaImportRepair,
+  downloadMisaImportRetryBatch,
+  issueMisaImportRepairHumanConfirmation,
+  readMisaImportRepair,
+  resolveMisaImportRepairIssue,
+  setMisaImportRepairImportStatus,
+  simulateMisaImportRepairBulk,
+  submitMisaImportRepairSchema,
+} = require("../controllers/misaImportRepairController");
 
 const router = express.Router();
 const upload = multer({
@@ -16,6 +29,30 @@ const upload = multer({
     return callback(error);
   },
 });
+
+function getConverterMaxFileBytes() {
+  const configured = Number(process.env.CONVERTER_MAX_FILE_BYTES || 20 * 1024 * 1024);
+  return Number.isFinite(configured) && configured > 0 ? configured : 20 * 1024 * 1024;
+}
+
+function boundedExcelUpload(req, res, next) {
+  multer({
+    storage: multer.memoryStorage(),
+    limits: { fileSize: getConverterMaxFileBytes(), files: 1 },
+    fileFilter(_req, file, callback) {
+      if ([".xls", ".xlsx"].includes(path.extname(file.originalname).toLowerCase())) return callback(null, true);
+      const error = new Error("Only .xls and .xlsx files are supported");
+      error.statusCode = 400;
+      return callback(error);
+    },
+  }).single("file")(req, res, (error) => {
+    if (!error) return next();
+    if (error instanceof multer.MulterError && error.code === "LIMIT_FILE_SIZE") {
+      return res.status(413).json({ success: false, message: `File exceeds ${getConverterMaxFileBytes()} bytes` });
+    }
+    return res.status(Number(error.statusCode) || 400).json({ success: false, message: error.message });
+  });
+}
 
 function asyncRoute(handler) {
   return (req, res, next) => Promise.resolve(handler(req, res, next)).catch(next);
@@ -64,6 +101,17 @@ router.post("/mappings/preview", requireDb, protect, asyncRoute(async (req, res)
 router.post("/mappings/readiness", requireDb, protect, asyncRoute(async (req, res) => sendUpstream(await forwardJson({ path: "/api/v1/mappings/readiness", body: req.body, contextToken: gatewayContext(req), requestId: req.requestId }), res)));
 router.post("/mappings/confirm", requireDb, protect, asyncRoute(async (req, res) => sendUpstream(await forwardJson({ path: "/api/v1/mappings/confirm", body: req.body, contextToken: gatewayContext(req), requestId: req.requestId }), res)));
 router.post("/conversions/export", requireDb, protect, asyncRoute(async (req, res) => sendUpstream(await forwardBinary({ path: "/api/v1/conversions/export", body: req.body, contextToken: gatewayContext(req), requestId: req.requestId }), res)));
+router.post("/import-repairs", requireDb, protect, boundedExcelUpload, asyncRoute(createMisaImportRepair));
+router.post("/import-repairs/:repairId/schema", requireDb, protect, asyncRoute(submitMisaImportRepairSchema));
+router.get("/import-repairs/:repairId", requireDb, protect, asyncRoute(readMisaImportRepair));
+router.post("/import-repairs/:repairId/human-confirmations", requireDb, protect, asyncRoute(issueMisaImportRepairHumanConfirmation));
+router.post("/import-repairs/:repairId/issues/:issueId/confirm-match", requireDb, protect, asyncRoute(confirmMisaImportRepairMatch));
+router.post("/import-repairs/:repairId/document-groups/:groupId/import-status", requireDb, protect, asyncRoute(setMisaImportRepairImportStatus));
+router.post("/import-repairs/:repairId/issues/:issueId/resolve", requireDb, protect, asyncRoute(resolveMisaImportRepairIssue));
+router.post("/import-repairs/:repairId/bulk-actions/simulate", requireDb, protect, asyncRoute(simulateMisaImportRepairBulk));
+router.post("/import-repairs/:repairId/bulk-actions/apply", requireDb, protect, asyncRoute(applyMisaImportRepairBulk));
+router.post("/import-repairs/:repairId/retry-batches", requireDb, protect, asyncRoute(createMisaImportRetryBatch));
+router.get("/import-repairs/:repairId/retry-batches/:batchId/download", requireDb, protect, asyncRoute(downloadMisaImportRetryBatch));
 router.post("/sessions", requireDb, protect, asyncRoute(async (req, res) => sendUpstream(await forwardJson({ path: "/api/v1/sessions", method: "POST", body: req.body, contextToken: gatewayContext(req), requestId: req.requestId }), res)));
 router.get("/sessions/:id", requireDb, protect, asyncRoute(async (req, res) => sendUpstream(await forwardJson({ path: `/api/v1/sessions/${encodeURIComponent(req.params.id)}`, method: "GET", contextToken: gatewayContext(req), requestId: req.requestId }), res)));
 router.post("/sessions/:id/comparison-files", requireDb, protect, upload.single("file"), asyncRoute(async (req, res) => sendUpstream(await forwardMultipart({ path: `/api/v1/sessions/${encodeURIComponent(req.params.id)}/comparison-files`, file: req.file, fields: req.body, contextToken: gatewayContext(req), requestId: req.requestId }), res)));

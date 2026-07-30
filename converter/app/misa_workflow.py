@@ -7,7 +7,7 @@ import shutil
 import threading
 import time
 import uuid
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +20,7 @@ from app.ai_mapping_client import (
 )
 from app.conversion_types import BACKEND_ROOT
 from app.excel_io import InputTable, read_input_table, write_xls_from_template
+from app.export_manifest import build_export_manifest
 from app.misa_mapping import (
     BSN_SALES_DIRECT_MAPPING,
     MappingSuggestion,
@@ -66,7 +67,7 @@ from app.mapping_semantics import validate_mapping_semantics
 from app.misa_readiness import add_master_data_resolutions, build_readiness_report
 from app.misa_profiles import ProfileStore, local_mapping_owner_scope
 from app.misa_templates import get_misa_template, list_misa_templates
-from app.models import MisaReadinessReport
+from app.models import ExportManifestV1, MisaReadinessReport
 from app.normalization import normalize_header
 from app.operation_store import (
     OperationStore,
@@ -102,6 +103,20 @@ class ReadinessGateError(ValueError):
     def __init__(self, report: MisaReadinessReport) -> None:
         self.report = report
         super().__init__("MISA readiness gate failed")
+
+
+@dataclass(frozen=True)
+class _ResolvedConfirmedExport:
+    table: InputTable
+    metadata: dict[str, Any]
+    owner_scope: str
+    profile_token: str | None
+    profile_kind: str
+    profile_version: int
+    profile_v2: Any
+    template: Any
+    rows: list[dict[str, Any]]
+    row_origins: list[dict[str, Any]]
 
 
 def templates_payload() -> dict[str, Any]:
@@ -857,6 +872,360 @@ def confirm_mapping(
         }
     return payload
 
+
+def _export_resolved_confirmed_profile(
+    *,
+    resolved: _ResolvedConfirmedExport,
+    upload_id: str,
+    profile_id: str,
+    conversion_context_token: str | None,
+    session_id: str | None,
+    revision: int | None,
+    artifact_revision: int | None = None,
+) -> tuple[bytes, str]:
+    metadata = resolved.metadata
+    owner_scope = resolved.owner_scope
+    profile_token = resolved.profile_token
+    profile_kind = resolved.profile_kind
+    profile_version = resolved.profile_version
+    profile_v2 = resolved.profile_v2
+    template = resolved.template
+    rows = resolved.rows
+    output_path = _upload_dir(upload_id) / "misa_export.xls"
+    write_xls_from_template(template.workbook, rows, output_path)
+    if profile_token and profile_kind == "v2":
+        confirmation_error = None
+        try:
+            if profile_v2 is None or not profile_v2.state_hash:
+                raise MappingProfileV2Error(
+                    "Mapping Profile V2 thiếu immutable profile state hash"
+                )
+            record_confirmed_export_v2(
+                profile_token,
+                profile_id=profile_id,
+                version=profile_version,
+                upload_id=upload_id,
+                state_hash=profile_v2.state_hash,
+            )
+            confirmation_status = "recorded"
+        except MappingProfileV2Error as exc:
+            confirmation_status = "failed"
+            confirmation_error = str(exc)
+        metadata["mapping_profile_v2_confirmation"] = {
+            "status": confirmation_status,
+            "profile_id": profile_id,
+            "profile_version": profile_version,
+            "profile_state_hash": profile_v2.state_hash if profile_v2 else "",
+            "error": confirmation_error,
+        }
+        _write_metadata(upload_id, metadata)
+        if confirmation_status != "recorded":
+            output_path.unlink(missing_ok=True)
+            raise MappingProfileV2Error(
+                "Không thể ghi nhận confirmed export cho Mapping Profile V2: "
+                f"{confirmation_error or 'lỗi không xác định'}"
+            )
+    elif profile_token:
+        try:
+            mark_mapping_profile_used(profile_token, profile_id)
+        except MappingProfileClientError:
+            pass
+    else:
+        ProfileStore().mark_used(profile_id, owner_scope=owner_scope)
+    output = output_path.read_bytes()
+    if session_id:
+        OperationStore(conversion_context_token=conversion_context_token).put_artifact(
+            session_id,
+            kind="output",
+            revision=int(artifact_revision or revision or 1),
+            content=output,
+            content_type="application/vnd.ms-excel",
+        )
+    return output, f"Import misa {upload_id[:8]}.xls"
+
+
+def manifest_for_confirmed_profile(
+    *,
+    upload_id: str,
+    profile_id: str,
+    context_token: str | None,
+    conversion_id: str,
+    export_batch_id: str,
+    edited_rows: list[dict[str, Any]] | None = None,
+    acknowledge_warnings: bool = False,
+    session_id: str | None = None,
+    revision: int | None = None,
+    state_hash: str | None = None,
+    requested_profile_version: int | None = None,
+    requested_profile_state_hash: str | None = None,
+    vat_basis: str | None = None,
+) -> ExportManifestV1:
+    resolved = _resolve_confirmed_export(
+        upload_id=upload_id,
+        profile_id=profile_id,
+        edited_rows=edited_rows,
+        acknowledge_warnings=acknowledge_warnings,
+        conversion_context_token=context_token,
+        session_id=session_id,
+        revision=revision,
+        state_hash=state_hash,
+        requested_profile_version=requested_profile_version,
+        requested_profile_state_hash=requested_profile_state_hash,
+        vat_basis=vat_basis,
+    )
+    manifest = build_export_manifest(
+        conversion_id=conversion_id,
+        export_batch_id=export_batch_id,
+        target_template_id=resolved.template.id,
+        template_hash=template_version(resolved.template.workbook.path),
+        raw_file_hash=str(resolved.metadata.get("raw_sha256") or ""),
+        mapping_profile_id=profile_id,
+        mapping_profile_version=resolved.profile_version,
+        mapping_profile_state_hash=str(
+            resolved.metadata.get("profile_state_hash")
+            or resolved.metadata.get("mapping_profile_state_hash")
+            or ""
+        ) or None,
+        validation_ruleset_version="misa-readiness-v1",
+        output_rows=resolved.rows,
+        row_origins=resolved.row_origins,
+    )
+    _export_resolved_confirmed_profile(
+        resolved=resolved,
+        upload_id=upload_id,
+        profile_id=profile_id,
+        conversion_context_token=context_token,
+        session_id=session_id,
+        revision=revision,
+        artifact_revision=1,
+    )
+    if session_id:
+        content = manifest.model_dump_json().encode("utf-8")
+        OperationStore(conversion_context_token=context_token).put_artifact(
+            session_id,
+            kind="manifest",
+            revision=1,
+            content=content,
+            content_type="application/json",
+        )
+    return manifest
+
+def _mapped_rows_with_origins(
+    table: InputTable,
+    target_headers: list[str],
+    mapping: dict[str, Any],
+    defaults: dict[str, Any],
+    formulas: dict[str, str],
+    *,
+    trusted_source_rows: list[dict[str, Any]] | None = None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    rows: list[dict[str, Any]] = []
+    origins: list[dict[str, Any]] = []
+    source_entries = (
+        trusted_source_rows
+        if trusted_source_rows is not None
+        else [
+            {
+                "row_id": f"r{index + 1}",
+                "values": source_row,
+                "source_origin": {
+                    "raw_sheet": str(table.sheet_name or ""),
+                    "raw_rows": [table.header_row_index + index + 2],
+                },
+            }
+            for index, source_row in enumerate(table.rows)
+        ]
+    )
+    seen_row_ids: set[str] = set()
+    for entry in source_entries:
+        row_id = str(entry.get("row_id") or "")
+        source_row = entry.get("values")
+        source_origin = entry.get("source_origin")
+        trusted_identity = (
+            bool(row_id)
+            and row_id not in seen_row_ids
+            and isinstance(source_row, dict)
+            and isinstance(source_origin, dict)
+            and isinstance(source_origin.get("raw_sheet"), str)
+            and bool(source_origin.get("raw_sheet"))
+            and isinstance(source_origin.get("raw_rows"), list)
+            and bool(source_origin.get("raw_rows"))
+            and all(
+                isinstance(raw_row, int) and raw_row > 0
+                for raw_row in source_origin.get("raw_rows", [])
+            )
+        )
+        if not isinstance(source_row, dict):
+            continue
+        seen_row_ids.add(row_id)
+        mapped = apply_mapping(
+            replace(table, rows=[source_row]),
+            target_headers,
+            mapping,
+            defaults,
+            formulas,
+        )
+        rows.extend(mapped)
+        origins.extend(
+            dict(source_origin)
+            if trusted_identity
+            else {"raw_sheet": "", "raw_rows": []}
+            for _ in mapped
+        )
+    return rows, origins
+
+
+def _resolve_confirmed_export(
+    *,
+    upload_id: str,
+    profile_id: str,
+    edited_rows: list[dict[str, Any]] | None = None,
+    acknowledge_warnings: bool = False,
+    conversion_context_token: str | None = None,
+    student_context_token: str | None = None,
+    session_id: str | None = None,
+    revision: int | None = None,
+    state_hash: str | None = None,
+    requested_profile_version: int | None = None,
+    requested_profile_state_hash: str | None = None,
+    vat_basis: str | None = None,
+) -> _ResolvedConfirmedExport:
+    student_claims = _assert_student_upload_context(
+        upload_id, student_context_token, "export"
+    )
+    _assert_operation_state(
+        upload_id,
+        session_id,
+        revision,
+        state_hash,
+        conversion_context_token=conversion_context_token,
+        student_owner_scope=student_claims.owner_scope if student_claims else None,
+        required_scope="export",
+        require_bound_session=True,
+    )
+    trusted_session_rows = None
+    if session_id:
+        edited_rows = None
+        trusted_session_rows = OperationStore(
+            conversion_context_token=conversion_context_token
+        ).materialize_rows_with_ids(session_id, revision=revision)
+    table = _read_upload_table(upload_id, conversion_context_token=conversion_context_token)
+    metadata = _read_metadata(upload_id)
+    context, context_status, context_message = _context_for_upload(
+        upload_id, conversion_context_token
+    )
+    owner_scope = _owner_scope_from_upload_metadata(metadata)
+    profile_token = student_context_token or conversion_context_token
+    profile_kind = str(metadata.get("mapping_profile_kind") or "v1")
+    profile_version = int(metadata.get("mapping_profile_version") or 0)
+    profile_v2 = None
+    if profile_token and profile_kind == "v2":
+        try:
+            profile_v2 = get_mapping_profile_v2(profile_token, profile_id)
+        except MappingProfileV2Error as exc:
+            raise ValueError(str(exc)) from exc
+        if profile_v2.owner_scope != owner_scope:
+            raise ValueError("Mapping profile không thuộc hồ sơ doanh nghiệp đang xử lý")
+        expected_profile_state_hash = str(metadata.get("profile_state_hash") or "").strip()
+        if requested_profile_version is not None and int(requested_profile_version) != int(
+            metadata.get("mapping_profile_version") or 0
+        ):
+            raise MappingProfileV2Error(
+                "Mapping profile V2 version không khớp phiên đã xác nhận"
+            )
+        if requested_profile_state_hash and requested_profile_state_hash != expected_profile_state_hash:
+            raise MappingProfileV2Error(
+                "Mapping profile V2 state hash không khớp phiên đã xác nhận"
+            )
+        if (
+            profile_v2.version != profile_version
+            or not expected_profile_state_hash
+            or profile_v2.state_hash != expected_profile_state_hash
+        ):
+            raise MappingProfileV2Error(
+                "Mapping profile V2 đã thay đổi; vui lòng xác nhận lại mapping"
+            )
+        target_template_id = (
+            profile_v2.target_template_id
+            or str(metadata.get("target_template_id") or "")
+        )
+        profile_mapping = profile_v2.mapping
+        profile_defaults = profile_v2.defaults
+        profile_formulas = profile_v2.formulas
+        profile_version = profile_v2.version
+    elif profile_token:
+        try:
+            profile = get_mapping_profile(profile_token, profile_id)
+        except MappingProfileClientError as exc:
+            raise ValueError(str(exc)) from exc
+        if profile.owner_scope != owner_scope:
+            raise ValueError("Mapping profile không thuộc hồ sơ doanh nghiệp đang xử lý")
+        target_template_id = profile.target_template_id
+        profile_mapping = profile.mapping
+        profile_defaults = profile.defaults
+        profile_formulas = profile.formulas
+    else:
+        profile = ProfileStore().get_profile(profile_id, owner_scope=owner_scope)
+        target_template_id = profile.target_template_id
+        profile_mapping = profile.mapping
+        profile_defaults = profile.defaults
+        profile_formulas = profile.formulas
+    template = get_misa_template(target_template_id)
+    clean_mapping = sanitize_mapping_for_template(target_template_id, profile_mapping)
+    clean_defaults = sanitize_defaults_for_template(
+        target_template_id,
+        profile_defaults,
+        template.headers,
+    )
+    if edited_rows is not None:
+        rows = edited_rows
+        row_origins = [{"raw_sheet": "", "raw_rows": []} for _ in rows]
+    else:
+        rows, row_origins = _mapped_rows_with_origins(
+            table,
+            template.headers,
+            clean_mapping,
+            clean_defaults,
+            profile_formulas,
+            trusted_source_rows=trusted_session_rows,
+        )
+    resolution = resolve_master_data(
+        rows,
+        context,
+        source_system=_source_system_for_upload(upload_id),
+    )
+    rows = resolution.rows
+    readiness = build_readiness_report(
+        table,
+        target_template_id,
+        clean_mapping,
+        clean_defaults,
+        profile_formulas,
+        edited_rows=rows,
+        vat_basis=vat_basis,
+    )
+    readiness = add_master_data_resolutions(
+        readiness,
+        resolution.resolutions,
+        context_status=context_status,
+        context_message=context_message,
+    )
+    if readiness.summary.blocker > 0:
+        raise ReadinessGateError(readiness)
+    if readiness.summary.warning > 0 and not acknowledge_warnings:
+        raise ReadinessGateError(readiness)
+    return _ResolvedConfirmedExport(
+        table=table,
+        metadata=metadata,
+        owner_scope=owner_scope,
+        profile_token=profile_token,
+        profile_kind=profile_kind,
+        profile_version=profile_version,
+        profile_v2=profile_v2,
+        template=template,
+        rows=rows,
+        row_origins=row_origins,
+    )
 
 def export_confirmed_profile(
     upload_id: str,

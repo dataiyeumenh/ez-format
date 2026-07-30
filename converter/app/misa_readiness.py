@@ -81,6 +81,7 @@ def build_readiness_report(
     defaults: dict[str, Any] | None = None,
     formulas: dict[str, str] | None = None,
     edited_rows: list[dict[str, Any]] | None = None,
+    vat_basis: str | None = None,
 ) -> MisaReadinessReport:
     template = get_misa_template(target_template_id)
     clean_defaults = sanitize_defaults_for_template(target_template_id, defaults, template.headers)

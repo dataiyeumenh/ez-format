@@ -8,7 +8,7 @@ const {
 } = require("./mongoGridFsArtifactStorage");
 
 const DEFAULT_TOMBSTONE_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
-const ARTIFACT_KINDS = new Set(["analysis", "upload", "output", "state", "manifest", "import_result"]);
+const ARTIFACT_KINDS = new Set(["analysis", "upload", "output", "state", "manifest", "import_result", "repair_state", "retry_output"]);
 const SAFE_IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$/;
 const OWNER_SCOPE = /^(user|workspace):[A-Za-z0-9_-]{1,160}$/;
 

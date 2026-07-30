@@ -2,6 +2,9 @@ const express = require("express");
 const router = express.Router();
 const { protect, adminOnly } = require("../middleware/auth");
 const requireDb = require("../middleware/requireDb");
+const {
+  renderMisaImportRepairPrometheusMetrics,
+} = require("../services/misaImportRepairService");
 
 router.use(requireDb);
 const {
@@ -42,5 +45,9 @@ router.get("/revenue", getRevenue);
 router.get("/conversion-runs", getAdminConversionRuns);
 router.get("/feedback", getAdminFeedback);
 router.get("/dashboard", getDashboard);
+router.get("/metrics", (_req, res) => {
+  res.type("text/plain; version=0.0.4; charset=utf-8");
+  return res.send(renderMisaImportRepairPrometheusMetrics());
+});
 
 module.exports = router;

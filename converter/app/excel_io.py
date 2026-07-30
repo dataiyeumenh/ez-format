@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from itertools import islice
 from pathlib import Path
+import re
 from typing import Any
 
 import openpyxl
@@ -36,6 +37,9 @@ SMART_PURCHASE_HEADERS = frozenset(
         "tenkh",
     }
 )
+EXCEL_SAFE_INTEGER_LIMIT = 2**53
+
+_ZERO_ONLY_NUMBER_FORMAT = re.compile(r"0+")
 
 
 class InputReadError(Exception):
@@ -287,6 +291,33 @@ def _read_xls(path: Path) -> InputTable:
         header_row_index=best_header_idx,
     )
 
+
+def _xls_input_cell_value(book: xlrd.book.Book, cell: xlrd.sheet.Cell) -> Any:
+    if cell.ctype != xlrd.XL_CELL_NUMBER:
+        return cell.value
+    xf = book.xf_list[cell.xf_index]
+    number_format = book.format_map[xf.format_key].format_str
+    return _numeric_display_value(cell.value, number_format)
+
+
+def _numeric_display_value(value: Any, number_format: str) -> Any:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return value
+    if abs(value) >= EXCEL_SAFE_INTEGER_LIMIT:
+        raise InputReadError(
+            "unsafe_numeric_precision",
+            "Numeric cell exceeds Excel's safe precision. Format the source "
+            "cell as text and upload again to prevent silent rounding.",
+        )
+    format_code = str(number_format or "").strip()
+    if not _ZERO_ONLY_NUMBER_FORMAT.fullmatch(format_code):
+        return value
+    if isinstance(value, float) and not value.is_integer():
+        return value
+    integer_value = int(value)
+    if integer_value < 0:
+        return value
+    return str(integer_value).zfill(len(format_code))
 
 
 def _sanitize_output_sheet_name(name: str | None, fallback: str) -> str:

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class ReportIssue(BaseModel):
@@ -119,6 +119,36 @@ class ExportRowsRequest(BaseModel):
     rows: list[dict[str, Any]]
     options: JsonDict | None = None
     sheet_name: str | None = None
+
+
+class ExportManifestRow(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    export_row_id: str
+    output_row_number: int
+    document_group_id: str
+    raw_row_ids: list[str]
+    locator: dict[str, str | None]
+    line_fingerprint: str
+
+
+class ExportManifestV1(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    schema_version: Literal[1] = 1
+    conversion_id: str
+    export_batch_id: str
+    misa_product: Literal["SME"] = "SME"
+    misa_version: str | None = None
+    target_template_id: str
+    template_hash: str
+    raw_file_hash: str
+    mapping_profile_id: str
+    mapping_profile_version: int
+    mapping_profile_state_hash: str | None = None
+    validation_ruleset_version: str
+    rows: list[ExportManifestRow]
+    document_groups: list[dict[str, Any]]
 
 
 ReadinessSeverity = Literal["blocker", "warning", "info"]
