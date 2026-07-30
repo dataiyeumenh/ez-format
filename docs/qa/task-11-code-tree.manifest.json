@@ -1,0 +1,63 @@
+{
+  "schema_version": "1",
+  "algorithm": "sha256-path-v1",
+  "tree_digest": "aa710aa553655e78bba78d4587cccd8f86bb424ca69bad4a37238213d6497f66",
+  "files": [
+    {
+      "path": ".gitattributes",
+      "sha256": "c4969752b00ac85e34f585708673faca7fc403eca3c6d87b06ee18e44fd3217a"
+    },
+    {
+      "path": "backend/.env.example",
+      "sha256": "a2106a3d9c5eb1f0e91fbe2178997956ad6e566f5d25f7c41365d9384f2ab8f8"
+    },
+    {
+      "path": "backend/services/couponService.js",
+      "sha256": "04433664a938619ce2653c38163c36520e2a062ea98ae6bb9a13e7da7021af9e"
+    },
+    {
+      "path": "backend/tests/coupons.test.js",
+      "sha256": "aa7bb7a71eca4cbbe8d0f1e07a11152f7014dd04212e1a8320492e24647abfdd"
+    },
+    {
+      "path": "backend/tests/mainIntegrationReleaseGate.test.js",
+      "sha256": "6b37f9dd2254d8653f36b1f2cb7f5ddc2187f4904a7cbc5eff4433aa7aee46c7"
+    },
+    {
+      "path": "backend/tests/mongoGridFsArtifactStorage.integration.test.js",
+      "sha256": "0c8474873cdda76dc48704e6ce2f470028e53ed866f4dc02c863e3312a0206e3"
+    },
+    {
+      "path": "backend/tests/releaseReplicaGate.test.js",
+      "sha256": "b86559a0766b9556002a932b058b49602642a5bad74d6ee278ed894bed12af9a"
+    },
+    {
+      "path": "backend/tests/task11EvidenceBinding.test.js",
+      "sha256": "0d0ef821abf59d0f58effaf00789cbcadd87b262d155c73e4a356a6aca24586e"
+    },
+    {
+      "path": "converter/tests/test_e2e_extreme.py",
+      "sha256": "af51343e9b053314796df1db054436e8fd90e50989d8fead7b0866d6eaee0ac7"
+    },
+    {
+      "path": "converter/tests/test_stress_999.py",
+      "sha256": "1462e64036e26715e62b7fb581031c6b3023f6f82f75f62917cc2eef6b7d8f31"
+    },
+    {
+      "path": "package.json",
+      "sha256": "89cc956696db385fd1211da3a36c23d9989819454e7c9f44ae996f5cf8cebba5"
+    },
+    {
+      "path": "scripts/qa-main-integration-status.ps1",
+      "sha256": "4f9b15635bb84cb19599f51e4b7f5d17e63dafb9404529ba3a0613221985c04f"
+    },
+    {
+      "path": "scripts/qa-main-integration.ps1",
+      "sha256": "32338016846c3f33180a5caaffe3cc8262cf4a4f10671923be72df0eb27212b1"
+    },
+    {
+      "path": "scripts/validate-task11-evidence.ps1",
+      "sha256": "6c290f1c86ac94d52e30d3a18381aa81bdf262e73c78d97ba18808e41bc12265"
+    }
+  ]
+}

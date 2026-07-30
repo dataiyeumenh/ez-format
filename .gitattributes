@@ -4,3 +4,6 @@ frontend/src/**/*.png binary
 frontend/src/**/*.jpg binary
 frontend/src/**/*.jpeg binary
 frontend/src/**/*.webp binary
+docs/qa/task-11-*.json text eol=lf
+scripts/validate-task11-evidence.ps1 text eol=lf
+backend/tests/task11EvidenceBinding.test.js text eol=lf

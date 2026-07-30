@@ -3,7 +3,7 @@
 Date: 2026-07-30
 Worktree: E:\0. EXE2\ez-format-main-experimental-integration
 Branch: codex/main-experimental-production-integration
-Tested content revision: 9c27805a0df3d64c9cdd32887bfe3456d275584a
+Tested code/test/gate tree digest: aa710aa553655e78bba78d4587cccd8f86bb424ca69bad4a37238213d6497f66
 Merge revision: bff29ca024cb0b4b7b4c814cce7af1372e65ef86
 
 ## Verdict
@@ -16,7 +16,7 @@ INCOMPLETE. Full local code QA passed with zero failures. Release is not certifi
 - Plan base: 8d1a9343dc98a8abb715fe7efc8df9adf65a10fa.
 - Current origin/main: 2250102293021a54bcd1cf4fc8a7d6037e980524; origin moved.
 - Merge-tree conflicts: backend/services/paymentStatusSync.js, backend/tests/coupons.test.js, frontend/src/App.jsx.
-- Merge-tree/delta evidence: .artifacts/task11-review-pre-merge/merge-tree-origin-main.txt.
+- Tracked merge result: docs/qa/task-11-command-results.json; local .artifacts output is optional provenance.
 - Normal merge committed as bff29ca024cb0b4b7b4c814cce7af1372e65ef86; latest main payment/coupon contracts preserved.
 - Experimental commit 2da3d8f6b4214304d331dc9e1f06e6ac28ccc50a is not an ancestor.
 - Rollback ref: refs/heads/rollback/main-pre-task11-reconcile-20260730-203721 at 2250102293021a54bcd1cf4fc8a7d6037e980524.
@@ -37,7 +37,9 @@ INCOMPLETE. Full local code QA passed with zero failures. Release is not certifi
 - npm run qa:fast: 9/9 steps passed.
 - Conflict, frontend production URL, and forbidden object-storage scans: clean.
 - No test/process exceeded the 10-minute stop limit.
-- Machine-readable evidence docs/qa/task-11-evidence.json validated with qa-evidence.ps1: exit 0, status PASS, verdict INCOMPLETE.
+- Evidence binds a deterministic tracked tree digest, not a self-referential HEAD SHA.
+- Required evidence is tracked under docs/qa; validators do not depend on .artifacts.
+- Digest hashing canonicalizes text to LF; durable evidence files enforce LF checkout.
 
 ## Skip Reasons
 

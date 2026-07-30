@@ -1,0 +1,77 @@
+{
+  "schema_version": "1",
+  "scope": "Task 11 reproducible command/result manifest",
+  "tested_tree_binding": "sha256-path-v1 aa710aa553655e78bba78d4587cccd8f86bb424ca69bad4a37238213d6497f66; canonical LF text hashing; no commit SHA asserted.",
+  "commands": [
+    {
+      "id": "release_preflight",
+      "command": "npm run qa:main-integration",
+      "exit_code": 2,
+      "status": "BLOCKED",
+      "result": "RELEASE_BLOCKED",
+      "missing": [
+        "replica_mongo",
+        "gridfs",
+        "live_gateway"
+      ]
+    },
+    {
+      "id": "local_matrix",
+      "command": "npm run qa:main-integration:local-incomplete",
+      "exit_code": 0,
+      "status": "PASS",
+      "result": "Backend 407 total / 395 passed / 0 failed / 12 skipped; converter 550 passed / 2 skipped / 0 failed / 1 warning; frontend 109 passed; lint/build exit 0; Playwright gateway UI 2 skipped, API 1 skipped, MISA 8 passed; qa:fast 9 steps passed; scans clean."
+    },
+    {
+      "id": "focused_task11_contracts",
+      "command": "cd backend; node --test tests/coupons.test.js tests/task11EvidenceBinding.test.js tests/mainIntegrationReleaseGate.test.js tests/releaseReplicaGate.test.js",
+      "exit_code": 0,
+      "status": "PASS",
+      "result": "17 passed, 0 failed; coupon checkout behavior, release fail-closed contracts, CRLF-stable tree digest, and evidence binding passed."
+    },
+    {
+      "id": "qa_fast",
+      "command": "npm run qa:fast",
+      "exit_code": 0,
+      "status": "PASS",
+      "result": "9 steps passed, 0 failed; qa-qc.ps1 reported QA/QC PASSED."
+    },
+    {
+      "id": "evidence_binding",
+      "command": "pwsh -NoProfile -File scripts/validate-task11-evidence.ps1 -RepositoryRoot .",
+      "exit_code": 0,
+      "status": "PASS",
+      "result": "Tracked canonical tree digest and tracked command/result evidence verified; ignored artifact dependency absent."
+    },
+    {
+      "id": "evidence_schema",
+      "command": "pwsh $HOME/.agents/skills/extreme-qa-qc/scripts/qa-evidence.ps1 validate docs/qa/task-11-evidence.json --root . --json",
+      "exit_code": 0,
+      "status": "PASS",
+      "result": "Schema validator status PASS; verdict INCOMPLETE."
+    },
+    {
+      "id": "artifact_independence",
+      "command": "Temporarily rename .artifacts; run binding and schema validators; restore .artifacts in finally",
+      "exit_code": 0,
+      "status": "PASS",
+      "result": "Both validators passed while .artifacts was absent; .artifacts restored."
+    },
+    {
+      "id": "origin_merge_tree",
+      "command": "git merge-tree --write-tree 582cb17349cad82b20de0d8a786f6b302395ebe4 origin/main",
+      "exit_code": 0,
+      "status": "INCONCLUSIVE",
+      "result": "Origin drifted from plan base; known conflicts were paymentStatusSync.js, coupons.test.js, and App.jsx; normal merge committed as bff29ca."
+    }
+  ],
+  "skips": [
+    "PAYMENT_REPLICA_SET_TEST_URI is not set: 9 payment tests skipped.",
+    "GRIDFS_INTEGRATION_TEST_URI is not set: 1 real GridFS test skipped.",
+    "MISA_IMPORT_REPAIR_TEST_MONGO_URI and MONGO_URI are not set: 2 real-Mongo MISA tests skipped.",
+    "QA_EXPECT_LIVE=true and live inputs are not set: 3 gateway Playwright tests skipped.",
+    "RUN_ACCOUNTING_OPERATIONS_PERFORMANCE=1 is not set: performance benchmark skipped.",
+    "create_export_manifest is not composed: export-manifest test skipped."
+  ],
+  "verdict": "INCOMPLETE"
+}

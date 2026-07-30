@@ -7,6 +7,7 @@ const {
   serializeCoupon,
   matchesStatusFilter,
   calculateDiscountAmount,
+  validateCouponForCheckout,
   recordCouponUsage,
 } = require("../services/couponService");
 const Coupon = require("../models/Coupon");
@@ -269,16 +270,43 @@ test("rejects a coupon settlement when the global limit cannot be reserved", asy
   }
 });
 
-test("pending payments must not count toward limit_per_user logic contract", () => {
-  // Contract: countUserCouponUses only reads CouponUsage (paid success),
-  // never Payment status=pending. Apply-coupon / cancelled checkout must not consume quota.
-  const countUserCouponUsesSource = require("node:fs").readFileSync(
-    require("node:path").join(__dirname, "../services/couponService.js"),
-    "utf8",
-  );
-  assert.match(countUserCouponUsesSource, /CouponUsage\.countDocuments/);
-  assert.doesNotMatch(
-    countUserCouponUsesSource,
-    /Payment\.countDocuments\([\s\S]*status:\s*"pending"/,
-  );
+test("checkout validation ignores pending payments when enforcing per-user coupon quota", async () => {
+  const originalFindOne = Coupon.findOne;
+  const originalCountDocuments = CouponUsage.countDocuments;
+  const observedFilters = [];
+
+  Coupon.findOne = () => ({
+    populate: async () => ({
+      _id: "coupon-id",
+      code: "PENDING20",
+      status: "active",
+      discountPercent: 20,
+      usageLimit: 10,
+      usageCount: 1,
+      limitPerUser: 1,
+      startDate: new Date("2026-01-01T00:00:00.000Z"),
+      endDate: new Date("2026-12-31T23:59:59.000Z"),
+      applicablePlans: [{ _id: "plan-id" }],
+    }),
+  });
+  CouponUsage.countDocuments = async (filter) => {
+    observedFilters.push(filter);
+    return 0;
+  };
+
+  try {
+    const result = await validateCouponForCheckout({
+      couponCode: "pending20",
+      plan: { _id: "plan-id", price: 10000 },
+      userId: "user-id",
+      now: new Date("2026-07-30T00:00:00.000Z"),
+    });
+
+    assert.equal(result.pricing.discountAmount, 2000);
+    assert.equal(result.pricing.finalAmount, 8000);
+    assert.deepEqual(observedFilters, [{ coupon: "coupon-id", user: "user-id" }]);
+  } finally {
+    Coupon.findOne = originalFindOne;
+    CouponUsage.countDocuments = originalCountDocuments;
+  }
 });

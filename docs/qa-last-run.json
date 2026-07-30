@@ -1,7 +1,52 @@
 {
-  "scope": "qa:fast",
-  "ok": true,
-  "timestamp": "2026-07-30 20:56:32",
+  "timestamp": "2026-07-30 21:41:39",
+  "steps": [
+    {
+      "name": "Prerequisites",
+      "seconds": 0.0063916,
+      "status": "ok"
+    },
+    {
+      "name": "Fixtures templates",
+      "seconds": 0.0051977,
+      "status": "ok"
+    },
+    {
+      "name": "Backend syntax",
+      "seconds": 0.4685702,
+      "status": "ok"
+    },
+    {
+      "name": "Backend student tests",
+      "seconds": 0.4687723,
+      "status": "ok"
+    },
+    {
+      "name": "Frontend tests",
+      "seconds": 1.0807852,
+      "status": "ok"
+    },
+    {
+      "name": "Frontend build",
+      "seconds": 3.9448973,
+      "status": "ok"
+    },
+    {
+      "name": "Converter API smoke",
+      "seconds": 1.760512,
+      "status": "ok"
+    },
+    {
+      "name": "Converter student integration",
+      "seconds": 12.9952754,
+      "status": "ok"
+    },
+    {
+      "name": "MISA import repair Task 9 gate",
+      "seconds": 25.3325523,
+      "status": "ok"
+    }
+  ],
   "passed": [
     "Prerequisites",
     "Fixtures templates",
@@ -13,58 +58,12 @@
     "Converter student integration",
     "MISA import repair Task 9 gate"
   ],
-  "steps": [
-    {
-      "name": "Prerequisites",
-      "status": "ok",
-      "seconds": 0.0147137
-    },
-    {
-      "name": "Fixtures templates",
-      "status": "ok",
-      "seconds": 0.0151275
-    },
-    {
-      "name": "Backend syntax",
-      "status": "ok",
-      "seconds": 0.4721778
-    },
-    {
-      "name": "Backend student tests",
-      "status": "ok",
-      "seconds": 0.4797228
-    },
-    {
-      "name": "Frontend tests",
-      "status": "ok",
-      "seconds": 1.1500294
-    },
-    {
-      "name": "Frontend build",
-      "status": "ok",
-      "seconds": 3.9803715
-    },
-    {
-      "name": "Converter API smoke",
-      "status": "ok",
-      "seconds": 1.9818716
-    },
-    {
-      "name": "Converter student integration",
-      "status": "ok",
-      "seconds": 12.9664805
-    },
-    {
-      "name": "MISA import repair Task 9 gate",
-      "status": "ok",
-      "seconds": 27.1093038
-    }
-  ],
   "failed": [],
+  "ok": true,
   "task11Verdict": "INCOMPLETE",
   "releaseGateStatus": "RELEASE_BLOCKED",
   "releaseEligible": false,
-  "testedContentRevision": "9c27805a0df3d64c9cdd32887bfe3456d275584a",
+  "testedCodeTestGateTreeDigest": "aa710aa553655e78bba78d4587cccd8f86bb424ca69bad4a37238213d6497f66",
   "missingMandatoryEvidence": [
     "replica_mongo: PAYMENT_REPLICA_SET_TEST_URI is not set",
     "gridfs: GRIDFS_INTEGRATION_TEST_URI is not set",

@@ -1,7 +1,7 @@
 {
   "schema_version": "1.0",
   "subject": {
-    "revision": "9c27805a0df3d64c9cdd32887bfe3456d275584a",
+    "revision": "task11-code-test-gate-tree-sha256:aa710aa553655e78bba78d4587cccd8f86bb424ca69bad4a37238213d6497f66",
     "scope": "Task 11 merged main-first integration release QA; code matrix, release gate, conflict and storage scans",
     "exclusions": [
       "No live replica MongoDB execution",
@@ -133,9 +133,9 @@
       "status": "PASS",
       "evidence": [
         {
-          "path": "qa/task11-local-incomplete-20260730-v2.log",
-          "sha256": "4143d2459bea28f3b9519f48ae1b153a6c815c533646aa60f0ae98ffebd96a87",
-          "size": 134701
+          "path": "docs/qa/task-11-command-results.json",
+          "sha256": "19356335a2a201fb8e35149ac279de49934c73a3fb0a346ae84a66ed7f2ab25a",
+          "size": 3409
         }
       ]
     },
@@ -151,9 +151,9 @@
       "reason": "RELEASE_BLOCKED: replica_mongo, gridfs, and live_gateway evidence are missing.",
       "evidence": [
         {
-          "path": "qa/task11-release-preflight-final.log",
-          "sha256": "4af435fefc207343f2d5ff39d49020ca9af7faa806bb15e5b6ab61379b792106",
-          "size": 709
+          "path": "docs/qa/task-11-command-results.json",
+          "sha256": "19356335a2a201fb8e35149ac279de49934c73a3fb0a346ae84a66ed7f2ab25a",
+          "size": 3409
         }
       ]
     },
@@ -168,9 +168,9 @@
       "status": "PASS",
       "evidence": [
         {
-          "path": "qa/task11-release-contract-final.log",
-          "sha256": "fcc0b2db0d82dbed8b068198a018e2b6f96ce09ad17e928629155651a956c795",
-          "size": 1079
+          "path": "docs/qa/task-11-command-results.json",
+          "sha256": "19356335a2a201fb8e35149ac279de49934c73a3fb0a346ae84a66ed7f2ab25a",
+          "size": 3409
         }
       ]
     },
@@ -186,9 +186,9 @@
       "reason": "Origin moved from the plan base and the merge-tree identified three known conflicts; conflicts were resolved in the normal merge before QA.",
       "evidence": [
         {
-          "path": "task11-review-pre-merge/merge-tree-origin-main.txt",
-          "sha256": "70ac9005e8b22bb2f2e5396b4b5a3d95e2c1cdb9a93432addcd2a0fceb4be3b9",
-          "size": 2464
+          "path": "docs/qa/task-11-command-results.json",
+          "sha256": "19356335a2a201fb8e35149ac279de49934c73a3fb0a346ae84a66ed7f2ab25a",
+          "size": 3409
         }
       ]
     }

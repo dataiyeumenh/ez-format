@@ -3,7 +3,7 @@
 Date: 2026-07-30
 Worktree: E:\0. EXE2\ez-format-main-experimental-integration
 Branch: codex/main-experimental-production-integration
-Evidence content revision: 9c27805a0df3d64c9cdd32887bfe3456d275584a
+Tested code/test/gate tree digest: aa710aa553655e78bba78d4587cccd8f86bb424ca69bad4a37238213d6497f66
 Merge revision: bff29ca024cb0b4b7b4c814cce7af1372e65ef86
 
 ## Verdict
@@ -20,7 +20,7 @@ Task 11 started with git fetch origin exit 0.
 - Refreshed origin/main: 2250102293021a54bcd1cf4fc8a7d6037e980524.
 - Remote drift: 7 files, 121 insertions, 35 deletions from the plan base.
 - Pre-merge git merge-tree --write-tree reported known conflicts in backend/services/paymentStatusSync.js, backend/tests/coupons.test.js, and frontend/src/App.jsx.
-- Merge evidence: .artifacts/task11-review-pre-merge/merge-tree-origin-main.txt.
+- Tracked merge result: docs/qa/task-11-command-results.json. The local .artifacts merge-tree log is optional provenance only.
 - Normal merge commit: bff29ca024cb0b4b7b4c814cce7af1372e65ef86; parents are the integrated branch parent and refreshed origin/main.
 - Conflict resolution preserved latest main payment/coupon contracts while retaining integrated transactional settlement, idempotency coverage, and feature-gated Student routing.
 - Experimental commit 2da3d8f6b4214304d331dc9e1f06e6ac28ccc50a is not an ancestor.
@@ -38,7 +38,7 @@ refs/heads/rollback/main-pre-task11-reconcile-20260730-203721 at 2250102293021a5
 
 ## Full Local Matrix
 
-Final local-incomplete run completed after the release-gate and stale-contract fixes, with final test content committed as 9c27805.
+The local-incomplete matrix is historical command evidence. Current focused checks bind the tracked code/test/gate files to the deterministic digest above. Evidence-only commits may change HEAD without changing or weakening that digest.
 
 | Command | Result |
 |---|---|
@@ -66,8 +66,12 @@ Final local-incomplete run completed after the release-gate and stale-contract f
 ## Evidence Validation
 
 - Machine-readable evidence: docs/qa/task-11-evidence.json.
-- Validator: pwsh $HOME/.agents/skills/extreme-qa-qc/scripts/qa-evidence.ps1 validate docs/qa/task-11-evidence.json --root .artifacts --json.
-- Validator result: exit 0, status PASS, verdict INCOMPLETE.
+- Tracked command/results: docs/qa/task-11-command-results.json.
+- Tracked tree manifest: docs/qa/task-11-code-tree.manifest.json.
+- Binding validator: pwsh -NoProfile -File scripts/validate-task11-evidence.ps1 -RepositoryRoot .
+- Schema validator: pwsh $HOME/.agents/skills/extreme-qa-qc/scripts/qa-evidence.ps1 validate docs/qa/task-11-evidence.json --root . --json.
+- Both validators must pass without .artifacts; no exact HEAD SHA is asserted.
+- Tree hashing canonicalizes CRLF to LF; .gitattributes pins byte-addressed Task 11 evidence to LF.
 
 ## Task 11 Ownership
 
@@ -80,9 +84,13 @@ Task 11 substantive changes:
 - backend/tests/mainIntegrationReleaseGate.test.js
 - backend/tests/mongoGridFsArtifactStorage.integration.test.js
 - backend/tests/releaseReplicaGate.test.js
+- backend/tests/task11EvidenceBinding.test.js
 - converter/tests/test_e2e_extreme.py
 - converter/tests/test_stress_999.py
 - docs/qa/main-first-integration-baseline.md
+- scripts/validate-task11-evidence.ps1
+- docs/qa/task-11-code-tree.manifest.json
+- docs/qa/task-11-command-results.json
 - Fresh Task 11 receipt and generated QA summaries.
 
 Unrelated .superpowers/sdd/progress.md, Student EOL changes, and existing Student/QA noise remain unstaged.
