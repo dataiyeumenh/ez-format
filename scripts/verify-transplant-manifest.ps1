@@ -200,12 +200,10 @@ function Test-CanonicalReconstructionContracts {
     $backendRoot = Join-Path $Root "backend"
     $routeRoot = Join-Path $backendRoot "routes"
     $modelRoot = Join-Path $backendRoot "models"
-    $backendFiles = @()
-    if (Test-Path -LiteralPath $backendRoot) {
-        $backendFiles += @(Get-ChildItem -LiteralPath $backendRoot -File -Filter "*.js")
-    }
-    if (Test-Path -LiteralPath $routeRoot) {
-        $backendFiles += @(Get-ChildItem -LiteralPath $routeRoot -File -Filter "*.js")
+    $backendFiles = if (Test-Path -LiteralPath $backendRoot) {
+        @(Get-ChildItem -LiteralPath $backendRoot -Recurse -File -Filter "*.js")
+    } else {
+        @()
     }
 
     $routeMounts = @()
@@ -222,7 +220,7 @@ function Test-CanonicalReconstructionContracts {
     }
 
     $routeModules = if (Test-Path -LiteralPath $routeRoot) {
-        @(Get-ChildItem -LiteralPath $routeRoot -File -Filter "*.js" | Where-Object {
+        @(Get-ChildItem -LiteralPath $routeRoot -Recurse -File -Filter "*.js" | Where-Object {
             $_.BaseName -match "reconstruction"
         })
     } else {
@@ -231,7 +229,7 @@ function Test-CanonicalReconstructionContracts {
 
     $modelRegistrations = @()
     if (Test-Path -LiteralPath $modelRoot) {
-        foreach ($file in Get-ChildItem -LiteralPath $modelRoot -File -Filter "*.js") {
+        foreach ($file in Get-ChildItem -LiteralPath $modelRoot -Recurse -File -Filter "*.js") {
             $content = [IO.File]::ReadAllText($file.FullName)
             foreach ($match in [regex]::Matches(
                 $content,
@@ -250,11 +248,23 @@ function Test-CanonicalReconstructionContracts {
     $routeModules = @($routeModules)
     $modelRegistrations = @($modelRegistrations)
     $failures = @()
+    if ($routeMounts.Count -ne 1) {
+        $failures += "Expected exactly one reconstruction route mount; found $($routeMounts.Count)."
+    }
     if ($routeMounts.Count -gt 1) {
         $failures += "Duplicate reconstruction route mount: $($routeMounts -join ', ')"
     }
+    if ($routeModules.Count -ne 1) {
+        $failures += "Expected exactly one reconstruction route module; found $($routeModules.Count)."
+    }
     if ($routeModules.Count -gt 1) {
         $failures += "Duplicate reconstruction route module: $($routeModules.FullName -join ', ')"
+    }
+    foreach ($modelName in @("VoucherReconstructionRun", "ReconstructionProfile", "ReconstructionDecision")) {
+        $registrationCount = @($modelRegistrations | Where-Object { $_.name -eq $modelName }).Count
+        if ($registrationCount -ne 1) {
+            $failures += "Expected exactly one Mongoose model registration '$modelName'; found $registrationCount."
+        }
     }
     foreach ($group in $modelRegistrations | Group-Object -Property name) {
         if ($group.Count -gt 1) {

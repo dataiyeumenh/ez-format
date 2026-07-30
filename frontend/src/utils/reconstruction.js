@@ -46,6 +46,19 @@ export function filenameFromDisposition(disposition, fallback = "Import MISA.xls
   return match?.[1] || fallback;
 }
 
+export function getReconstructionAvailability({ featureEnabled, backendCapabilities }) {
+  if (!featureEnabled) {
+    return { enabled: false, reason: "Tính năng tái tạo chứng từ chưa được bật." };
+  }
+  if (!backendCapabilities?.voucherReconstruction) {
+    return { enabled: false, reason: "Tính năng tái tạo chứng từ chưa sẵn sàng trên máy chủ." };
+  }
+  if (!backendCapabilities.converterGateway) {
+    return { enabled: false, reason: "Đường phân tích tái tạo chưa sẵn sàng trên máy chủ." };
+  }
+  return { enabled: true, reason: "" };
+}
+
 export function fieldDisplayValue(field) {
   if (!field || field.value === null || field.value === undefined) return "";
   return String(field.value);

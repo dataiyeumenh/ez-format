@@ -68,16 +68,21 @@ async function fetchJson(fetchImpl, url) {
 }
 
 export async function fetchConverterStatus(client = api) {
-  const [healthResult, templatesResult] = typeof client === "function"
+  const [backendResult, healthResult, templatesResult] = typeof client === "function"
     ? await Promise.allSettled([
+        fetchJson(client, "/api/health"),
         fetchJson(client, "/api/healthz"),
         fetchJson(client, "/api/converter/templates"),
       ])
     : await Promise.allSettled([
+        client.get("/health"),
         client.get("/converter/capabilities"),
         client.get("/converter/templates"),
       ]);
 
+  const backend = backendResult.status === "fulfilled"
+    ? (typeof client === "function" ? backendResult.value : backendResult.value.data)
+    : null;
   const health = healthResult.status === "fulfilled"
     ? (typeof client === "function" ? healthResult.value : healthResult.value.data)
     : null;
@@ -91,6 +96,7 @@ export async function fetchConverterStatus(client = api) {
   return {
     serviceOnline,
     aiOnline: health ? aiStatusFromHealth(health) : null,
+    backendCapabilities: backend?.capabilities || null,
     templates: templatesData?.items?.length
       ? templatesData.items
       : DEFAULT_CONVERTER_TEMPLATES,
@@ -101,22 +107,25 @@ export function useConverterApi() {
   const [templates, setTemplates] = useState(DEFAULT_CONVERTER_TEMPLATES);
   const [serviceOnline, setServiceOnline] = useState(null);
   const [aiOnline, setAiOnline] = useState(null); // null=loading, true=online, false=offline, "disabled"=không cấu hình
+  const [backendCapabilities, setBackendCapabilities] = useState(null);
 
   useEffect(() => {
     let cancelled = false;
 
     const refreshStatus = () => {
       fetchConverterStatus()
-        .then(({ serviceOnline, aiOnline, templates }) => {
+        .then(({ serviceOnline, aiOnline, backendCapabilities, templates }) => {
           if (cancelled) return;
           setServiceOnline(serviceOnline);
           setAiOnline(aiOnline);
+          setBackendCapabilities(backendCapabilities);
           setTemplates(templates);
         })
         .catch(() => {
           if (cancelled) return;
           setServiceOnline(false);
           setAiOnline(false);
+          setBackendCapabilities(null);
           setTemplates(DEFAULT_CONVERTER_TEMPLATES);
         });
     };
@@ -187,6 +196,7 @@ export function useConverterApi() {
     templates,
     serviceOnline,
     aiOnline,
+    backendCapabilities,
     analyzeFile,
     previewMapping,
     confirmMapping,

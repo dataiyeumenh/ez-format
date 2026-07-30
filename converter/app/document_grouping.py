@@ -111,23 +111,6 @@ def group_prepared_rows(
     return [(key, fallback[key], groups[key]) for key in order]
 
 
-def group_output_rows(
-    rows: list[dict[str, Any]],
-    *,
-    direction: str,
-) -> list[tuple[str, bool, list[PreparedRow]]]:
-    prepared = [
-        PreparedRow(
-            source_row=index,
-            direct=dict(row),
-            effective=dict(row),
-            filled_fields=frozenset(),
-        )
-        for index, row in enumerate(rows, start=1)
-    ]
-    return group_prepared_rows(prepared, direction=direction)
-
-
 def document_group_key(
     row: PreparedRow,
     *,

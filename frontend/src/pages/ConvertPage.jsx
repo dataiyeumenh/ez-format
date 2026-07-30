@@ -37,6 +37,7 @@ import {
   getDownloadCtaState,
   summarizeMappingFields,
 } from "../utils/converterUx";
+import { getReconstructionAvailability } from "../utils/reconstruction";
 
 const STATUS = {
   IDLE: "idle",
@@ -188,6 +189,7 @@ const ConvertPage = () => {
     templates,
     serviceOnline,
     aiOnline,
+    backendCapabilities,
     analyzeFile,
     previewMapping,
     confirmMapping,
@@ -221,6 +223,10 @@ const ConvertPage = () => {
     (planCode === "free"
       ? dailyFileCredit > 0
       : dailyFileCredit > 0 || fileCredits > 0);
+  const reconstructionAvailability = getReconstructionAvailability({
+    featureEnabled: RECONSTRUCTION_ENABLED,
+    backendCapabilities,
+  });
   const noCreditMessage =
     planCode === "free"
       ? "Bạn đã dùng hết lượt chuyển đổi miễn phí hôm nay. Vui lòng quay lại vào ngày mai hoặc nâng cấp gói."
@@ -893,6 +899,8 @@ const ConvertPage = () => {
           <SmartReconstructionPanel
             templates={templates}
             serviceOnline={serviceOnline}
+            reconstructionAvailable={reconstructionAvailability.enabled}
+            reconstructionUnavailableReason={reconstructionAvailability.reason}
             canConvert={canConvert}
             noCreditMessage={noCreditMessage}
             workspacesEnabled={workspacesEnabled}

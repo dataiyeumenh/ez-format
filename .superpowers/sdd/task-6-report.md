@@ -112,3 +112,35 @@ ownership rule.
   Task 6 did not guess unrelated ownership decisions.
 - Focused tests use mocked Mongo models; no live MongoDB/GridFS environment was
   required for this reconstruction slice.
+
+## Follow-up Findings Fixed
+
+- Removed the Task 5 `student_queries` fallback. It now imports the canonical
+  `document_totals.aggregate_document_totals`; the identity regression test
+  prevents a second implementation or import cycle.
+- Tightened canonical transplant checks: one reconstruction mount, one route
+  module, and one registration each for `VoucherReconstructionRun`,
+  `ReconstructionProfile`, and `ReconstructionDecision`. Fixture coverage now
+  rejects missing and duplicate contracts.
+- Reconstruction availability now requires the frontend flag, backend
+  `voucherReconstruction`, and backend `converterGateway` capability. The UI
+  shows the unavailable reason and cannot create a run when analyze routes are
+  unavailable.
+- CORS exposes `Content-Disposition`; browser export filename parsing remains
+  covered by a server-header test.
+- Removed unreferenced `group_output_rows`; repository source search found no
+  runtime or test consumer.
+
+## Follow-up Verification
+
+```text
+backend reconstruction plus startup/CORS: 21 passed, 0 failed
+converter requested reconstruction suites plus totals/student queries: 65 passed, 0 failed
+frontend reconstruction/status tests: 8 passed, 0 failed
+frontend production build: passed
+canonical transplant verifier and fixtures: passed
+git diff --check: passed
+```
+
+The converter suite retains one existing FastAPI `on_event` deprecation
+warning. Ownership rules were added for every newly touched Task 6 path.

@@ -95,6 +95,21 @@ rules:
   - path: frontend/src/pages/ConvertPage.jsx
     owner: compose
     reason: shared conversion page boundary
+  - path: frontend/src/components/reconstruction/SmartReconstructionPanel.jsx
+    owner: compose
+    reason: reconstruction availability must gate run creation
+  - path: frontend/src/hooks/useConverterApi.js
+    owner: compose
+    reason: frontend availability requires backend capability status
+  - path: frontend/src/hooks/useConverterApi.status.test.mjs
+    owner: compose
+    reason: converter and backend capability status regression coverage
+  - path: frontend/src/utils/reconstruction.js
+    owner: compose
+    reason: reconstruction availability and export filename utilities
+  - path: frontend/src/utils/reconstruction.test.mjs
+    owner: compose
+    reason: reconstruction availability utility regression coverage
   - path: frontend/src/services/api.js
     owner: compose
     reason: shared browser API boundary
@@ -260,6 +275,9 @@ rules:
   - path: backend/tests/reconstructionController.test.js
     owner: compose
     reason: main controller tests plus source gateway ownership contracts
+  - path: backend/tests/serverStartupReadiness.test.js
+    owner: compose
+    reason: backend capability and CORS exposure regression coverage
   - path: converter/app/ai_endpoint_policy.py
     owner: source
     reason: source-tested remote AI endpoint boundary

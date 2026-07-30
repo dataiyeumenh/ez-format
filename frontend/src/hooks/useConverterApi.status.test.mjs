@@ -18,6 +18,11 @@ function response(ok, payload, status = ok ? 200 : 500) {
 
 test("converter status is online when health and templates are available", async () => {
   const fetchImpl = async (url) => {
+    if (url.endsWith("/api/health")) {
+      return response(true, {
+        capabilities: { voucherReconstruction: true, converterGateway: true },
+      });
+    }
     if (url.endsWith("/healthz")) return response(true, { ai: "online" });
     return response(true, { items: [{ id: "bsn_sales" }] });
   };
@@ -26,6 +31,10 @@ test("converter status is online when health and templates are available", async
 
   assert.equal(status.serviceOnline, true);
   assert.equal(status.aiOnline, true);
+  assert.deepEqual(status.backendCapabilities, {
+    voucherReconstruction: true,
+    converterGateway: true,
+  });
   assert.deepEqual(status.templates, [{ id: "bsn_sales" }]);
 });
 

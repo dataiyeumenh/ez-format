@@ -27,6 +27,8 @@ function extension(file) {
 export default function SmartReconstructionPanel({
   templates,
   serviceOnline,
+  reconstructionAvailable,
+  reconstructionUnavailableReason,
   canConvert,
   noCreditMessage,
   workspacesEnabled,
@@ -99,6 +101,10 @@ export default function SmartReconstructionPanel({
 
   const analyze = async () => {
     if (!file) return;
+    if (!reconstructionAvailable) {
+      setError(reconstructionUnavailableReason);
+      return;
+    }
     if (!canConvert) {
       setError(noCreditMessage);
       return;
@@ -311,6 +317,9 @@ export default function SmartReconstructionPanel({
         {serviceOnline === false && (
           <Alert variant="error">Converter backend chưa sẵn sàng.</Alert>
         )}
+        {!reconstructionAvailable && (
+          <Alert variant="warning">{reconstructionUnavailableReason}</Alert>
+        )}
         {!canConvert && <Alert variant="warning">{noCreditMessage}</Alert>}
 
         {!report && (
@@ -371,7 +380,7 @@ export default function SmartReconstructionPanel({
               <button
                 type="button"
                 className="btn-primary w-full justify-center"
-                disabled={!file || busy || serviceOnline === false || !canConvert}
+                disabled={!file || busy || !reconstructionAvailable || serviceOnline === false || !canConvert}
                 onClick={analyze}
               >
                 {busy === "analyze" ? (

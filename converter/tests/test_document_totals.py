@@ -1,4 +1,9 @@
+from app import student_queries
 from app.document_totals import aggregate_document_totals
+
+
+def test_student_queries_uses_the_canonical_document_totals_aggregator():
+    assert student_queries.aggregate_document_totals is aggregate_document_totals
 
 
 def test_two_detail_rows_with_same_invoice_total_count_once():

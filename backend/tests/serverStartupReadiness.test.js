@@ -125,6 +125,26 @@ test("health never advertises payment settlement as ready before transaction pre
   }
 });
 
+test("CORS exposes Content-Disposition for browser export filenames", async () => {
+  const server = app.listen(0);
+  try {
+    const { port } = server.address();
+    const headers = await new Promise((resolve, reject) => {
+      const request = http.request(
+        `http://127.0.0.1:${port}/api/health`,
+        { headers: { Origin: "http://localhost:5173" } },
+        (response) => resolve(response.headers),
+      );
+      request.on("error", reject);
+      request.end();
+    });
+
+    assert.match(headers["access-control-expose-headers"] || "", /content-disposition/i);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
 test("disabled Student Assistant startup still attempts privacy purge and remains available", async () => {
   const serverPath = require.resolve("../server");
   const previousEnabled = process.env.STUDENT_ASSISTANT_ENABLED;

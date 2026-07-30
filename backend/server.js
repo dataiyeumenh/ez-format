@@ -63,7 +63,7 @@ app.use(
   cors({
     origin: allowedOrigins,
     credentials: true,
-    exposedHeaders: ["X-Request-ID"],
+    exposedHeaders: ["Content-Disposition", "X-Request-ID"],
   }),
 );
 app.use((req, res, next) => {
@@ -120,6 +120,7 @@ app.get("/api/health", (req, res) => {
     capabilities: {
       masterDataWorkspaces: masterDataWorkspacesEnabled,
       voucherReconstruction: voucherReconstructionEnabled,
+      converterGateway: converterGatewayUsageReady,
       studentAssistant: studentAssistantEnabled,
       paymentSettlement: getPaymentSettlementReadiness().ready,
     },

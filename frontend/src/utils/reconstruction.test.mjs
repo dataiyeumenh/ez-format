@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   filenameFromDisposition,
   flattenValidationIssues,
+  getReconstructionAvailability,
   hasActiveCatalog,
   reconstructionTypeLabel,
 } from "./reconstruction.js";
@@ -44,4 +45,21 @@ test("catalog search only runs for active workspace catalogs", () => {
   assert.equal(hasActiveCatalog(workspace, "item"), true);
   assert.equal(hasActiveCatalog(workspace, "unit"), false);
   assert.equal(hasActiveCatalog(null, "item"), false);
+});
+
+test("reconstruction availability requires feature and analyze-route capabilities", () => {
+  assert.deepEqual(
+    getReconstructionAvailability({
+      featureEnabled: true,
+      backendCapabilities: { voucherReconstruction: true, converterGateway: false },
+    }),
+    { enabled: false, reason: "Đường phân tích tái tạo chưa sẵn sàng trên máy chủ." },
+  );
+  assert.deepEqual(
+    getReconstructionAvailability({
+      featureEnabled: true,
+      backendCapabilities: { voucherReconstruction: true, converterGateway: true },
+    }),
+    { enabled: true, reason: "" },
+  );
 });
