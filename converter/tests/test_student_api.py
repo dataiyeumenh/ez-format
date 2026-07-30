@@ -22,6 +22,7 @@ from app import main as main_module
 from app import student_store, student_workflow
 from app.main import app, clear_student_rate_limits
 from app.misa_workflow import _read_metadata, _write_metadata
+from app.student_anonymization import _workbook_values, scan_confidential_values
 from app.student_context import verify_student_context
 from app.student_session_client import (
     StudentSessionClientError,
@@ -1223,6 +1224,54 @@ def test_anonymized_export_removes_confidential_hidden_comment_and_metadata_laye
     assert len(sanitized.custom_doc_props) == 0
     assert sanitized.properties.creator in {None, ""}
     assert sanitized.properties.description in {None, ""}
+
+
+def test_anonymized_export_excludes_unscanned_second_visible_sheet(student_api, monkeypatch):
+    client, _ = student_api
+    session_id = "507f1f77bcf86cd799439011"
+    token = _student_token()
+    visible_sheet_secret = "SECOND-VISIBLE-ONLY-SECRET-8301"
+    source = openpyxl.load_workbook(
+        BytesIO(_privacy_layer_workbook_bytes("hidden-secret")), data_only=False
+    )
+    second_sheet = source.create_sheet("Unscanned visible sheet")
+    second_sheet["A1"] = visible_sheet_secret
+    source_bytes = BytesIO()
+    source.save(source_bytes)
+
+    analyzed = _analyze_bytes(
+        client,
+        source_bytes.getvalue(),
+        token=token,
+        filename="two-visible-sheets.xlsx",
+    )
+    assert analyzed.status_code == 200
+    monkeypatch.setenv("STUDENT_INTERNSHIP_ENABLED", "true")
+
+    preview = client.post(
+        f"/api/v1/student/sessions/{session_id}/anonymization/preview",
+        headers={"X-Student-Context": token},
+        json={"full_document_numbers": False},
+    )
+    exported = client.post(
+        f"/api/v1/student/sessions/{session_id}/anonymization/export",
+        headers={"X-Student-Context": token},
+        json={"full_document_numbers": False},
+    )
+
+    assert preview.status_code == 200
+    assert preview.json()["scanner_status"] == "passed"
+    assert exported.status_code == 200
+    assert visible_sheet_secret.encode("utf-8") not in exported.content
+    sanitized = openpyxl.load_workbook(BytesIO(exported.content), data_only=False)
+    assert sanitized.sheetnames == ["Sheet1"]
+    assert (
+        scan_confidential_values(
+            _workbook_values(exported.content, ".xlsx"),
+            {"company": [visible_sheet_secret]},
+        )
+        == ()
+    )
 
 
 def test_student_analysis_persists_no_preview_or_mapped_row_values(student_api):

@@ -238,29 +238,34 @@ def _anonymize_xlsx(
     if not visible_sheets:
         raise AnonymizationUnsupportedLayerError("no_visible_worksheets")
 
-    # Rebuild from visible cell values only. Unclassified workbook layers are
-    # omitted rather than copied into an export that claims scanner success.
+    source_worksheet = source_workbook.active
+    if source_worksheet.sheet_state != "visible":
+        source_worksheet = visible_sheets[0]
+
+    # Export only the analyzed sheet. Other visible sheets are not part of the
+    # Student Assistant output and could otherwise bypass its value inventory.
     workbook = Workbook()
     workbook.remove(workbook.active)
     replaced_categories: set[str] = set()
     replaced_layers = _removed_xlsx_layers(source_workbook)
-    for sheet_index, source_worksheet in enumerate(visible_sheets, start=1):
-        worksheet = workbook.create_sheet(f"Sheet{sheet_index}")
-        for row in source_worksheet.iter_rows():
-            for source_cell in row:
-                value = source_cell.value
-                replacement = _replacement_for_cell(
-                    value, session, confidential_values
-                )
-                if replacement is not None:
-                    value, category = replacement
-                    replaced_categories.add(category)
-                    replaced_layers.add("cell_values")
-                worksheet.cell(
-                    row=source_cell.row,
-                    column=source_cell.column,
-                    value=value,
-                )
+    if len(visible_sheets) > 1:
+        replaced_layers.add("non_active_visible_sheets_removed")
+    worksheet = workbook.create_sheet("Sheet1")
+    for row in source_worksheet.iter_rows():
+        for source_cell in row:
+            value = source_cell.value
+            replacement = _replacement_for_cell(
+                value, session, confidential_values
+            )
+            if replacement is not None:
+                value, category = replacement
+                replaced_categories.add(category)
+                replaced_layers.add("cell_values")
+            worksheet.cell(
+                row=source_cell.row,
+                column=source_cell.column,
+                value=value,
+            )
     replaced_layers.update(_sanitize_xlsx_metadata(workbook, session, confidential_values))
     stream = BytesIO()
     workbook.save(stream)

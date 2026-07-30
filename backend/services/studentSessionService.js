@@ -25,7 +25,7 @@ function hashStudentQuestion(value) {
     .digest("hex");
 }
 
-async function migrateStudentQuestionEventPrivacy(model) {
+async function migrateStudentQuestionEventPrivacy(model, { batchSize = 100 } = {}) {
   const collection = model?.collection || model;
   if (!collection || typeof collection.updateMany !== "function") {
     throw new Error("StudentQuestionEvent model là bắt buộc");
@@ -40,8 +40,28 @@ async function migrateStudentQuestionEventPrivacy(model) {
     "workbookBytes",
     "content",
   ];
+  if (typeof collection.find !== "function") {
+    throw new Error("StudentQuestionEvent collection phải hỗ trợ truy vấn giới hạn");
+  }
+  const boundedBatchSize = Math.min(
+    Math.max(Math.floor(Number(batchSize) || 100), 1),
+    1000,
+  );
+  const rawContentFilter = {
+    $or: rawFields.map((field) => ({ [field]: { $exists: true } })),
+  };
+  const legacyEvents = await collection
+    .find(rawContentFilter)
+    .sort({ _id: 1 })
+    .limit(boundedBatchSize)
+    .project({ _id: 1 })
+    .toArray();
+  const legacyIds = legacyEvents.map((event) => event?._id).filter(Boolean);
+  if (!legacyIds.length) {
+    return { purged: 0 };
+  }
   const result = await collection.updateMany(
-    { $or: rawFields.map((field) => ({ [field]: { $exists: true } })) },
+    { _id: { $in: legacyIds } },
     { $unset: Object.fromEntries(rawFields.map((field) => [field, 1])) },
   );
   return { purged: Number(result?.modifiedCount || 0) };

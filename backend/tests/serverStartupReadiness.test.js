@@ -124,3 +124,40 @@ test("health never advertises payment settlement as ready before transaction pre
     await new Promise((resolve) => server.close(resolve));
   }
 });
+
+test("disabled Student Assistant startup still attempts privacy purge and remains available", async () => {
+  const serverPath = require.resolve("../server");
+  const previousEnabled = process.env.STUDENT_ASSISTANT_ENABLED;
+  delete require.cache[serverPath];
+  process.env.STUDENT_ASSISTANT_ENABLED = "false";
+
+  try {
+    const { createStartServer, studentAssistantEnabled } = require("../server");
+    const errors = [];
+    let migrationCalls = 0;
+    let listenCalls = 0;
+    const startServer = createStartServer({
+      connectDatabase: async () => ({}),
+      migrateMappingProfiles: async () => ({ skipped: true }),
+      migrateQuestionEvents: async () => {
+        migrationCalls += 1;
+        throw new Error("privacy migration unavailable");
+      },
+      listen: () => {
+        listenCalls += 1;
+        return { once() {} };
+      },
+      logger: { error: (message) => errors.push(message), log() {} },
+    });
+
+    assert.equal(studentAssistantEnabled, false);
+    await startServer();
+    assert.equal(migrationCalls, 1);
+    assert.equal(listenCalls, 1);
+    assert.match(errors[0], /Student question privacy migration failed/i);
+  } finally {
+    if (previousEnabled === undefined) delete process.env.STUDENT_ASSISTANT_ENABLED;
+    else process.env.STUDENT_ASSISTANT_ENABLED = previousEnabled;
+    delete require.cache[serverPath];
+  }
+});

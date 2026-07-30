@@ -176,18 +176,36 @@ test("internal question event is ask-scope and owner bounded", async () => {
   }
 });
 
-test("legacy question migration purges raw content without requiring new fields", async () => {
+test("legacy question migration purges one bounded raw-content batch", async () => {
   const calls = [];
   const result = await migrateStudentQuestionEventPrivacy({
     collection: {
+      find(filter) {
+        calls.push({ type: "find", filter });
+        return {
+          sort(sort) {
+            calls.push({ type: "sort", sort });
+            return this;
+          },
+          limit(limit) {
+            calls.push({ type: "limit", limit });
+            return this;
+          },
+          project(projection) {
+            calls.push({ type: "project", projection });
+            return this;
+          },
+          toArray: async () => [{ _id: "legacy-1" }, { _id: "legacy-2" }],
+        };
+      },
       updateMany: async (filter, update) => {
         calls.push({ filter, update });
-        return { modifiedCount: 4 };
+        return { modifiedCount: 2 };
       },
     },
-  });
+  }, { batchSize: 2 });
 
-  assert.equal(result.purged, 4);
+  assert.equal(result.purged, 2);
   assert.deepEqual(calls[0].filter, {
     $or: [
       { question: { $exists: true } },
@@ -200,7 +218,13 @@ test("legacy question migration purges raw content without requiring new fields"
       { content: { $exists: true } },
     ],
   });
-  assert.deepEqual(calls[0].update, {
+  assert.deepEqual(calls[1], { type: "sort", sort: { _id: 1 } });
+  assert.deepEqual(calls[2], { type: "limit", limit: 2 });
+  assert.deepEqual(calls[3], { type: "project", projection: { _id: 1 } });
+  assert.deepEqual(calls[4].filter, {
+    _id: { $in: ["legacy-1", "legacy-2"] },
+  });
+  assert.deepEqual(calls[4].update, {
     $unset: {
       question: 1,
       answer: 1,
@@ -212,6 +236,28 @@ test("legacy question migration purges raw content without requiring new fields"
       content: 1,
     },
   });
+});
+
+test("legacy question migration is idempotent after raw content is purged", async () => {
+  let updateCalled = false;
+  const result = await migrateStudentQuestionEventPrivacy({
+    collection: {
+      find() {
+        return {
+          sort() { return this; },
+          limit() { return this; },
+          project() { return this; },
+          toArray: async () => [],
+        };
+      },
+      updateMany: async () => {
+        updateCalled = true;
+      },
+    },
+  });
+
+  assert.equal(result.purged, 0);
+  assert.equal(updateCalled, false);
 });
 
 test("internal question event rejects a different session before database access", async () => {

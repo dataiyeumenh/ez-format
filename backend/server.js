@@ -128,43 +128,55 @@ app.get("/api/health", (req, res) => {
 
 const PORT = process.env.PORT || 5000;
 
-async function startServer() {
-  if (converterGatewayUsageReady) {
-    assertConversionContextConfig();
-    assertConverterGatewayStartupConfig();
-    assertArtifactStorageConfigured();
-  }
-  const connection = await connectDB();
-  if (converterGatewayUsageReady) {
-    const mongoConnection = connection || mongoose.connection;
-    await assertArtifactStorageReachable({ connection: mongoConnection });
-    await ensureConversionArtifactIndexes();
-  }
-  const migration = await migrateMappingProfileOwnerScope();
-  if (!migration.skipped) {
-    console.log(
-      `[DB] MappingProfile owner migration: ${migration.backfilled} backfilled, ${migration.droppedIndexes.length} obsolete index(es) dropped`,
-    );
-  }
-  if (studentAssistantEnabled) {
-    const questionMigration = await migrateStudentQuestionEventPrivacy(
-      StudentQuestionEvent,
-    );
-    if (questionMigration.purged) {
-      console.log(
-        `[DB] Student question privacy migration: ${questionMigration.purged} legacy event(s) purged`,
+function createStartServer({
+  connectDatabase = connectDB,
+  migrateMappingProfiles = migrateMappingProfileOwnerScope,
+  migrateQuestionEvents = migrateStudentQuestionEventPrivacy,
+  questionEventModel = StudentQuestionEvent,
+  startArtifactSweeper = startConversionArtifactSweeper,
+  listen = app.listen.bind(app),
+  logger = console,
+} = {}) {
+  return async function startServer() {
+    if (converterGatewayUsageReady) {
+      assertConversionContextConfig();
+      assertConverterGatewayStartupConfig();
+      assertArtifactStorageConfigured();
+    }
+    const connection = await connectDatabase();
+    if (converterGatewayUsageReady) {
+      const mongoConnection = connection || mongoose.connection;
+      await assertArtifactStorageReachable({ connection: mongoConnection });
+      await ensureConversionArtifactIndexes();
+    }
+    const migration = await migrateMappingProfiles();
+    if (!migration.skipped) {
+      logger.log(
+        `[DB] MappingProfile owner migration: ${migration.backfilled} backfilled, ${migration.droppedIndexes.length} obsolete index(es) dropped`,
       );
     }
-  }
-  const artifactSweeper = converterGatewayUsageReady
-    ? startConversionArtifactSweeper()
-    : null;
-  const server = app.listen(PORT, () => {
-    console.log(`Server running on port ${PORT}`);
-  });
-  server.once("close", () => artifactSweeper?.stop());
-  return server;
+    try {
+      const questionMigration = await migrateQuestionEvents(questionEventModel);
+      if (questionMigration.purged) {
+        logger.log(
+          `[DB] Student question privacy migration: ${questionMigration.purged} legacy event(s) purged`,
+        );
+      }
+    } catch (error) {
+      logger.error(`[DB] Student question privacy migration failed: ${error.message}`);
+    }
+    const artifactSweeper = converterGatewayUsageReady
+      ? startArtifactSweeper()
+      : null;
+    const server = listen(PORT, () => {
+      logger.log(`Server running on port ${PORT}`);
+    });
+    server.once("close", () => artifactSweeper?.stop());
+    return server;
+  };
 }
+
+const startServer = createStartServer();
 
 if (require.main === module) {
   startServer().catch((error) => {
@@ -173,4 +185,10 @@ if (require.main === module) {
   });
 }
 
-module.exports = { app, startServer, converterGatewayUsageReady };
+module.exports = {
+  app,
+  startServer,
+  createStartServer,
+  converterGatewayUsageReady,
+  studentAssistantEnabled,
+};
