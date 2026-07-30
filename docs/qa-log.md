@@ -260,3 +260,9 @@
 - Passed: Prerequisites, Fixtures templates, Backend syntax, Backend student tests, Frontend tests, Frontend build, Converter API smoke, Converter student integration
 - Failed: none
 
+## 2026-07-30 08:40:41
+- **Result:** CONTRACTS PASS; replica-set integration SKIPPED (not passed)
+- Passed: `node --test tests/paymentStatusSync.test.js tests/paymentReplicaSet.integration.test.js` (11 unit tests); `npm run qa:main-contracts` (64 backend tests, 2 frontend contract tests)
+- Skipped: 9 real replica-set payment tests because `PAYMENT_REPLICA_SET_TEST_URI` is not set
+- Release gate: remains required through `REQUIRE_REPLICA_TESTS=1`
+
