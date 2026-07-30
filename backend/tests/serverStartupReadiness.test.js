@@ -290,8 +290,8 @@ test("mapping-profile startup off mode performs compatibility checks without ind
   const fakeServer = { once() {} };
   const startServer = createStartServer({
     connectDatabase: async () => ({}),
-    migrateMappingProfiles: async (options) => {
-      calls.push(["owner", options]);
+    migrateMappingProfiles: async ({ mode }) => {
+      calls.push(["owner", { mode }]);
       return { skipped: true };
     },
     ensureV2Indexes: async () => {
@@ -326,16 +326,16 @@ test("mapping-profile startup apply mode composes owner, index, and V2 mutations
   const fakeServer = { once() {} };
   const startServer = createStartServer({
     connectDatabase: async () => ({}),
-    migrateMappingProfiles: async (options) => {
-      calls.push(["owner", options]);
+    migrateMappingProfiles: async ({ mode }) => {
+      calls.push(["owner", { mode }]);
       return { skipped: false, backfilled: 0, droppedIndexes: [] };
     },
-    ensureV2Indexes: async (options) => {
-      calls.push(["indexes", options]);
+    ensureV2Indexes: async ({ mode }) => {
+      calls.push(["indexes", { mode }]);
       return { skipped: false, indexes: [], auditIndexes: [] };
     },
-    migrateMappingProfilesV2: async (options) => {
-      calls.push(["v2", options]);
+    migrateMappingProfilesV2: async ({ mode }) => {
+      calls.push(["v2", { mode }]);
       return {
         skipped: false,
         mode: "apply",
@@ -353,10 +353,106 @@ test("mapping-profile startup apply mode composes owner, index, and V2 mutations
   try {
     assert.equal(await startServer(), fakeServer);
     assert.deepEqual(calls, [
+      ["owner", { mode: "dry-run" }],
+      ["indexes", { mode: "dry-run" }],
+      ["v2", { mode: "dry-run" }],
       ["owner", { mode: "apply" }],
       ["indexes", { mode: "apply" }],
       ["v2", { mode: "apply" }],
     ]);
+  } finally {
+    if (previousMode === undefined) delete process.env.MAPPING_PROFILE_V2_MIGRATION_MODE;
+    else process.env.MAPPING_PROFILE_V2_MIGRATION_MODE = previousMode;
+  }
+});
+
+test("mapping-profile startup apply logs shared phase report and fails closed", async () => {
+  const previousMode = process.env.MAPPING_PROFILE_V2_MIGRATION_MODE;
+  process.env.MAPPING_PROFILE_V2_MIGRATION_MODE = "apply";
+  const calls = [];
+  const errors = [];
+  let ownerMutations = 0;
+  let listenCalls = 0;
+  const startServer = createStartServer({
+    connectDatabase: async () => ({}),
+    migrateMappingProfiles: async ({ mode }) => {
+      calls.push(["owner", mode]);
+      if (mode === "apply") ownerMutations += 1;
+      return {
+        skipped: false,
+        plannedBackfills: 1,
+        backfilled: mode === "apply" ? 1 : 0,
+        indexPlan: {
+          dropIndexNames: [],
+          createIndexes: [],
+          incompatibleIndexNames: [],
+        },
+        droppedIndexes: [],
+        createdIndexes: [],
+      };
+    },
+    ensureV2Indexes: async ({ mode }) => {
+      calls.push(["indexes", mode]);
+      if (mode === "apply") throw new Error("V2 index apply failed");
+      return {
+        indexPlan: {
+          model: { incompatibleIndexNames: [], createIndexes: [] },
+          audit: { incompatibleIndexNames: [], createIndexes: [] },
+        },
+        indexes: [],
+        auditIndexes: [],
+      };
+    },
+    migrateMappingProfilesV2: async ({ mode }) => {
+      calls.push(["v2", mode]);
+      return {
+        skipped: false,
+        mode,
+        scanned: 1,
+        planned: 1,
+        created: 0,
+        skippedExisting: 0,
+        quarantined: 0,
+      };
+    },
+    migrateQuestionEvents: async () => ({ purged: 0 }),
+    migrateStudentAttempts: async () => ({ purged: 0 }),
+    listen: () => {
+      listenCalls += 1;
+      return { once() {} };
+    },
+    logger: { error: (message) => errors.push(message), log() {} },
+  });
+
+  try {
+    await assert.rejects(startServer(), /V2 index apply failed/);
+    assert.equal(ownerMutations, 1);
+    assert.equal(listenCalls, 0);
+    assert.deepEqual(calls, [
+      ["owner", "dry-run"],
+      ["indexes", "dry-run"],
+      ["v2", "dry-run"],
+      ["owner", "apply"],
+      ["indexes", "apply"],
+    ]);
+    const structuredError = JSON.parse(errors[0]);
+    assert.equal(structuredError.event, "mapping-profile-migration-failed");
+    assert.equal(structuredError.report.status, "failed");
+    assert.equal(
+      structuredError.report.rollbackBoundary.failedPhase,
+      "v2-index-apply",
+    );
+    assert.deepEqual(
+      structuredError.report.phases.map(({ name, status }) => [name, status]),
+      [
+        ["owner-scope-preflight", "completed"],
+        ["v2-index-preflight", "completed"],
+        ["v2-data-preflight", "completed"],
+        ["owner-scope-apply", "completed"],
+        ["v2-index-apply", "failed"],
+        ["v2-data-apply", "pending"],
+      ],
+    );
   } finally {
     if (previousMode === undefined) delete process.env.MAPPING_PROFILE_V2_MIGRATION_MODE;
     else process.env.MAPPING_PROFILE_V2_MIGRATION_MODE = previousMode;

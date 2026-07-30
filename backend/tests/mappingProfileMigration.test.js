@@ -5,10 +5,21 @@ const {
   OWNER_SCOPE_UNIQUE_INDEX,
   OWNER_SCOPE_UNIQUE_INDEX_KEYS,
   OBSOLETE_WORKSPACE_UNIQUE_INDEX,
+  OBSOLETE_WORKSPACE_UNIQUE_INDEX_KEYS,
   buildLegacyOwnerScopeUpdate,
   migrateMappingProfileOwnerScope,
   planMappingProfileIndexMigration,
 } = require("../services/mappingProfileMigrationService");
+
+function recognizedObsoleteIndex(overrides = {}) {
+  return {
+    v: 2,
+    name: OBSOLETE_WORKSPACE_UNIQUE_INDEX,
+    key: OBSOLETE_WORKSPACE_UNIQUE_INDEX_KEYS,
+    unique: true,
+    ...overrides,
+  };
+}
 
 test("mapping profile owner migration defaults to off without touching Mongo", async () => {
   let queried = false;
@@ -69,9 +80,8 @@ test("mapping profile index plan drops only the obsolete workspace unique index"
     planMappingProfileIndexMigration([
       { name: "_id_", key: { _id: 1 }, unique: true },
       {
-        name: OBSOLETE_WORKSPACE_UNIQUE_INDEX,
-        key: { workspace: 1, targetTemplateId: 1, sourceSignatureHash: 1 },
-        unique: true,
+        ...recognizedObsoleteIndex(),
+        ns: "ezformat.mappingprofiles",
       },
       {
         name: "ownerScope_1_targetTemplateId_1_sourceSignatureHash_1",
@@ -108,7 +118,7 @@ test("mapping profile owner dry-run reports backfills and index drops without wr
     },
     collection: {
       async indexes() {
-        return [{ name: OBSOLETE_WORKSPACE_UNIQUE_INDEX }];
+        return [recognizedObsoleteIndex()];
       },
       async dropIndex() {
         writes.push("dropIndex");
@@ -163,7 +173,7 @@ test("mapping profile migration backfills before explicit drop and create operat
         calls.push(["indexes"]);
         return [
           { name: "_id_", key: { _id: 1 } },
-          { name: OBSOLETE_WORKSPACE_UNIQUE_INDEX },
+          recognizedObsoleteIndex(),
         ];
       },
       async dropIndex(name) {
@@ -249,7 +259,7 @@ test("concurrent mapping migrations ignore IndexNotFound while dropping the obso
     },
     collection: {
       async indexes() {
-        return [{ name: OBSOLETE_WORKSPACE_UNIQUE_INDEX }];
+        return [recognizedObsoleteIndex()];
       },
       async dropIndex(name) {
         calls.push(["dropIndex", name]);
@@ -296,7 +306,7 @@ test("mapping migration fails closed for non-IndexNotFound drop errors", async (
     },
     collection: {
       async indexes() {
-        return [{ name: OBSOLETE_WORKSPACE_UNIQUE_INDEX }];
+        return [recognizedObsoleteIndex()];
       },
       async dropIndex() {
         const error = new Error("drop denied");
@@ -314,6 +324,66 @@ test("mapping migration fails closed for non-IndexNotFound drop errors", async (
     /drop denied/,
   );
   assert.equal(syncCalled, false);
+});
+
+test("obsolete index name with unrelated keys blocks apply and is never dropped", async () => {
+  const writes = [];
+  const model = {
+    db: { readyState: 1 },
+    find() {
+      return {
+        select() {
+          return this;
+        },
+        lean: async () => [{
+          _id: "profile-1",
+          workspace: "workspace-1",
+          updatedBy: "user-1",
+        }],
+      };
+    },
+    async bulkWrite() {
+      writes.push("bulkWrite");
+    },
+    collection: {
+      async indexes() {
+        return [recognizedObsoleteIndex({ key: { unrelated: 1 } })];
+      },
+      async dropIndex(name) {
+        writes.push(["dropIndex", name]);
+      },
+      async createIndex(keys, options) {
+        writes.push(["createIndex", keys, options]);
+      },
+    },
+  };
+
+  await assert.rejects(
+    migrateMappingProfileOwnerScope({ model, mode: "apply" }),
+    /compatibility/i,
+  );
+  assert.deepEqual(writes, []);
+});
+
+test("obsolete index semantic option mismatches block drop", () => {
+  const mismatches = [
+    { sparse: true },
+    { collation: { locale: "vi", strength: 1 } },
+    { partialFilterExpression: { workspace: { $exists: true } } },
+    { expireAfterSeconds: 3600 },
+    { hidden: true },
+  ];
+
+  for (const mismatch of mismatches) {
+    const plan = planMappingProfileIndexMigration([
+      recognizedObsoleteIndex(mismatch),
+    ]);
+    assert.deepEqual(plan.dropIndexNames, []);
+    assert.deepEqual(
+      plan.incompatibleIndexNames,
+      [OBSOLETE_WORKSPACE_UNIQUE_INDEX],
+    );
+  }
 });
 
 test("mapping migration leaves unmanaged and unrelated missing schema indexes untouched", async () => {

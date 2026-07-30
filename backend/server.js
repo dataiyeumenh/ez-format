@@ -19,6 +19,9 @@ const {
   migrateMappingProfilesV1ToV2,
 } = require("./services/mappingProfileV2MigrationService");
 const {
+  runProductionMigrationPreflight,
+} = require("./scripts/preflight-production-migrations");
+const {
   getRuntimeCapabilities,
 } = require("./services/runtimeCapabilitiesService");
 const { getRevenue } = require("./controllers/adminController");
@@ -186,6 +189,7 @@ function createStartServer({
   migrateMappingProfiles = migrateMappingProfileOwnerScope,
   ensureV2Indexes = ensureMappingProfileV2Indexes,
   migrateMappingProfilesV2 = migrateMappingProfilesV1ToV2,
+  runMappingProfileMigrations = runProductionMigrationPreflight,
   migrateQuestionEvents = migrateStudentQuestionEventPrivacy,
   questionEventModel = StudentQuestionEvent,
   migrateStudentAttempts = ensureStudentAttemptPersistence,
@@ -231,31 +235,31 @@ function createStartServer({
         );
       }
     }
-    const migration = await migrateMappingProfiles({ mode: v2MigrationMode });
-    if (!migration.skipped) {
-      if (v2MigrationMode === "dry-run") {
-        logger.log(
-          `[DB] MappingProfile owner migration (dry-run): ${migration.plannedBackfills} backfill(s) planned, ${migration.indexPlan.dropIndexNames.length} obsolete index drop(s) planned`,
-        );
-      } else {
-        logger.log(
-          `[DB] MappingProfile owner migration: ${migration.backfilled} backfilled, ${migration.droppedIndexes.length} obsolete index(es) dropped`,
-        );
+    if (v2MigrationMode === "off") {
+      await migrateMappingProfiles({ mode: "off" });
+      await migrateMappingProfilesV2({ mode: "off" });
+    } else {
+      try {
+        const migrationReport = await runMappingProfileMigrations({
+          mode: v2MigrationMode,
+          connection: connection?.connection || connection || mongoose.connection,
+          migrateOwnerScope: migrateMappingProfiles,
+          ensureV2Indexes,
+          migrateV2: migrateMappingProfilesV2,
+        });
+        logger.log(JSON.stringify({
+          event: "mapping-profile-migration-completed",
+          report: migrationReport,
+        }));
+      } catch (error) {
+        if (error?.report) {
+          logger.error(JSON.stringify({
+            event: "mapping-profile-migration-failed",
+            report: error.report,
+          }));
+        }
+        throw error;
       }
-    }
-    if (v2MigrationMode === "dry-run" || v2MigrationMode === "apply") {
-      const v2Indexes = await ensureV2Indexes({ mode: v2MigrationMode });
-      if (v2MigrationMode === "dry-run") {
-        logger.log(
-          `[DB] MappingProfile V2 indexes (dry-run): ${v2Indexes.indexPlan.model.createIndexNames.length} model index(es), ${v2Indexes.indexPlan.audit.createIndexNames.length} audit index(es) planned`,
-        );
-      }
-    }
-    const v2Migration = await migrateMappingProfilesV2({ mode: v2MigrationMode });
-    if (!v2Migration.skipped) {
-      logger.log(
-        `[DB] MappingProfile V2 migration (${v2Migration.mode}): ${v2Migration.created} created, ${v2Migration.skippedExisting} existing, ${v2Migration.quarantined} quarantined`,
-      );
     }
     try {
       const questionMigration = await migrateQuestionEvents(questionEventModel);

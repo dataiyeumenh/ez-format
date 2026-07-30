@@ -1,7 +1,24 @@
 const MappingProfile = require("../models/MappingProfile");
+const {
+  indexMatchesContract,
+  sameIndexKeys,
+} = require("./mongoIndexContract");
 
 const OBSOLETE_WORKSPACE_UNIQUE_INDEX =
   "workspace_1_targetTemplateId_1_sourceSignatureHash_1";
+const OBSOLETE_WORKSPACE_UNIQUE_INDEX_KEYS = Object.freeze({
+  workspace: 1,
+  targetTemplateId: 1,
+  sourceSignatureHash: 1,
+});
+const OBSOLETE_WORKSPACE_UNIQUE_INDEX_SPEC = Object.freeze({
+  name: OBSOLETE_WORKSPACE_UNIQUE_INDEX,
+  keys: OBSOLETE_WORKSPACE_UNIQUE_INDEX_KEYS,
+  options: Object.freeze({
+    name: OBSOLETE_WORKSPACE_UNIQUE_INDEX,
+    unique: true,
+  }),
+});
 const OWNER_SCOPE_UNIQUE_INDEX =
   "ownerScope_1_targetTemplateId_1_sourceSignatureHash_1";
 const OWNER_SCOPE_UNIQUE_INDEX_KEYS = Object.freeze({
@@ -53,26 +70,39 @@ function buildLegacyOwnerScopeUpdate(profile = {}) {
 }
 
 function planMappingProfileIndexMigration(indexes = []) {
-  const sameKeys = (index) => JSON.stringify(index?.key || {})
-    === JSON.stringify(OWNER_SCOPE_UNIQUE_INDEX_KEYS);
   const compatibleIndex = indexes.some(
-    (index) => sameKeys(index) && index?.unique === true,
+    (index) => indexMatchesContract(index, OWNER_SCOPE_UNIQUE_INDEX_SPEC),
   );
   const incompatibleIndexNames = indexes
     .filter((index) => (
-      index?.name === OWNER_SCOPE_UNIQUE_INDEX || sameKeys(index)
-    ) && !(sameKeys(index) && index?.unique === true))
+      index?.name === OWNER_SCOPE_UNIQUE_INDEX
+      || sameIndexKeys(index?.key, OWNER_SCOPE_UNIQUE_INDEX_KEYS)
+    ) && !indexMatchesContract(index, OWNER_SCOPE_UNIQUE_INDEX_SPEC))
     .map((index) => index.name)
     .filter(Boolean);
+  const obsoleteIndexes = indexes.filter(
+    (index) => index?.name === OBSOLETE_WORKSPACE_UNIQUE_INDEX,
+  );
+  incompatibleIndexNames.push(
+    ...obsoleteIndexes
+      .filter((index) => !indexMatchesContract(
+        index,
+        OBSOLETE_WORKSPACE_UNIQUE_INDEX_SPEC,
+      ))
+      .map((index) => index.name),
+  );
 
   return {
-    dropIndexNames: indexes
-      .filter((index) => index?.name === OBSOLETE_WORKSPACE_UNIQUE_INDEX)
+    dropIndexNames: obsoleteIndexes
+      .filter((index) => indexMatchesContract(
+        index,
+        OBSOLETE_WORKSPACE_UNIQUE_INDEX_SPEC,
+      ))
       .map((index) => index.name),
     createIndexes: compatibleIndex || incompatibleIndexNames.length
       ? []
       : [OWNER_SCOPE_UNIQUE_INDEX_SPEC],
-    incompatibleIndexNames,
+    incompatibleIndexNames: [...new Set(incompatibleIndexNames)],
   };
 }
 
@@ -161,6 +191,7 @@ module.exports = {
   OWNER_SCOPE_UNIQUE_INDEX,
   OWNER_SCOPE_UNIQUE_INDEX_KEYS,
   OBSOLETE_WORKSPACE_UNIQUE_INDEX,
+  OBSOLETE_WORKSPACE_UNIQUE_INDEX_KEYS,
   buildLegacyOwnerScopeUpdate,
   migrateMappingProfileOwnerScope,
   planMappingProfileIndexMigration,

@@ -4,6 +4,10 @@ const MappingProfile = require("../models/MappingProfile");
 const MappingProfileV2 = require("../models/MappingProfileV2");
 const MappingProfileV2MigrationAudit = require("../models/MappingProfileV2MigrationAudit");
 const {
+  indexMatchesContract,
+  sameIndexKeys,
+} = require("./mongoIndexContract");
+const {
   buildProfileKey,
   buildStateHash,
   detectRiskFlags,
@@ -498,24 +502,18 @@ async function existingIndexes(model) {
 
 async function planModelIndexes(model, desired = []) {
   const existing = await existingIndexes(model);
-  const compatible = (current, spec) => (
-    JSON.stringify(current?.key || {}) === JSON.stringify(spec.keys)
-    && Boolean(current?.unique) === Boolean(spec.options.unique)
-    && JSON.stringify(current?.partialFilterExpression || null)
-      === JSON.stringify(spec.options.partialFilterExpression || null)
-  );
   const conflictsBySpec = new Map(desired.map((spec) => [
     spec.name,
     existing.filter((current) => (
       current.name === spec.name
-      || JSON.stringify(current.key || {}) === JSON.stringify(spec.keys)
-    ) && !compatible(current, spec)),
+      || sameIndexKeys(current.key, spec.keys)
+    ) && !indexMatchesContract(current, spec)),
   ]));
   const incompatibleIndexNames = [...conflictsBySpec.values()]
     .flatMap((conflicts) => conflicts.map((index) => index.name).filter(Boolean))
     .filter((name, index, names) => names.indexOf(name) === index);
   const createIndexes = desired.filter((spec) => (
-    !existing.some((current) => compatible(current, spec))
+    !existing.some((current) => indexMatchesContract(current, spec))
     && conflictsBySpec.get(spec.name).length === 0
   ));
 

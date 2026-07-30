@@ -31,10 +31,10 @@ GREEN verification:
 
 ```text
 node --test tests/mappingProfileMigration.test.js tests/mappingProfileV2Migration.test.js
-20 tests, 20 pass, 0 fail (exit 0)
+26 tests, 26 pass, 0 fail (exit 0)
 
 node --test tests/serverStartupReadiness.test.js tests/preflightProductionMigrations.test.js
-20 tests, 20 pass, 0 fail (exit 0)
+23 tests, 23 pass, 0 fail (exit 0)
 
 npm run qa:fast
 QA/QC PASSED (9 steps) (exit 0)
@@ -63,11 +63,24 @@ Blockers: none.
 - Added regression coverage for unmanaged indexes, unrelated missing schema
   indexes, incompatible specs, and failure after owner mutation.
 
+## Exact Contract Review Fix
+
+- Obsolete V1 index drops now require the recognized legacy name, ordered keys,
+  and exact semantic options. Same-name key/option mismatches block apply and
+  remain untouched.
+- Shared index-contract comparison covers every retained semantic option,
+  including unique, sparse, collation, partial filters, TTL, hidden, and
+  unexpected options. Mongo metadata/build-only fields are excluded.
+- Startup `dry-run`/`apply` now calls the CLI's shared phase orchestrator.
+  Startup apply completes all three read-only preflights before owner mutation.
+- Startup phase failures log a machine-readable report plus rollback boundary,
+  fail closed, and never begin listening.
+
 Review-fix verification:
 
 ```text
 node --test tests/mappingProfileMigration.test.js tests/mappingProfileV2Migration.test.js tests/serverStartupReadiness.test.js tests/preflightProductionMigrations.test.js
-45 tests, 45 pass, 0 fail (exit 0)
+49 tests, 49 pass, 0 fail (exit 0)
 
 npm run qa:fast
 QA/QC PASSED (9 steps) (exit 0)

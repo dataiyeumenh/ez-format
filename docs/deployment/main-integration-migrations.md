@@ -41,6 +41,30 @@ operations shown in these plans. It does not call `syncIndexes()` or
 model-wide `createIndexes()`. Unmanaged indexes and new schema indexes outside
 the reviewed allowlists remain untouched.
 
+The obsolete V1 index is eligible for drop only when Mongo reports this exact
+recognized legacy contract:
+
+```json
+{
+  "name": "workspace_1_targetTemplateId_1_sourceSignatureHash_1",
+  "key": {
+    "workspace": 1,
+    "targetTemplateId": 1,
+    "sourceSignatureHash": 1
+  },
+  "unique": true
+}
+```
+
+The key order is part of the contract. Any extra or mismatched semantic option
+blocks apply, including `sparse`, `collation`, `partialFilterExpression`,
+`expireAfterSeconds`, `hidden`, or an unrecognized option. Index compatibility
+uses the same rule for V1, V2, and audit indexes. Only Mongo metadata and
+build-only fields (`v`, `key`, `name`, `ns`, and `background`) are excluded;
+explicit false values for default-false `unique`, `sparse`, and `hidden` are
+equivalent to omission. A same-name index with different keys or options is
+reported as incompatible and is never dropped.
+
 Any index inspection error other than a missing collection fails the command.
 Any apply error, including non-`IndexNotFound` drop errors, stops remaining
 work and returns a non-zero exit code. A failed command still prints one JSON
@@ -68,9 +92,14 @@ preflight phases. Compatibility blockers therefore fail before mutation when
 they are observable during preflight. State can still change between preflight
 and apply, so each mutating service checks its plan again and fails closed.
 
-Startup also honors exact `apply` mode for controlled deployments. Prefer the
-standalone command after reviewing `off` or `dry-run` output because it emits
-the execution report separately from service availability.
+Startup also honors exact `dry-run` and `apply` modes for controlled
+deployments. Both use the same phase runner and JSON report contract as the
+standalone command. Startup `apply` completes owner-scope, V2-index, and V2-data
+preflight phases before the first mutation. On phase failure it logs a
+`mapping-profile-migration-failed` JSON event containing the phase report and
+rollback boundary, then refuses to listen. Prefer the standalone command after
+reviewing `off` or `dry-run` output because it separates migration execution
+from service availability.
 
 ## Rollback
 

@@ -488,6 +488,70 @@ test("V2 index preflight reports conflicting key specs without scheduling a crea
   assert.deepEqual(report.indexPlan.model.createIndexes, []);
 });
 
+test("V2 index compatibility rejects every semantic option mismatch", async () => {
+  const mismatches = [
+    {
+      expected: { sparse: true },
+      actual: {},
+    },
+    {
+      expected: { collation: { locale: "vi", strength: 1 } },
+      actual: { collation: { locale: "en", strength: 1 } },
+    },
+    {
+      expected: { partialFilterExpression: { status: "active" } },
+      actual: { partialFilterExpression: { status: "draft" } },
+    },
+    {
+      expected: { expireAfterSeconds: 3600 },
+      actual: { expireAfterSeconds: 7200 },
+    },
+    {
+      expected: { hidden: true },
+      actual: { hidden: false },
+    },
+    {
+      expected: {},
+      actual: { wildcardProjection: { tenantId: 1 } },
+    },
+  ];
+
+  for (const mismatch of mismatches) {
+    const expectedSpec = {
+      ...TEST_V2_INDEX_SPEC,
+      options: {
+        ...TEST_V2_INDEX_SPEC.options,
+        ...mismatch.expected,
+      },
+    };
+    const model = {
+      collection: {
+        async indexes() {
+          return [{
+            name: TEST_V2_INDEX_SPEC.name,
+            key: TEST_V2_INDEX_SPEC.keys,
+            unique: true,
+            ...mismatch.actual,
+          }];
+        },
+      },
+    };
+
+    const report = await ensureMappingProfileV2Indexes({
+      model,
+      mode: "dry-run",
+      modelIndexSpecs: [expectedSpec],
+      auditIndexSpecs: [],
+    });
+
+    assert.deepEqual(
+      report.indexPlan.model.incompatibleIndexNames,
+      [TEST_V2_INDEX_SPEC.name],
+    );
+    assert.deepEqual(report.indexPlan.model.createIndexes, []);
+  }
+});
+
 test("V2 index apply leaves unmanaged and unrelated schema indexes untouched", async () => {
   const writes = [];
   const model = {
