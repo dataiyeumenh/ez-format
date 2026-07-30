@@ -14,7 +14,7 @@ function runScript(script, env, args = []) {
   );
 }
 
-test("qa:release requires a replica-set URI without depending on PayOS secrets", () => {
+test("qa:release fails closed when mandatory external evidence is absent", () => {
   const result = runScript(releaseScript, {
     REQUIRE_REPLICA_TESTS: "",
     PAYMENT_REPLICA_SET_TEST_URI: "",
@@ -24,7 +24,9 @@ test("qa:release requires a replica-set URI without depending on PayOS secrets",
   });
 
   assert.notEqual(result.status, 0);
-  assert.match(`${result.stdout}\n${result.stderr}`, /real replica-set payment suite is required/i);
+  const output = `${result.stdout}\n${result.stderr}`;
+  assert.match(output, /RELEASE_BLOCKED/);
+  assert.match(output, /"missing":\["gridfs","live_gateway","replica_mongo"\]/);
 });
 
 test("local contract check may skip replica tests when release flag is absent", () => {
