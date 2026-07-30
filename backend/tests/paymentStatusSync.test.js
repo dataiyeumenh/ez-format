@@ -318,6 +318,88 @@ test("zero-total settlement uses the same transactional coupon and entitlement p
   assert.equal(store.transactions, 1);
 });
 
+test("zero-total creation rolls back its new payment when coupon settlement fails", async () => {
+  const store = {
+    payment: null,
+    user: { _id: "user-id", plan: "Free", fileCredits: 2 },
+    transactions: 0,
+  };
+  const plan = { _id: "perfile-plan", code: "perfile", fileCredits: 1, durationDays: 0 };
+  const PaymentModel = {
+    db: {
+      async startSession() {
+        return {
+          async withTransaction(work) {
+            this.state = { payment: null, user: clone(store.user) };
+            store.transactions += 1;
+            try {
+              await work();
+              store.payment = clone(this.state.payment);
+              store.user = clone(this.state.user);
+            } finally {
+              this.state = null;
+            }
+          },
+          async endSession() {},
+        };
+      },
+    },
+    async create([data], { session }) {
+      const payment = {
+        ...data,
+        _id: "new-payment-id",
+        plan,
+        status: "pending",
+        async populate() { return this; },
+        async save() {},
+      };
+      session.state.payment = payment;
+      return [payment];
+    },
+  };
+  const UserModel = {
+    findById() {
+      return {
+        session(session) {
+          const user = {
+            ...session.state.user,
+            async save() {},
+          };
+          session.state.user = user;
+          return queryFor(user);
+        },
+      };
+    },
+  };
+  const sync = createPaymentStatusSynchronizer({
+    PaymentModel,
+    UserModel,
+    assertPaymentSettlementReady() {},
+    async recordCouponUsage() {
+      throw new Error("coupon usage failed");
+    },
+  });
+
+  await assert.rejects(
+    sync.createAndSettleZeroTotalPayment({
+      user: "user-id",
+      plan: "perfile-plan",
+      orderCode: 123456,
+      planCode: "perfile",
+      planName: "Per-file",
+      amount: 0,
+      coupon: "coupon-id",
+      couponApplied: true,
+      discountAmount: 10000,
+    }),
+    /coupon usage failed/,
+  );
+
+  assert.equal(store.transactions, 1);
+  assert.equal(store.payment, null);
+  assert.equal(store.user.fileCredits, 2);
+});
+
 test("PayOS settlement rolls back payment and entitlement when coupon settlement fails", async () => {
   const { createPendingSnapshot, store } = installPaymentStore();
   store.payment.coupon = "coupon-id";

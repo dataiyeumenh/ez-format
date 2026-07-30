@@ -1,15 +1,4 @@
-# Student Assistant SDD Progress
-
-Phase 0 Task 1: complete (review clean)
-Phase 0 Task 2: complete (review clean)
-Phase 0 Tasks 3-5: complete (review clean)
-Phase 1: complete (review clean)
-Phase 2: complete (review clean)
-Phase 3: complete (student-owned attempt state; review clean)
-Phase 4: complete (accounting map; review clean)
-Phase 5: complete (Decimal-safe reconciliation; review clean)
-Phase 6: complete (privacy-safe internship assistant; review clean)
-Phase 7: intentionally skipped per user request
-Final Important fix wave: complete (seven findings fixed)
-Final XLS structure fix: complete (warning-only formula capability and normalized evidence)
-Final independent review: PASS, no Critical or Important findings
+Task 0: complete (worktree `codex/main-experimental-production-integration` from `8d1a934`, source workspace untouched)
+Task 1: complete (commits `8d1a934..fae0c25`, review clean)
+Task 2: complete (commits `724c114..676930e`, review clean after two fixes)
+Task 3: complete (zero-total creation and settlement are atomic; focused payment tests 30 pass/8 replica skipped; `qa:main-contracts` 64 backend pass/8 replica skipped plus 2 frontend pass; `PAYMENT_REPLICA_SET_TEST_URI` absent, so real replica coverage was not executed)

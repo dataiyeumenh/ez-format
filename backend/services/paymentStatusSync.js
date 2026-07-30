@@ -46,15 +46,13 @@ function createPaymentStatusSynchronizer({
   beforeTransactionWork = async () => {},
   recordCouponUsage: recordCouponUsageForSettlement = recordCouponUsage,
 } = {}) {
-  async function withPaymentTransaction(paymentId, work) {
+  async function withTransaction(work) {
     assertReady();
     const session = await PaymentModel.db.startSession();
     try {
       let result;
       await session.withTransaction(async () => {
-        const payment = await PaymentModel.findById(paymentId).session(session).populate("plan");
-        await beforeTransactionWork({ payment, session });
-        result = await work(payment, session);
+        result = await work(session);
       });
       return result;
     } finally {
@@ -62,39 +60,16 @@ function createPaymentStatusSynchronizer({
     }
   }
 
-  async function applyPaidPayment(payment, remotePaymentLink, snapshotPayOSData) {
-    return withPaymentTransaction(payment._id, async (storedPayment, session) => {
-      if (!storedPayment) return payment;
-      if (storedPayment.status === "paid") {
-        if (storedPayment.coupon) {
-          await recordCouponUsageForSettlement({
-            couponId: storedPayment.coupon,
-            userId: storedPayment.user,
-            paymentId: storedPayment._id,
-            discountAmount: storedPayment.discountAmount || 0,
-            session,
-          });
-        }
-        return storedPayment;
-      }
+  async function withPaymentTransaction(paymentId, work) {
+    return withTransaction(async (session) => {
+      const payment = await PaymentModel.findById(paymentId).session(session).populate("plan");
+      await beforeTransactionWork({ payment, session });
+      return work(payment, session);
+    });
+  }
 
-      mergePayOSData(storedPayment, snapshotPayOSData, remotePaymentLink);
-      if (Number(remotePaymentLink.amount) !== Number(storedPayment.amount)) {
-        storedPayment.status = "failed";
-        await storedPayment.save({ session });
-        return storedPayment;
-      }
-
-      const user = await UserModel.findById(storedPayment.user).session(session);
-      if (!user) {
-        storedPayment.status = "failed";
-        await storedPayment.save({ session });
-        return storedPayment;
-      }
-
-      storedPayment.paidAt = storedPayment.paidAt || new Date();
-      applyPaidPlanToUser(user, storedPayment.plan, storedPayment.paidAt);
-      storedPayment.status = "paid";
+  async function settlePaidPayment(storedPayment, remotePaymentLink, snapshotPayOSData, session) {
+    if (storedPayment.status === "paid") {
       if (storedPayment.coupon) {
         await recordCouponUsageForSettlement({
           couponId: storedPayment.coupon,
@@ -104,9 +79,61 @@ function createPaymentStatusSynchronizer({
           session,
         });
       }
-      await user.save({ session });
+      return storedPayment;
+    }
+
+    mergePayOSData(storedPayment, snapshotPayOSData, remotePaymentLink);
+    if (Number(remotePaymentLink.amount) !== Number(storedPayment.amount)) {
+      storedPayment.status = "failed";
       await storedPayment.save({ session });
       return storedPayment;
+    }
+
+    const user = await UserModel.findById(storedPayment.user).session(session);
+    if (!user) {
+      storedPayment.status = "failed";
+      await storedPayment.save({ session });
+      return storedPayment;
+    }
+
+    storedPayment.paidAt = storedPayment.paidAt || new Date();
+    applyPaidPlanToUser(user, storedPayment.plan, storedPayment.paidAt);
+    storedPayment.status = "paid";
+    if (storedPayment.coupon) {
+      await recordCouponUsageForSettlement({
+        couponId: storedPayment.coupon,
+        userId: storedPayment.user,
+        paymentId: storedPayment._id,
+        discountAmount: storedPayment.discountAmount || 0,
+        session,
+      });
+    }
+    await user.save({ session });
+    await storedPayment.save({ session });
+    return storedPayment;
+  }
+
+  async function applyPaidPayment(payment, remotePaymentLink, snapshotPayOSData) {
+    return withPaymentTransaction(payment._id, async (storedPayment, session) => {
+      if (!storedPayment) return payment;
+      return settlePaidPayment(storedPayment, remotePaymentLink, snapshotPayOSData, session);
+    });
+  }
+
+  async function createAndSettleZeroTotalPayment(
+    paymentData,
+    remotePaymentLink = { amount: 0, status: "PAID" },
+    snapshotPayOSData = { freeCheckout: true },
+  ) {
+    if (Number(paymentData?.amount) !== 0) {
+      throw new Error("Zero-total settlement requires a zero payment amount");
+    }
+
+    return withTransaction(async (session) => {
+      await beforeTransactionWork({ payment: null, session });
+      const [storedPayment] = await PaymentModel.create([paymentData], { session });
+      await storedPayment.populate("plan");
+      return settlePaidPayment(storedPayment, remotePaymentLink, snapshotPayOSData, session);
     });
   }
 
@@ -154,6 +181,7 @@ function createPaymentStatusSynchronizer({
   return {
     applyPaidPayment,
     applyNonPaidPaymentStatus,
+    createAndSettleZeroTotalPayment,
     syncPaymentStatusFromPayOS,
     withPaymentTransaction,
   };

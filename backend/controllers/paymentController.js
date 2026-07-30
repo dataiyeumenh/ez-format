@@ -5,6 +5,7 @@ const { findActivePlanByCodeOrId, serializePlan } = require("../services/planSer
 const {
   applyPaidPayment,
   applyNonPaidPaymentStatus,
+  createAndSettleZeroTotalPayment,
   normalizePayOSStatus,
   syncPaymentStatusFromPayOS,
 } = require("../services/paymentStatusSync");
@@ -139,7 +140,7 @@ async function createPayment(req, res) {
     }
 
     const orderCode = await generateOrderCode();
-    const payment = await Payment.create({
+    const paymentData = {
       user: req.user._id,
       plan: plan._id,
       orderCode,
@@ -152,12 +153,12 @@ async function createPayment(req, res) {
       couponCode,
       couponApplied: Boolean(couponDoc),
       status: "pending",
-    });
+    };
 
-    // Giảm 100% vẫn phải đi qua giao dịch settlement idempotent.
+    // Keep zero-total creation and settlement atomic so failed settlement leaves no pending payment.
     if (finalAmount === 0) {
-      const settledPayment = await applyPaidPayment(
-        payment,
+      const settledPayment = await createAndSettleZeroTotalPayment(
+        paymentData,
         { amount: 0, status: "PAID" },
         { freeCheckout: true },
       );
@@ -175,6 +176,8 @@ async function createPayment(req, res) {
         freeCheckout: true,
       });
     }
+
+    const payment = await Payment.create(paymentData);
 
     const payOS = getPayOSClient();
     const paymentLink = await payOS.paymentRequests.create({

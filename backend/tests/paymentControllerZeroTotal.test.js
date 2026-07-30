@@ -14,6 +14,7 @@ const original = {
   findActivePlanByCodeOrId: planService.findActivePlanByCodeOrId,
   serializePlan: planService.serializePlan,
   applyPaidPayment: paymentStatusSync.applyPaidPayment,
+  createAndSettleZeroTotalPayment: paymentStatusSync.createAndSettleZeroTotalPayment,
   validateCouponForCheckout: couponService.validateCouponForCheckout,
 };
 
@@ -24,17 +25,20 @@ test.after(() => {
   planService.findActivePlanByCodeOrId = original.findActivePlanByCodeOrId;
   planService.serializePlan = original.serializePlan;
   paymentStatusSync.applyPaidPayment = original.applyPaidPayment;
+  paymentStatusSync.createAndSettleZeroTotalPayment = original.createAndSettleZeroTotalPayment;
   couponService.validateCouponForCheckout = original.validateCouponForCheckout;
   delete require.cache[require.resolve("../controllers/paymentController")];
 });
 
-test("zero-total checkout delegates settlement to the transactional payment service", async () => {
+test("zero-total checkout creates and settles the payment in one transactional service call", async () => {
   const plan = { _id: "plan-id", code: "perfile", name: "Per-file", price: 10000, fileCredits: 1 };
   const coupon = { _id: "coupon-id" };
   let settlement;
 
   Payment.exists = async () => false;
-  Payment.create = async (data) => ({ ...data, _id: "payment-id", plan, save: async () => {} });
+  Payment.create = async () => {
+    throw new Error("controller must not create zero-total payments directly");
+  };
   User.findById = async () => {
     throw new Error("controller must not settle zero-total checkouts directly");
   };
@@ -44,11 +48,9 @@ test("zero-total checkout delegates settlement to the transactional payment serv
     coupon,
     pricing: { originalAmount: 10000, discountAmount: 10000, finalAmount: 0 },
   });
-  paymentStatusSync.applyPaidPayment = async (payment, remotePayment, paymentData) => {
-    settlement = { payment, remotePayment, paymentData };
-    payment.status = "paid";
-    payment.paidAt = new Date();
-    return payment;
+  paymentStatusSync.createAndSettleZeroTotalPayment = async (paymentData, settlementData) => {
+    settlement = { paymentData, settlementData };
+    return { ...paymentData, _id: "payment-id", plan, status: "paid", paidAt: new Date() };
   };
 
   delete require.cache[require.resolve("../controllers/paymentController")];
@@ -73,7 +75,7 @@ test("zero-total checkout delegates settlement to the transactional payment serv
 
   assert.equal(response.statusCode, 201);
   assert.equal(response.body.freeCheckout, true);
-  assert.equal(settlement.payment._id, "payment-id");
-  assert.deepEqual(settlement.remotePayment, { amount: 0, status: "PAID" });
-  assert.deepEqual(settlement.paymentData, { freeCheckout: true });
+  assert.equal(settlement.paymentData.amount, 0);
+  assert.equal(settlement.paymentData.orderCode, response.body.orderCode);
+  assert.deepEqual(settlement.settlementData, { amount: 0, status: "PAID" });
 });

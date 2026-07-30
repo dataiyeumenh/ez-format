@@ -29,6 +29,7 @@ if (SKIP_REASON) {
     "replica-set concurrent coupon settlement records one usage",
     "replica-set paid settlements enforce the global coupon limit",
     "replica-set zero-total settlements enforce the per-user coupon limit",
+    "replica-set concurrent zero-total payment creation enforces the per-user coupon limit",
   ]) {
     test(name, { skip: SKIP_REASON }, () => {});
   }
@@ -358,6 +359,64 @@ if (SKIP_REASON) {
     assert.equal(results.filter((result) => result.status === "fulfilled").length, 1);
     assert.equal(results.filter((result) => result.status === "rejected").length, 1);
     assert.equal([storedFirstPayment, storedSecondPayment].filter((paymentDoc) => paymentDoc.status === "paid").length, 1);
+    assert.equal(storedUser.fileCredits, 3);
+    assert.equal(storedCoupon.usageCount, 1);
+    assert.equal(usages, 1);
+  });
+
+  test("replica-set concurrent zero-total payment creation enforces the per-user coupon limit", async () => {
+    const { coupon, payment, plan, user } = await createFixture({ withCoupon: true });
+    let arrivals = 0;
+    let releaseGate;
+    const gate = new Promise((resolve) => {
+      releaseGate = resolve;
+    });
+    const synchronizer = createPaymentStatusSynchronizer({
+      async beforeTransactionWork() {
+        arrivals += 1;
+        if (arrivals === 2) releaseGate();
+        await gate;
+      },
+    });
+    const paymentData = (orderCode) => ({
+      user: user._id,
+      plan: plan._id,
+      orderCode,
+      planCode: plan.code,
+      planName: plan.name,
+      amount: 0,
+      originalAmount: payment.amount,
+      discountAmount: payment.amount,
+      coupon: coupon._id,
+      couponCode: coupon.code,
+      couponApplied: true,
+      status: "pending",
+    });
+
+    const results = await Promise.allSettled([
+      synchronizer.createAndSettleZeroTotalPayment(
+        paymentData(Number(`${Date.now()}101`.slice(-12))),
+        { amount: 0, status: "PAID" },
+        { freeCheckout: true },
+      ),
+      synchronizer.createAndSettleZeroTotalPayment(
+        paymentData(Number(`${Date.now()}202`.slice(-12))),
+        { amount: 0, status: "PAID" },
+        { freeCheckout: true },
+      ),
+    ]);
+    const [storedCoupon, storedUser, usages, settledPayments, zeroTotalPayments] = await Promise.all([
+      Coupon.findById(coupon._id),
+      User.findById(user._id),
+      CouponUsage.countDocuments({ coupon: coupon._id, user: user._id }),
+      Payment.countDocuments({ coupon: coupon._id, user: user._id, amount: 0, status: "paid" }),
+      Payment.countDocuments({ coupon: coupon._id, user: user._id, amount: 0 }),
+    ]);
+
+    assert.equal(results.filter((result) => result.status === "fulfilled").length, 1);
+    assert.equal(results.filter((result) => result.status === "rejected").length, 1);
+    assert.equal(settledPayments, 1);
+    assert.equal(zeroTotalPayments, 1);
     assert.equal(storedUser.fileCredits, 3);
     assert.equal(storedCoupon.usageCount, 1);
     assert.equal(usages, 1);
