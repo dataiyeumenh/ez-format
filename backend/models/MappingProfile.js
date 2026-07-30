@@ -89,6 +89,24 @@ const mappingProfileSchema = new mongoose.Schema(
       ref: "User",
       required: true,
     },
+    status: {
+      type: String,
+      trim: true,
+      default: undefined,
+    },
+    quarantinedAt: {
+      type: Date,
+      default: undefined,
+    },
+    quarantineReason: {
+      type: String,
+      trim: true,
+      default: undefined,
+    },
+    mappingProfileV2Migration: {
+      type: mongoose.Schema.Types.Mixed,
+      default: undefined,
+    },
   },
   { timestamps: true, autoIndex: false },
 );

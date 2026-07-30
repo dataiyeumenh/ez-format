@@ -108,6 +108,53 @@ def test_strong_invoice_key_matches_with_one_optional_source(tmp_path, monkeypat
     assert report["summary"]["conflicts"] == 0
 
 
+def test_strong_auto_match_reserves_each_comparison_record_once(tmp_path, monkeypatch):
+    monkeypatch.setenv("FEATURE_RECONCILIATION", "true")
+    store = OperationStore(tmp_path)
+    headers = ["Source document ID", *HEADERS]
+    shared_invoice = ["0312345678", "C26TAA", "000001", "01/07/2026", 108000]
+    session = store.create_session(
+        upload_id="one-to-one-strong-match",
+        owner_scope="user:user-1",
+        user_id="user-1",
+        workspace_id=None,
+        target_template_id="misa_purchase_domestic",
+        target_template_version="v1",
+        source_signature={},
+        table=InputTable(
+            headers=headers,
+            rows=[
+                dict(zip(headers, ["primary-a", *shared_invoice])),
+                dict(zip(headers, ["primary-b", *shared_invoice])),
+            ],
+        ),
+        raw_sha256="raw",
+        ttl_seconds=3600,
+    )
+    add_comparison_file(
+        store,
+        session_id=session.session_id,
+        revision=1,
+        state_hash=session.state_hash,
+        filename="single-source.xlsx",
+        content=_xlsx([shared_invoice]),
+        role="invoice_export",
+    )
+
+    report = run_reconciliation(
+        store,
+        session_id=session.session_id,
+        revision=1,
+        state_hash=session.state_hash,
+    )
+    matched = [item for item in report["records"] if item["status"] == "matched"]
+
+    assert len(matched) == 1
+    assert len({item["comparison_record_id"] for item in matched}) == 1
+    assert report["summary"]["matched"] == 1
+    assert report["summary"]["missing_comparison"] == 1
+
+
 @pytest.mark.parametrize("raw_total", ["không phải số", "", "1,2,3"])
 def test_strong_key_with_unusable_total_is_conflict_not_match(
     tmp_path, monkeypatch, raw_total
@@ -554,6 +601,73 @@ def test_two_source_candidates_block_complete_until_each_is_confirmed(tmp_path, 
     )
     assert updated["status"] == "complete"
     assert updated["summary"]["candidates_need_review"] == 0
+
+
+def test_candidate_review_preserves_mixed_role_insufficient_evidence(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("FEATURE_RECONCILIATION", "true")
+    store = OperationStore(tmp_path)
+    headers = ["Số hóa đơn", "Ngày hóa đơn", "Tên nhà cung cấp", "Tổng tiền"]
+    row = ["HD-01", "01/07/2026", "Công ty A", 108000]
+    session = store.create_session(
+        upload_id="mixed-role-evidence",
+        owner_scope="user:user-1",
+        user_id="user-1",
+        workspace_id=None,
+        target_template_id="misa_purchase_domestic",
+        target_template_version="v1",
+        source_signature={},
+        table=InputTable(headers=headers, rows=[dict(zip(headers, row))]),
+        raw_sha256="raw",
+        ttl_seconds=3600,
+    )
+    add_comparison_file(
+        store,
+        session_id=session.session_id,
+        revision=1,
+        state_hash=session.state_hash,
+        filename="usable.xlsx",
+        content=_xlsx_with_headers(headers, [row]),
+        role="invoice_export",
+    )
+    add_comparison_file(
+        store,
+        session_id=session.session_id,
+        revision=1,
+        state_hash=session.state_hash,
+        filename="insufficient.xlsx",
+        content=_xlsx_with_headers(
+            ["Ghi chú", "Tổng tiền"], [["không đủ khóa", 108000]]
+        ),
+        role="internal_ledger",
+    )
+
+    report = run_reconciliation(
+        store,
+        session_id=session.session_id,
+        revision=1,
+        state_hash=session.state_hash,
+    )
+    candidate = next(item for item in report["records"] if item["status"] == "candidate")
+    reviewed = confirm_candidate_match(
+        store,
+        session_id=session.session_id,
+        report_id=report["report_id"],
+        match_id=candidate["match_id"],
+        revision=1,
+        state_hash=session.state_hash,
+        confirmed_by="user:user-1",
+    )
+    updated = get_reconciliation_report(
+        store, session_id=session.session_id, report_id=report["report_id"]
+    )
+
+    assert report["usable_evidence"] is False
+    assert report["status"] == "insufficient_evidence"
+    assert reviewed["report_status"] == "insufficient_evidence"
+    assert updated["usable_evidence"] is False
+    assert updated["status"] == "insufficient_evidence"
 
 
 def test_invoice_key_fallback_matches_when_source_document_ids_differ(tmp_path, monkeypatch):

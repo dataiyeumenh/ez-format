@@ -189,10 +189,20 @@ def run_reconciliation(
         used_source: set[str] = set()
         usable_evidence = usable_evidence and bool(strong_index or candidate_index)
         for primary_record in primary:
-            key, candidates_for_key = _strong_matches(primary_record, strong_index)
+            key, candidates_for_key = _strong_matches(
+                primary_record, strong_index, excluded_record_ids=used_source
+            )
             if not key:
                 candidate_key = primary_record.get("candidate_key")
-                candidate_matches = candidate_index.get(str(candidate_key), []) if candidate_key else []
+                candidate_matches = (
+                    [
+                        source
+                        for source in candidate_index.get(str(candidate_key), [])
+                        if source["record_id"] not in used_source
+                    ]
+                    if candidate_key
+                    else []
+                )
                 if candidate_matches:
                     comparison_record_ids = [
                         source["record_id"] for source in candidate_matches
@@ -327,6 +337,7 @@ def run_reconciliation(
         summary=ReconciliationSummaryV2.model_validate(summary),
         records=records,
         tolerances={"VND": "1", "foreign_currency": "0.01", "quantity": "0.000001"},
+        usable_evidence=usable_evidence,
         state_hash=session.state_hash,
     ).model_dump(mode="json")
     _write_report(store, session_id, report)
@@ -436,7 +447,11 @@ def _review_candidate_match(
     summary = _summary_from_records(report.get("records") or [])
     report["summary"] = summary
     report["status"] = _report_status(
-        usable_evidence=True,
+        usable_evidence=bool(
+            report.get(
+                "usable_evidence", report.get("status") != "insufficient_evidence"
+            )
+        ),
         comparison_count=max(0, len(report.get("roles_present") or []) - 1),
         conflicts=(
             summary["conflicts"]
@@ -543,10 +558,18 @@ def _index_records(records: list[dict[str, Any]]) -> dict[str, list[dict[str, An
 
 
 def _strong_matches(
-    record: dict[str, Any], index: dict[str, list[dict[str, Any]]]
+    record: dict[str, Any],
+    index: dict[str, list[dict[str, Any]]],
+    *,
+    excluded_record_ids: set[str] | None = None,
 ) -> tuple[str | None, list[dict[str, Any]]]:
+    excluded = excluded_record_ids or set()
     for key in record.get("strong_keys") or []:
-        matches = index.get(str(key), [])
+        matches = [
+            match
+            for match in index.get(str(key), [])
+            if match["record_id"] not in excluded
+        ]
         if matches:
             return str(key), matches
     return None, []

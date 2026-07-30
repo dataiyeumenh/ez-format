@@ -6,6 +6,7 @@ const {
   buildMigrationCandidate,
   ensureMappingProfileV2Indexes,
   migrateMappingProfilesV1ToV2,
+  rollbackMappingProfilesV1ToV2,
 } = require("../services/mappingProfileV2MigrationService");
 
 function id() {
@@ -29,6 +30,51 @@ function legacy(overrides = {}) {
     formulas: {},
     ...overrides,
   };
+}
+
+function transactionalDependencies() {
+  const sessions = [];
+  const audits = [];
+  const connection = {
+    async transaction(work) {
+      const session = { transactionNumber: sessions.length + 1 };
+      sessions.push(session);
+      return work(session);
+    },
+  };
+  const auditModel = {
+    async updateOne(filter, patch, options) {
+      assert.ok(options?.session);
+      if (!audits.some((item) => item.runId === filter.runId)) {
+        audits.push(structuredClone(patch.$setOnInsert));
+      }
+    },
+  };
+  return { connection, auditModel, audits, sessions };
+}
+
+function setPath(target, path, value) {
+  const parts = path.split(".");
+  const leaf = parts.pop();
+  let cursor = target;
+  for (const part of parts) cursor = cursor[part] ||= {};
+  cursor[leaf] = value;
+}
+
+function unsetPath(target, path) {
+  const parts = path.split(".");
+  const leaf = parts.pop();
+  let cursor = target;
+  for (const part of parts) {
+    cursor = cursor?.[part];
+    if (!cursor) return;
+  }
+  delete cursor[leaf];
+}
+
+function applyPatch(target, patch) {
+  for (const [path, value] of Object.entries(patch.$set || {})) setPath(target, path, value);
+  for (const path of Object.keys(patch.$unset || {})) unsetPath(target, path);
 }
 
 test("migration candidate is a review-only V2 draft without mutating V1", () => {
@@ -81,15 +127,23 @@ test("dry-run reports work but writes nothing", async () => {
 test("apply persists quarantine on the legacy profile", async () => {
   const risky = legacy({ defaults: { "Thuế suất GTGT": "10%" } });
   let update;
+  const tx = transactionalDependencies();
   const sourceModel = {
     find: async () => [risky],
-    updateOne: async (filter, patch) => { update = { filter, patch }; },
+    updateOne: async (filter, patch, options) => {
+      assert.ok(options?.session);
+      update = { filter, patch };
+    },
   };
 
   const report = await migrateMappingProfilesV1ToV2({
     sourceModel,
     targetModel: {},
     mode: "apply",
+    migrationId: "mapping-v1-v2-task-7",
+    runId: "apply-quarantine-1",
+    connection: tx.connection,
+    auditModel: tx.auditModel,
   });
 
   assert.equal(report.quarantined, 1);
@@ -97,6 +151,9 @@ test("apply persists quarantine on the legacy profile", async () => {
   assert.equal(String(update.filter._id), String(risky._id));
   assert.equal(update.patch.$set.status, "quarantined");
   assert.match(update.patch.$set.quarantineReason, /high_risk_legacy_profile/);
+  assert.equal(update.patch.$set.mappingProfileV2Migration.migrationId, "mapping-v1-v2-task-7");
+  assert.equal(update.patch.$set.mappingProfileV2Migration.appliedRunId, "apply-quarantine-1");
+  assert.equal(tx.audits[0].operation, "apply");
 });
 
 test("apply migration is idempotent by legacy profile id", async () => {
@@ -104,11 +161,14 @@ test("apply migration is idempotent by legacy profile id", async () => {
   let existing = false;
   let creates = 0;
   let syncs = 0;
+  const tx = transactionalDependencies();
   const sourceModel = { find: async () => [document] };
   const targetModel = {
     exists: async ({ legacyProfileId }) => existing && legacyProfileId === String(document._id),
-    async create(candidate) {
+    async create([candidate], options) {
+      assert.ok(options?.session);
       assert.equal(candidate.legacyProfileId, String(document._id));
+      assert.equal(candidate.mappingProfileV2Migration.migrationId, "mapping-v1-v2-task-7");
       existing = true;
       creates += 1;
     },
@@ -117,14 +177,160 @@ test("apply migration is idempotent by legacy profile id", async () => {
     },
   };
 
-  const first = await migrateMappingProfilesV1ToV2({ sourceModel, targetModel, mode: "apply" });
-  const second = await migrateMappingProfilesV1ToV2({ sourceModel, targetModel, mode: "apply" });
+  const first = await migrateMappingProfilesV1ToV2({
+    sourceModel,
+    targetModel,
+    mode: "apply",
+    migrationId: "mapping-v1-v2-task-7",
+    runId: "apply-1",
+    connection: tx.connection,
+    auditModel: tx.auditModel,
+  });
+  const second = await migrateMappingProfilesV1ToV2({
+    sourceModel,
+    targetModel,
+    mode: "apply",
+    migrationId: "mapping-v1-v2-task-7",
+    runId: "apply-2",
+    connection: tx.connection,
+    auditModel: tx.auditModel,
+  });
 
   assert.equal(first.created, 1);
   assert.equal(second.created, 0);
   assert.equal(second.skippedExisting, 1);
   assert.equal(creates, 1);
   assert.equal(syncs, 0);
+  assert.equal(tx.sessions.length, 2);
+  assert.deepEqual(tx.audits.map((item) => item.runId), ["apply-1", "apply-2"]);
+});
+
+test("rollback restores legacy quarantine and removes only its apply run", async () => {
+  const priorQuarantineDate = new Date("2026-07-01T00:00:00.000Z");
+  const migratable = legacy();
+  const risky = legacy({
+    defaults: { "Thuế suất GTGT": "10%" },
+    status: "quarantined",
+    quarantinedAt: priorQuarantineDate,
+    quarantineReason: "manual-review",
+  });
+  const sourceDocuments = [migratable, risky];
+  const targetDocuments = [
+    {
+      _id: id(),
+      legacyProfileId: id(),
+      mappingProfileV2Migration: {
+        migrationId: "another-migration",
+        appliedRunId: "another-run",
+      },
+    },
+  ];
+  const tx = transactionalDependencies();
+  const sourceModel = {
+    find(filter = {}) {
+      const migrationId = filter["mappingProfileV2Migration.migrationId"];
+      const appliedRunId = filter["mappingProfileV2Migration.appliedRunId"];
+      if (!migrationId) return Promise.resolve(sourceDocuments);
+      return Promise.resolve(sourceDocuments.filter((item) => (
+        item.mappingProfileV2Migration?.migrationId === migrationId
+        && item.mappingProfileV2Migration?.appliedRunId === appliedRunId
+        && item.mappingProfileV2Migration?.state === "applied"
+      )));
+    },
+    async updateOne(filter, patch, options) {
+      assert.ok(options?.session);
+      const document = sourceDocuments.find((item) => String(item._id) === String(filter._id));
+      applyPatch(document, patch);
+    },
+  };
+  const targetModel = {
+    exists: async ({ legacyProfileId }) => targetDocuments.some(
+      (item) => String(item.legacyProfileId) === String(legacyProfileId),
+    ),
+    async create([document], options) {
+      assert.ok(options?.session);
+      targetDocuments.push(structuredClone(document));
+    },
+    async deleteMany(filter, options) {
+      assert.ok(options?.session);
+      const before = targetDocuments.length;
+      for (let index = targetDocuments.length - 1; index >= 0; index -= 1) {
+        const marker = targetDocuments[index].mappingProfileV2Migration;
+        if (
+          marker?.migrationId === filter["mappingProfileV2Migration.migrationId"]
+          && marker?.appliedRunId === filter["mappingProfileV2Migration.appliedRunId"]
+        ) {
+          targetDocuments.splice(index, 1);
+        }
+      }
+      return { deletedCount: before - targetDocuments.length };
+    },
+  };
+
+  const applied = await migrateMappingProfilesV1ToV2({
+    sourceModel,
+    targetModel,
+    mode: "apply",
+    migrationId: "mapping-v1-v2-task-7",
+    runId: "apply-lifecycle-1",
+    connection: tx.connection,
+    auditModel: tx.auditModel,
+  });
+  const rolledBack = await rollbackMappingProfilesV1ToV2({
+    sourceModel,
+    targetModel,
+    migrationId: "mapping-v1-v2-task-7",
+    targetRunId: "apply-lifecycle-1",
+    runId: "rollback-lifecycle-1",
+    connection: tx.connection,
+    auditModel: tx.auditModel,
+  });
+
+  assert.equal(applied.created, 1);
+  assert.equal(rolledBack.removed, 1);
+  assert.equal(rolledBack.quarantineRestored, 1);
+  assert.equal(risky.status, "quarantined");
+  assert.equal(risky.quarantinedAt.toISOString(), priorQuarantineDate.toISOString());
+  assert.equal(risky.quarantineReason, "manual-review");
+  assert.equal(risky.mappingProfileV2Migration.state, "rolled_back");
+  assert.equal(targetDocuments.length, 1);
+  assert.equal(targetDocuments[0].mappingProfileV2Migration.migrationId, "another-migration");
+  assert.deepEqual(tx.audits.map((item) => item.operation), ["apply", "rollback"]);
+
+  const reapplied = await migrateMappingProfilesV1ToV2({
+    sourceModel,
+    targetModel,
+    mode: "apply",
+    migrationId: "mapping-v1-v2-task-7",
+    runId: "apply-lifecycle-2",
+    connection: tx.connection,
+    auditModel: tx.auditModel,
+  });
+
+  assert.equal(reapplied.created, 1);
+  assert.equal(reapplied.quarantinePersisted, 1);
+  assert.equal(targetDocuments.length, 2);
+  assert.equal(
+    targetDocuments[1].mappingProfileV2Migration.appliedRunId,
+    "apply-lifecycle-2",
+  );
+  assert.equal(risky.mappingProfileV2Migration.appliedRunId, "apply-lifecycle-2");
+});
+
+test("rollback refuses to guess the apply run identity", async () => {
+  let deleted = false;
+  await assert.rejects(
+    rollbackMappingProfilesV1ToV2({
+      sourceModel: {},
+      targetModel: { deleteMany: async () => { deleted = true; } },
+      migrationId: "mapping-v1-v2-task-7",
+      runId: "rollback-without-target",
+      connection: transactionalDependencies().connection,
+      auditModel: transactionalDependencies().auditModel,
+    }),
+    /targetRunId/,
+  );
+  assert.equal(deleted, false);
 });
 
 test("migration stays disabled unless explicitly selected", async () => {

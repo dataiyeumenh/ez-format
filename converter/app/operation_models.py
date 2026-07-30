@@ -105,4 +105,5 @@ class ReconciliationReportV2(BaseModel):
     totals: list[dict[str, Any]] = Field(default_factory=list)
     records: list[dict[str, Any]] = Field(default_factory=list)
     tolerances: dict[str, Any] = Field(default_factory=dict)
+    usable_evidence: bool = False
     state_hash: str

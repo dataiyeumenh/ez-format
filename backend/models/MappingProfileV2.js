@@ -175,6 +175,11 @@ const mappingProfileV2Schema = new mongoose.Schema(
       default: null,
       immutable: true,
     },
+    mappingProfileV2Migration: {
+      type: mongoose.Schema.Types.Mixed,
+      default: undefined,
+      immutable: true,
+    },
   },
   { timestamps: true, autoIndex: false },
 );
@@ -198,6 +203,10 @@ mappingProfileV2Schema.index(
   },
 );
 mappingProfileV2Schema.index({ ownerScope: 1, status: 1, updatedAt: -1 });
+mappingProfileV2Schema.index({
+  "mappingProfileV2Migration.migrationId": 1,
+  "mappingProfileV2Migration.appliedRunId": 1,
+});
 
 module.exports = mongoose.model("MappingProfileV2", mappingProfileV2Schema);
 module.exports.OWNER_SCOPE_PATTERN = OWNER_SCOPE_PATTERN;

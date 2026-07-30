@@ -2,14 +2,16 @@ const crypto = require("crypto");
 const mongoose = require("mongoose");
 const MappingProfile = require("../models/MappingProfile");
 const MappingProfileV2 = require("../models/MappingProfileV2");
+const MappingProfileV2MigrationAudit = require("../models/MappingProfileV2MigrationAudit");
 const {
   buildProfileKey,
   buildStateHash,
   detectRiskFlags,
 } = require("./mappingProfileV2Service");
 
-const MIGRATION_MODES = new Set(["off", "dry-run", "apply"]);
+const MIGRATION_MODES = new Set(["off", "dry-run", "apply", "rollback"]);
 const OWNER_SCOPE_PATTERN = /^(workspace|user):[a-f\d]{24}$/i;
+const MIGRATION_KIND = "mapping_profile_v1_to_v2";
 
 function normalizedId(value) {
   if (value == null) return "";
@@ -92,14 +94,30 @@ function buildMigrationCandidate(profile = {}) {
   return { action: "migrate", legacyProfileId, document };
 }
 
-async function readLegacyProfiles(sourceModel) {
-  const query = sourceModel.find({});
-  return typeof query?.lean === "function" ? query.lean() : query;
+async function resolveQuery(query, session = null) {
+  let current = query;
+  if (session && typeof current?.session === "function") current = current.session(session);
+  if (typeof current?.lean === "function") current = current.lean();
+  return current;
 }
 
-function emptyReport(mode) {
+async function readLegacyProfiles(sourceModel, filter = {}, session = null) {
+  return resolveQuery(sourceModel.find(filter), session);
+}
+
+function migrationIdentity(value, field) {
+  const normalized = String(value || "").trim();
+  if (!normalized) throw new Error(`${field} là bắt buộc cho migration write`);
+  if (normalized.length > 160) throw new Error(`${field} không được vượt quá 160 ký tự`);
+  return normalized;
+}
+
+function emptyReport(mode, { migrationId = null, runId = null, targetRunId = null } = {}) {
   return {
     mode,
+    migrationId,
+    runId,
+    targetRunId,
     skipped: mode === "off",
     scanned: 0,
     planned: 0,
@@ -107,21 +125,240 @@ function emptyReport(mode) {
     skippedExisting: 0,
     quarantined: 0,
     quarantinePersisted: 0,
+    quarantineRestored: 0,
+    removed: 0,
+    auditPersisted: false,
     quarantine: [],
   };
+}
+
+function snapshotLegacyQuarantine(profile) {
+  const snapshot = {};
+  for (const field of ["status", "quarantinedAt", "quarantineReason"]) {
+    snapshot[field] = {
+      present: Object.prototype.hasOwnProperty.call(profile, field),
+      value: profile[field] ?? null,
+    };
+  }
+  return snapshot;
+}
+
+function rollbackPatch(marker, { runId, rolledBackAt }) {
+  const patch = { $set: {}, $unset: {} };
+  for (const [field, snapshot] of Object.entries(marker.previousQuarantineState || {})) {
+    if (snapshot?.present) patch.$set[field] = snapshot.value;
+    else patch.$unset[field] = "";
+  }
+  patch.$set.mappingProfileV2Migration = {
+    ...marker,
+    state: "rolled_back",
+    rolledBackAt,
+    rolledBackByRunId: runId,
+  };
+  if (!Object.keys(patch.$unset).length) delete patch.$unset;
+  return patch;
+}
+
+function auditReport(report) {
+  const {
+    mode,
+    migrationId,
+    runId,
+    targetRunId,
+    scanned,
+    planned,
+    created,
+    skippedExisting,
+    quarantined,
+    quarantinePersisted,
+    quarantineRestored,
+    removed,
+  } = report;
+  return {
+    mode,
+    migrationId,
+    runId,
+    targetRunId,
+    scanned,
+    planned,
+    created,
+    skippedExisting,
+    quarantined,
+    quarantinePersisted,
+    quarantineRestored,
+    removed,
+  };
+}
+
+async function assertAuditIdentity(auditModel, identity, session) {
+  if (typeof auditModel.findOne !== "function") return;
+  const existing = await resolveQuery(auditModel.findOne({ runId: identity.runId }), session);
+  if (
+    existing
+    && (
+      existing.migrationId !== identity.migrationId
+      || existing.operation !== identity.operation
+      || (existing.targetRunId || null) !== (identity.targetRunId || null)
+    )
+  ) {
+    throw new Error(`runId ${identity.runId} đã thuộc migration operation khác`);
+  }
+}
+
+async function recordAudit(auditModel, report, operation, session) {
+  const identity = {
+    migrationId: report.migrationId,
+    runId: report.runId,
+    operation,
+    targetRunId: report.targetRunId,
+  };
+  await assertAuditIdentity(auditModel, identity, session);
+  await auditModel.updateOne(
+    { runId: report.runId },
+    {
+      $setOnInsert: {
+        ...identity,
+        status: "completed",
+        report: auditReport(report),
+      },
+    },
+    { upsert: true, session },
+  );
+  report.auditPersisted = true;
+}
+
+async function runTransaction(connection, work) {
+  if (typeof connection?.transaction !== "function") {
+    throw new Error("Mongo transaction connection là bắt buộc cho migration write");
+  }
+  return connection.transaction(work);
+}
+
+async function targetExists(targetModel, filter, session) {
+  return Boolean(await resolveQuery(targetModel.exists(filter), session));
+}
+
+async function applyMappingProfilesV1ToV2({
+  sourceModel,
+  targetModel,
+  auditModel,
+  connection,
+  migrationId,
+  runId,
+}) {
+  const identity = {
+    migrationId: migrationIdentity(migrationId, "migrationId"),
+    runId: migrationIdentity(runId, "runId"),
+  };
+  const report = emptyReport("apply", identity);
+  await runTransaction(connection, async (session) => {
+    const profiles = await readLegacyProfiles(sourceModel, {}, session);
+    report.scanned = profiles.length;
+    for (const profile of profiles) {
+      const candidate = buildMigrationCandidate(profile);
+      if (candidate.action === "quarantine") {
+        report.quarantined += 1;
+        report.quarantine.push({
+          legacyProfileId: candidate.legacyProfileId,
+          ownerScope: candidate.ownerScope,
+          reasons: candidate.reasons,
+          riskFlags: candidate.riskFlags,
+        });
+        if (!mongoose.isValidObjectId(candidate.legacyProfileId)) continue;
+        const existingMarker = profile.mappingProfileV2Migration;
+        if (
+          existingMarker?.kind === MIGRATION_KIND
+          && existingMarker?.migrationId === identity.migrationId
+          && existingMarker?.state === "applied"
+        ) {
+          report.skippedExisting += 1;
+          continue;
+        }
+        if (typeof sourceModel.updateOne !== "function") {
+          throw new Error("Legacy mapping profile model không hỗ trợ quarantine persistence");
+        }
+        const appliedAt = new Date();
+        await sourceModel.updateOne(
+          { _id: profile._id },
+          {
+            $set: {
+              status: "quarantined",
+              quarantinedAt: appliedAt,
+              quarantineReason: candidate.reasons.join(","),
+              mappingProfileV2Migration: {
+                kind: MIGRATION_KIND,
+                migrationId: identity.migrationId,
+                appliedRunId: identity.runId,
+                state: "applied",
+                appliedAt,
+                previousQuarantineState: snapshotLegacyQuarantine(profile),
+              },
+            },
+          },
+          { session },
+        );
+        report.quarantinePersisted += 1;
+        continue;
+      }
+
+      if (await targetExists(targetModel, { legacyProfileId: candidate.legacyProfileId }, session)) {
+        report.skippedExisting += 1;
+        continue;
+      }
+      report.planned += 1;
+      candidate.document.mappingProfileV2Migration = {
+        kind: MIGRATION_KIND,
+        migrationId: identity.migrationId,
+        appliedRunId: identity.runId,
+        appliedAt: new Date(),
+      };
+      await targetModel.create([candidate.document], { session });
+      report.created += 1;
+    }
+    await recordAudit(auditModel, report, "apply", session);
+  });
+  return report;
 }
 
 async function migrateMappingProfilesV1ToV2({
   sourceModel = MappingProfile,
   targetModel = MappingProfileV2,
+  auditModel = MappingProfileV2MigrationAudit,
+  connection = mongoose.connection,
   mode = process.env.MAPPING_PROFILE_V2_MIGRATION_MODE || "off",
+  migrationId = process.env.MAPPING_PROFILE_V2_MIGRATION_ID,
+  runId = process.env.MAPPING_PROFILE_V2_MIGRATION_RUN_ID,
+  targetRunId = process.env.MAPPING_PROFILE_V2_MIGRATION_TARGET_RUN_ID,
 } = {}) {
   const normalizedMode = String(mode || "off").trim().toLowerCase();
   if (!MIGRATION_MODES.has(normalizedMode)) {
-    throw new Error("MAPPING_PROFILE_V2_MIGRATION_MODE phải là off, dry-run hoặc apply");
+    throw new Error(
+      "MAPPING_PROFILE_V2_MIGRATION_MODE phải là off, dry-run, apply hoặc rollback",
+    );
   }
-  const report = emptyReport(normalizedMode);
+  const report = emptyReport(normalizedMode, { migrationId, runId, targetRunId });
   if (normalizedMode === "off") return report;
+  if (normalizedMode === "rollback") {
+    return rollbackMappingProfilesV1ToV2({
+      sourceModel,
+      targetModel,
+      auditModel,
+      connection,
+      migrationId,
+      runId,
+      targetRunId,
+    });
+  }
+  if (normalizedMode === "apply") {
+    return applyMappingProfilesV1ToV2({
+      sourceModel,
+      targetModel,
+      auditModel,
+      connection,
+      migrationId,
+      runId,
+    });
+  }
 
   const profiles = await readLegacyProfiles(sourceModel);
   report.scanned = profiles.length;
@@ -135,25 +372,6 @@ async function migrateMappingProfilesV1ToV2({
         reasons: candidate.reasons,
         riskFlags: candidate.riskFlags,
       });
-      if (
-        normalizedMode === "apply" &&
-        mongoose.isValidObjectId(candidate.legacyProfileId)
-      ) {
-        if (typeof sourceModel.updateOne !== "function") {
-          throw new Error("Legacy mapping profile model không hỗ trợ quarantine persistence");
-        }
-        await sourceModel.updateOne(
-          { _id: profile._id },
-          {
-            $set: {
-              status: "quarantined",
-              quarantinedAt: new Date(),
-              quarantineReason: candidate.reasons.join(","),
-            },
-          },
-        );
-        report.quarantinePersisted += 1;
-      }
       continue;
     }
     const exists = await targetModel.exists({
@@ -165,26 +383,75 @@ async function migrateMappingProfilesV1ToV2({
     }
     report.planned += 1;
     if (normalizedMode === "dry-run") continue;
-    try {
-      await targetModel.create(candidate.document);
-      report.created += 1;
-    } catch (error) {
-      if (error?.code === 11000) {
-        report.skippedExisting += 1;
-        continue;
-      }
-      throw error;
-    }
   }
   return report;
 }
 
-async function ensureMappingProfileV2Indexes({ model = MappingProfileV2 } = {}) {
+async function rollbackMappingProfilesV1ToV2({
+  sourceModel = MappingProfile,
+  targetModel = MappingProfileV2,
+  auditModel = MappingProfileV2MigrationAudit,
+  connection = mongoose.connection,
+  migrationId,
+  targetRunId,
+  runId,
+} = {}) {
+  const identity = {
+    migrationId: migrationIdentity(migrationId, "migrationId"),
+    targetRunId: migrationIdentity(targetRunId, "targetRunId"),
+    runId: migrationIdentity(runId, "runId"),
+  };
+  const report = emptyReport("rollback", identity);
+  await runTransaction(connection, async (session) => {
+    if (typeof targetModel.deleteMany !== "function") {
+      throw new Error("MappingProfileV2 model không hỗ trợ rollback deleteMany");
+    }
+    const migrationFilter = {
+      "mappingProfileV2Migration.kind": MIGRATION_KIND,
+      "mappingProfileV2Migration.migrationId": identity.migrationId,
+      "mappingProfileV2Migration.appliedRunId": identity.targetRunId,
+    };
+    const deletion = await targetModel.deleteMany(migrationFilter, { session });
+    report.removed = Number(deletion?.deletedCount || 0);
+
+    const quarantinedProfiles = await readLegacyProfiles(
+      sourceModel,
+      {
+        ...migrationFilter,
+        "mappingProfileV2Migration.state": "applied",
+      },
+      session,
+    );
+    report.scanned = quarantinedProfiles.length;
+    for (const profile of quarantinedProfiles) {
+      await sourceModel.updateOne(
+        { _id: profile._id, ...migrationFilter, "mappingProfileV2Migration.state": "applied" },
+        rollbackPatch(profile.mappingProfileV2Migration, {
+          runId: identity.runId,
+          rolledBackAt: new Date(),
+        }),
+        { session },
+      );
+      report.quarantineRestored += 1;
+    }
+    await recordAudit(auditModel, report, "rollback", session);
+  });
+  return report;
+}
+
+async function ensureMappingProfileV2Indexes({
+  model = MappingProfileV2,
+  auditModel = model === MappingProfileV2 ? MappingProfileV2MigrationAudit : null,
+} = {}) {
   if (typeof model.createIndexes !== "function") {
     throw new Error("MappingProfileV2 model không hỗ trợ createIndexes");
   }
   const indexes = await model.createIndexes();
-  return { indexes: Array.isArray(indexes) ? indexes : [] };
+  const auditIndexes = auditModel ? await auditModel.createIndexes() : [];
+  return {
+    indexes: Array.isArray(indexes) ? indexes : [],
+    auditIndexes: Array.isArray(auditIndexes) ? auditIndexes : [],
+  };
 }
 
 module.exports = {
@@ -193,4 +460,5 @@ module.exports = {
   ensureMappingProfileV2Indexes,
   inferLegacyDocumentType,
   migrateMappingProfilesV1ToV2,
+  rollbackMappingProfilesV1ToV2,
 };
