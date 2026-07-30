@@ -49,7 +49,7 @@ function assertConverterGatewayStartupConfig(env = process.env) {
   if (!internalUrl) throw gatewayError(503, "CONVERTER_INTERNAL_URL is required", "MISSING_CONVERTER_INTERNAL_URL");
   validateInterServiceUrl(internalUrl, env);
   if (String(env.CONVERTER_ARTIFACT_STORAGE_DRIVER || "").trim().toLowerCase() !== "mongodb") throw gatewayError(503, "MongoDB/GridFS artifact storage is required", "GRIDFS_CONFIG_MISSING");
-  if (!String(env.CONVERTER_GRIDFS_BUCKET || "").trim() || !String(env.MONGO_URI || "").trim()) throw gatewayError(503, "MongoDB/GridFS artifact storage is not configured", "GRIDFS_CONFIG_MISSING");
+  if (!String(env.CONVERTER_MONGODB_GRIDFS_BUCKET || "").trim() || !String(env.MONGO_URI || "").trim()) throw gatewayError(503, "MongoDB/GridFS artifact storage is not configured", "GRIDFS_CONFIG_MISSING");
   return true;
 }
 
@@ -57,14 +57,15 @@ function converterBaseUrl(env = process.env) {
   return validateInterServiceUrl(env.CONVERTER_INTERNAL_URL, env);
 }
 
-function internalHeaders({ contextToken, requestId, contentType, extraHeaders = {} } = {}) {
+function internalHeaders({ contextToken, requestId, contentType, extraHeaders = {}, requireContext = true } = {}) {
   const serviceToken = String(process.env.CONVERTER_SERVICE_TOKEN || "").trim();
   if (!serviceToken) throw gatewayError(503, "Converter service token is missing", "MISSING_CONVERTER_SERVICE_TOKEN");
   const context = String(contextToken || "").trim();
-  if (!context) throw gatewayError(401, "Conversion context is required", "MISSING_CONVERSION_CONTEXT");
+  if (requireContext && !context) throw gatewayError(401, "Conversion context is required", "MISSING_CONVERSION_CONTEXT");
   const request = String(requestId || "").trim().slice(0, 128);
   if (!request) throw gatewayError(400, "Request ID is required", "MISSING_REQUEST_ID");
-  const headers = { "x-converter-service-token": serviceToken, "x-conversion-context": context, "x-request-id": request };
+  const headers = { "x-converter-service-token": serviceToken, "x-request-id": request };
+  if (context) headers["x-conversion-context"] = context;
   if (contentType) headers["content-type"] = contentType;
   for (const [name, value] of Object.entries(extraHeaders)) {
     const normalized = String(name).toLowerCase();
@@ -110,9 +111,9 @@ async function fetchConverter(path, options, binary = false) {
   return { status: response.status, headers, data };
 }
 
-function forwardJson({ path, method = "POST", body, contextToken, requestId, extraHeaders } = {}) {
+function forwardJson({ path, method = "POST", body, contextToken, requestId, extraHeaders, requireContext = true } = {}) {
   const normalizedMethod = String(method).toUpperCase();
-  return fetchConverter(path, { method: normalizedMethod, headers: internalHeaders({ contextToken, requestId, contentType: normalizedMethod === "GET" ? undefined : "application/json", extraHeaders }), body: ["GET", "HEAD"].includes(normalizedMethod) ? undefined : JSON.stringify(body || {}) });
+  return fetchConverter(path, { method: normalizedMethod, headers: internalHeaders({ contextToken, requestId, contentType: normalizedMethod === "GET" ? undefined : "application/json", extraHeaders, requireContext }), body: ["GET", "HEAD"].includes(normalizedMethod) ? undefined : JSON.stringify(body || {}) });
 }
 
 function forwardMultipart({ path, file, fields = {}, contextToken, requestId, extraHeaders } = {}) {

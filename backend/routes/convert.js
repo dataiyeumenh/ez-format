@@ -1,7 +1,7 @@
 /**
  * convert.js (route)
  * Legacy Node conversion — superseded by converter/ (Python) for preview/export.
- * Kept for backward compatibility; HomePage uses /python-api/api/v1/*.
+ * Kept for backward compatibility; browser converter traffic uses /api/converter/*.
  */
 
 const express = require("express");

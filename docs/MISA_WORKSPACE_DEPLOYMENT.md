@@ -23,6 +23,10 @@ CONVERSION_CONTEXT_SECRET=<long-random-secret>
 CONVERTER_SERVICE_TOKEN=<different-long-random-secret>
 CONVERTER_INTERNAL_URL=https://<converter-service>.onrender.com
 CONVERTER_TIMEOUT_MS=60000
+CONVERTER_PUBLIC_PROXY_ENABLED=true
+CONVERTER_GATEWAY_USAGE_READY=true
+CONVERTER_ARTIFACT_STORAGE_DRIVER=mongodb
+CONVERTER_MONGODB_GRIDFS_BUCKET=ezformatArtifacts
 ```
 
 Keep the existing `MONGO_URI`, `JWT_SECRET`, frontend URL, payment, and authentication variables.
@@ -50,7 +54,7 @@ Configure:
 VITE_MASTER_DATA_WORKSPACES_ENABLED=true
 ```
 
-The existing `VITE_NODE_API_URL` and `VITE_PYTHON_API_URL` must still point to the Node backend and converter.
+Set `VITE_API_URL` (preferred) or `VITE_NODE_API_URL` to the Node backend. Browser requests reach the converter only through `/api/converter`; do not expose the FastAPI URL to Vite.
 
 ## Rollback
 

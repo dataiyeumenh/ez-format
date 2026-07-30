@@ -9,6 +9,7 @@ const {
 function memoryGridFs() {
   const files = new Map();
   let nextId = 1;
+  let failDeletes = false;
 
   class FakeBucket {
     openUploadStream(filename, options = {}) {
@@ -38,7 +39,18 @@ function memoryGridFs() {
       return Readable.from(file ? [file.bytes] : []);
     }
 
+    find(query) {
+      return {
+        limit: () => ({
+          toArray: async () => [...files.values()]
+            .filter((file) => String(file.id) === String(query._id))
+            .map((file) => ({ _id: file.id, length: file.bytes.length, metadata: file.metadata })),
+        }),
+      };
+    }
+
     async delete(id) {
+      if (failDeletes) throw new Error("delete backend secret");
       if (!files.delete(id)) {
         const error = new Error("not found");
         error.code = "ENOENT";
@@ -47,7 +59,11 @@ function memoryGridFs() {
     }
   }
 
-  return { files, FakeBucket };
+  return {
+    files,
+    FakeBucket,
+    setFailDeletes(value) { failDeletes = value; },
+  };
 }
 
 test("GridFS adapter streams bounded bytes, hashes them, and never accepts a browser key", async () => {
@@ -71,8 +87,10 @@ test("GridFS adapter streams bounded bytes, hashes them, and never accepts a bro
   assert.equal(gridFs.files.get(published.objectId).filename, "temporary");
 
   const read = await adapter.getArtifact({ objectId: published.objectId });
-  assert.deepEqual(read.bytes, Buffer.from("hello"));
-  assert.equal(read.sha256, published.sha256);
+  assert.equal(read.bytes, undefined);
+  assert.equal(read.sha256, undefined);
+  assert.equal(read.sizeBytes, 5);
+  assert.deepEqual(Buffer.concat(await read.stream.toArray()), Buffer.from("hello"));
 
   await assert.rejects(
     adapter.putArtifact({
@@ -98,4 +116,24 @@ test("GridFS adapter deletes only the generated object id", async () => {
 
   await adapter.deleteArtifact({ objectId: published.objectId });
   assert.equal(gridFs.files.size, 0);
+});
+
+test("GridFS write cleanup failure exposes only bounded orphan metadata for tombstoning", async () => {
+  const gridFs = memoryGridFs();
+  const adapter = new MongoGridFsArtifactStorageAdapter({
+    db: {},
+    bucketName: "conversion_artifacts",
+    maxBytes: 4,
+    GridFSBucket: gridFs.FakeBucket,
+  });
+  gridFs.setFailDeletes(true);
+
+  await assert.rejects(
+    adapter.putArtifact({ bytes: Buffer.from("oversized"), metadata: { mime: "text/plain" } }),
+    (error) => error.code === "ARTIFACT_TOO_LARGE"
+      && error.orphanedArtifact?.objectId
+      && /^[a-f0-9]{64}$/.test(error.orphanedArtifact.sha256)
+      && error.orphanedArtifact.sizeBytes === 9
+      && !error.message.includes("secret"),
+  );
 });

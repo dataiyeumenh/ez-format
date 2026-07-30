@@ -34,6 +34,10 @@ RECONSTRUCTION_BETA_WORKSPACE_IDS=<comma-separated-workspace-objectids>
 CONVERSION_CONTEXT_SECRET=<same-random-secret-as-converter>
 CONVERTER_SERVICE_TOKEN=<same-service-token-as-converter>
 CONVERTER_INTERNAL_URL=https://<converter-service>
+CONVERTER_PUBLIC_PROXY_ENABLED=true
+CONVERTER_GATEWAY_USAGE_READY=true
+CONVERTER_ARTIFACT_STORAGE_DRIVER=mongodb
+CONVERTER_MONGODB_GRIDFS_BUCKET=ezformatArtifacts
 ```
 
 MongoDB tạo thêm collections:
@@ -113,12 +117,11 @@ AI offline không chặn reconstruction. UI hiển thị cảnh báo và user ti
 
 ```env
 VITE_NODE_API_URL=https://<node-service>
-VITE_PYTHON_API_URL=https://<converter-service>
 VITE_MASTER_DATA_WORKSPACES_ENABLED=true
 VITE_VOUCHER_RECONSTRUCTION_ENABLED=true
 ```
 
-Không đặt context secret, converter service token, Redis URL hoặc AI token trên Vercel.
+Không đặt FastAPI converter URL, context secret, converter service token, Redis URL hoặc AI token trên Vercel. Mọi request từ browser đi qua Node `/api`.
 
 ## 6. Shadow mode
 

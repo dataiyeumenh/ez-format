@@ -39,7 +39,14 @@ conversionArtifactSchema.index(
 );
 conversionArtifactSchema.index({ ownerScope: 1, sessionId: 1, kind: 1, revision: -1 });
 conversionArtifactSchema.index({ status: 1, expiresAt: 1 });
-conversionArtifactSchema.index({ purgeAt: 1 }, { expireAfterSeconds: 0 });
+conversionArtifactSchema.index(
+  { purgeAt: 1 },
+  {
+    name: "conversion_artifact_terminal_purge_ttl",
+    expireAfterSeconds: 0,
+    partialFilterExpression: { status: { $in: ["expired", "deleted", "missing", "corrupted"] } },
+  },
+);
 
 module.exports = mongoose.models.ConversionArtifact ||
   mongoose.model("ConversionArtifact", conversionArtifactSchema);

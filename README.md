@@ -43,7 +43,7 @@ npm run desktop
 | Node API  | http://localhost:5000    |
 | Converter | http://localhost:8000    |
 
-Frontend proxy: `/api` → Node, `/python-api` → Converter.
+Frontend proxy: `/api` → Node. Browser converter traffic uses the authenticated Node `/api/converter` gateway.
 
 ### QA/QC tự động
 

@@ -23,7 +23,7 @@ function configuredMaxBytes(env = process.env) {
 function validateBucketName(bucketName) {
   const value = String(bucketName || "").trim();
   if (!SAFE_BUCKET_NAME.test(value)) {
-    throw artifactError(503, "CONVERTER_GRIDFS_BUCKET is invalid", "INVALID_GRIDFS_BUCKET");
+    throw artifactError(503, "CONVERTER_MONGODB_GRIDFS_BUCKET is invalid", "INVALID_GRIDFS_BUCKET");
   }
   return value;
 }
@@ -71,6 +71,7 @@ class MongoGridFsArtifactStorageAdapter {
     });
     const digest = crypto.createHash("sha256");
     let sizeBytes = 0;
+    let sha256;
     const bounded = new Transform({
       transform: (chunk, _encoding, callback) => {
         const buffer = Buffer.from(chunk);
@@ -87,7 +88,7 @@ class MongoGridFsArtifactStorageAdapter {
 
     try {
       await pipeline(input, bounded, upload);
-      const sha256 = digest.digest("hex");
+      sha256 = digest.digest("hex");
       const expectedSha256 = String(metadata.sha256 || "").trim().toLowerCase();
       const expectedSize = metadata.sizeBytes == null ? null : Number(metadata.sizeBytes);
       if ((expectedSha256 && expectedSha256 !== sha256) || (expectedSize != null && expectedSize !== sizeBytes)) {
@@ -95,7 +96,16 @@ class MongoGridFsArtifactStorageAdapter {
       }
       return { objectId: upload.id, sha256, sizeBytes, mime: upload.options?.metadata?.mime };
     } catch (error) {
-      await this._deleteQuietly(upload.id);
+      if (!sha256) sha256 = digest.digest("hex");
+      const cleaned = await this._deleteQuietly(upload.id);
+      if (!cleaned) {
+        error.orphanedArtifact = {
+          objectId: upload.id,
+          sha256,
+          sizeBytes,
+          mime: upload.options?.metadata?.mime || "application/octet-stream",
+        };
+      }
       throw error;
     }
   }
@@ -104,31 +114,37 @@ class MongoGridFsArtifactStorageAdapter {
     const id = normalizeObjectId(objectId);
     const file = await this._findFile(id);
     if (!file) return null;
+    const sizeBytes = Number(file.length);
+    if (Number.isSafeInteger(sizeBytes) && sizeBytes > this.maxBytes) {
+      throw artifactError(413, "Stored artifact exceeds size limit", "ARTIFACT_TOO_LARGE");
+    }
     const reader = this.bucket.openDownloadStream(id);
-    const digest = crypto.createHash("sha256");
-    const chunks = [];
-    let sizeBytes = 0;
+    let streamedBytes = 0;
     const bounded = new Transform({
       transform: (chunk, _encoding, callback) => {
         const buffer = Buffer.from(chunk);
-        sizeBytes += buffer.length;
-        if (sizeBytes > this.maxBytes) {
+        streamedBytes += buffer.length;
+        if (streamedBytes > this.maxBytes) {
           callback(artifactError(413, "Stored artifact exceeds size limit", "ARTIFACT_TOO_LARGE"));
           return;
         }
-        digest.update(buffer);
-        chunks.push(buffer);
+        callback(null, buffer);
+      },
+      flush: (callback) => {
+        if (Number.isSafeInteger(sizeBytes) && streamedBytes !== sizeBytes) {
+          callback(artifactError(409, "Stored artifact size is inconsistent", "ARTIFACT_SIZE_MISMATCH"));
+          return;
+        }
         callback();
       },
     });
-    await pipeline(reader, bounded);
+    reader.pipe(bounded);
     return {
-      bytes: Buffer.concat(chunks, sizeBytes),
-      sha256: digest.digest("hex"),
       sizeBytes,
       mime: file.metadata?.mime || file.contentType || "application/octet-stream",
       objectId: id,
       metadata: file.metadata || {},
+      stream: bounded,
     };
   }
 
@@ -150,11 +166,13 @@ class MongoGridFsArtifactStorageAdapter {
   }
 
   async _deleteQuietly(objectId) {
-    if (objectId == null) return;
+    if (objectId == null) return true;
     try {
       await this.bucket.delete(objectId);
-    } catch {
-      // The metadata service records a tombstone when compensation cannot complete.
+      return true;
+    } catch (error) {
+      if (error?.code === "ENOENT" || error?.code === 26) return true;
+      return false;
     }
   }
 }
@@ -163,7 +181,7 @@ function assertMongoGridFsConfigured(env = process.env) {
   const enabled = String(env.CONVERTER_PUBLIC_PROXY_ENABLED || "false").toLowerCase() === "true" &&
     String(env.CONVERTER_GATEWAY_USAGE_READY || "false").toLowerCase() === "true";
   if (!enabled) return false;
-  const missing = ["MONGO_URI", "CONVERTER_GRIDFS_BUCKET"].filter(
+  const missing = ["MONGO_URI", "CONVERTER_MONGODB_GRIDFS_BUCKET"].filter(
     (name) => !String(env[name] || "").trim(),
   );
   if (String(env.CONVERTER_ARTIFACT_STORAGE_DRIVER || "").trim().toLowerCase() !== "mongodb") {
@@ -172,7 +190,7 @@ function assertMongoGridFsConfigured(env = process.env) {
   if (missing.length) {
     throw artifactError(503, `MongoDB/GridFS config is missing: ${missing.join(", ")}`, "GRIDFS_CONFIG_MISSING");
   }
-  validateBucketName(env.CONVERTER_GRIDFS_BUCKET);
+  validateBucketName(env.CONVERTER_MONGODB_GRIDFS_BUCKET);
   return true;
 }
 
@@ -182,7 +200,7 @@ function createMongoGridFsArtifactStorage({ env = process.env, connection = mong
   if (!db) throw artifactError(503, "MongoDB connection is required", "GRIDFS_DB_UNAVAILABLE");
   return new MongoGridFsArtifactStorageAdapter({
     db,
-    bucketName: env.CONVERTER_GRIDFS_BUCKET,
+    bucketName: env.CONVERTER_MONGODB_GRIDFS_BUCKET,
     maxBytes: configuredMaxBytes(env),
     now,
   });

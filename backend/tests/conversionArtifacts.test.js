@@ -1,8 +1,14 @@
 const assert = require("node:assert/strict");
 const test = require("node:test");
+const { Readable } = require("node:stream");
+const { readFile } = require("node:fs/promises");
+const path = require("node:path");
 
 const {
   createConversionArtifactService,
+  createMongooseArtifactRepository,
+  ensureConversionArtifactIndexes,
+  startConversionArtifactSweeper,
 } = require("../services/conversionArtifactService");
 
 function repository() {
@@ -11,6 +17,8 @@ function repository() {
   return {
     documents,
     tombstones,
+    failStatusFor: null,
+    failFinalDeleteStatus: false,
     async findLatest(binding) {
       return documents.find(
         (item) =>
@@ -25,11 +33,19 @@ function repository() {
       return metadata;
     },
     async markStatus(objectId, status, updates = {}) {
-      const item = documents.find((document) => document.gridFsObjectId === objectId);
+      if (this.failStatusFor === objectId || (this.failFinalDeleteStatus && status === "deleted")) {
+        throw new Error(this.failFinalDeleteStatus && status === "deleted"
+          ? "metadata delete status failed"
+          : "metadata sweep status failed");
+      }
+      const item = documents.find((document) => document.gridFsObjectId === objectId)
+        || tombstones.find((document) => document.gridFsObjectId === objectId);
       if (item) Object.assign(item, updates, { status });
     },
-    async findExpired() {
-      return documents.filter((item) => item.status === "deletion_pending");
+    async findExpired({ now, limit }) {
+      return [...documents, ...tombstones]
+        .filter((item) => item.status === "deletion_pending" || (item.status === "available" && item.expiresAt <= now))
+        .slice(0, limit);
     },
     async createTombstone(metadata) {
       tombstones.push(metadata);
@@ -55,7 +71,7 @@ function storage() {
     },
     async getArtifact({ objectId }) {
       const bytes = objects.get(objectId);
-      return bytes ? { bytes } : null;
+      return bytes ? { stream: Readable.from([bytes]), sizeBytes: bytes.length } : null;
     },
     async deleteArtifact({ objectId }) {
       if (this.failDeletes) throw new Error("delete failed");
@@ -64,6 +80,72 @@ function storage() {
     },
   };
 }
+
+async function collect(stream) {
+  const chunks = [];
+  for await (const chunk of stream) chunks.push(Buffer.from(chunk));
+  return Buffer.concat(chunks);
+}
+
+test("repository includes pending tombstones in the bounded sweep regardless of retention time", async () => {
+  let filter;
+  const query = {
+    sort() { return this; },
+    limit() { return Promise.resolve([]); },
+  };
+  const repo = createMongooseArtifactRepository({
+    find(value) {
+      filter = value;
+      return query;
+    },
+  });
+
+  await repo.findExpired({ now: new Date("2026-07-30T00:00:00.000Z"), limit: 5 });
+  const tombstoneClause = filter.$or.find((item) => item.tombstoneOnly === true);
+  assert.deepEqual(tombstoneClause, { tombstoneOnly: true, status: "deletion_pending" });
+});
+
+test("artifact index setup removes the legacy TTL before creating the durable pending-tombstone index", async () => {
+  const events = [];
+  const model = {
+    collection: {
+      async indexes() {
+        return [{ name: "_id_" }, { name: "purgeAt_1", key: { purgeAt: 1 }, expireAfterSeconds: 0 }];
+      },
+      async dropIndex(name) { events.push(`drop:${name}`); },
+    },
+    async createIndexes() { events.push("create"); },
+  };
+
+  const result = await ensureConversionArtifactIndexes({ model });
+  assert.deepEqual(events, ["drop:purgeAt_1", "create"]);
+  assert.deepEqual(result.droppedIndexes, ["purgeAt_1"]);
+});
+
+test("scheduled sweeper records only redacted candidate failures", async () => {
+  const logs = [];
+  const sweeper = startConversionArtifactSweeper({
+    service: {
+      async sweepExpiredArtifacts() {
+        return { scanned: 1, deleted: 0, pending: 1, failures: [{ code: "REPOSITORY_WRITE_FAILED", statusCode: 500 }] };
+      },
+    },
+    setIntervalImpl: () => ({ unref() {} }),
+    clearIntervalImpl: () => {},
+    logger: { error: (message) => logs.push(message) },
+  });
+
+  await sweeper.ready;
+  assert.deepEqual(logs, ["[ARTIFACT_SWEEP] candidate failed code=REPOSITORY_WRITE_FAILED status=500"]);
+});
+
+test("internal artifact consumers stream downloads and bound state accumulation", async () => {
+  const source = await readFile(path.join(__dirname, "..", "routes", "internalConverterSessions.js"), "utf8");
+  assert.match(source, /pipeline\(found\.content, res\)/);
+  assert.match(source, /for await \(const chunk of stream\)/);
+  assert.match(source, /size > MAX_STATE_BYTES/);
+  assert.doesNotMatch(source, /res\.send\(found\.content\)|found\.content\.toString/);
+});
 
 const binding = {
   ownerScope: "user:user-1",
@@ -87,7 +169,7 @@ test("artifact service binds metadata, validates checksum, and compensates stora
   assert.equal(saved.ownerScope, binding.ownerScope);
   assert.equal(saved.runId, binding.runId);
   assert.equal(saved.status, "available");
-  assert.deepEqual((await service.getArtifact(binding)).content, Buffer.from("artifact"));
+  assert.deepEqual(await collect((await service.getArtifact(binding)).content), Buffer.from("artifact"));
 
   await assert.rejects(
     service.getArtifact({ ...binding, ownerScope: "user:other" }),
@@ -123,4 +205,147 @@ test("artifact delete revalidates binding and keeps a tombstone when GridFS dele
   backend.failDeletes = true;
   await assert.rejects(service.deleteArtifact(binding), /delete failed/);
   assert.equal(repo.documents[0].status, "deletion_pending");
+});
+
+test("streamed checksum failure retires corrupted bytes without buffering the download", async () => {
+  const repo = repository();
+  const backend = storage();
+  const service = createConversionArtifactService({ repository: repo, storageAdapter: backend });
+  const saved = await service.putArtifact({ ...binding, content: Buffer.from("artifact") });
+  backend.objects.set(saved.gridFsObjectId, Buffer.from("corrupt!"));
+
+  const found = await service.getArtifact(binding);
+  await assert.rejects(collect(found.content), (error) => error.code === "ARTIFACT_CHECKSUM_MISMATCH");
+  assert.equal(repo.documents[0].status, "corrupted");
+  assert.equal(backend.objects.size, 0);
+});
+
+test("metadata failure plus GridFS delete failure creates a purgeable tombstone", async () => {
+  const repo = repository();
+  repo.create = async () => { throw new Error("metadata failed"); };
+  const backend = storage();
+  backend.failDeletes = true;
+  const service = createConversionArtifactService({
+    repository: repo,
+    storageAdapter: backend,
+    now: () => new Date("2026-07-30T00:00:00.000Z"),
+  });
+
+  await assert.rejects(service.putArtifact({ ...binding, content: Buffer.from("orphan") }), /metadata failed/);
+  assert.equal(repo.tombstones.length, 1);
+  assert.equal(repo.tombstones[0].status, "deletion_pending");
+  assert.equal(repo.tombstones[0].purgeAt.toISOString(), "2026-08-06T00:00:00.000Z");
+});
+
+test("GridFS write cleanup failure is persisted as a purgeable tombstone", async () => {
+  const repo = repository();
+  const backend = storage();
+  backend.putArtifact = async () => {
+    const error = new Error("upload failed");
+    error.code = "GRIDFS_UPLOAD_FAILED";
+    error.orphanedArtifact = {
+      objectId: "orphan-object",
+      sha256: "a".repeat(64),
+      sizeBytes: 5,
+      mime: "application/octet-stream",
+    };
+    throw error;
+  };
+  const service = createConversionArtifactService({
+    repository: repo,
+    storageAdapter: backend,
+    now: () => new Date("2026-07-30T00:00:00.000Z"),
+  });
+
+  await assert.rejects(service.putArtifact({ ...binding, content: Buffer.from("orphan") }), /upload failed/);
+  assert.equal(repo.tombstones.length, 1);
+  assert.equal(repo.tombstones[0].gridFsObjectId, "orphan-object");
+  assert.equal(repo.tombstones[0].purgeAt.toISOString(), "2026-08-06T00:00:00.000Z");
+});
+
+test("metadata failure never hides an undurable cleanup tombstone failure", async () => {
+  const repo = repository();
+  repo.create = async () => { throw new Error("metadata secret"); };
+  repo.createTombstone = async () => { throw new Error("repository secret"); };
+  const backend = storage();
+  backend.failDeletes = true;
+  const service = createConversionArtifactService({ repository: repo, storageAdapter: backend });
+
+  await assert.rejects(
+    service.putArtifact({ ...binding, content: Buffer.from("orphan") }),
+    (error) => error.code === "ARTIFACT_TOMBSTONE_FAILED" && !error.message.includes("secret"),
+  );
+});
+
+test("delete marks metadata pending before deleting bytes and preserves pending state if final metadata write fails", async () => {
+  const repo = repository();
+  const backend = storage();
+  let statusAtDelete;
+  const originalDelete = backend.deleteArtifact;
+  backend.deleteArtifact = async (input) => {
+    statusAtDelete = repo.documents[0].status;
+    return originalDelete.call(backend, input);
+  };
+  const service = createConversionArtifactService({ repository: repo, storageAdapter: backend });
+  await service.putArtifact({ ...binding, content: Buffer.from("artifact") });
+  repo.failFinalDeleteStatus = true;
+
+  await assert.rejects(service.deleteArtifact(binding), /metadata delete status failed/);
+  assert.equal(statusAtDelete, "deletion_pending");
+  assert.equal(repo.documents[0].status, "deletion_pending");
+  assert.equal(backend.objects.size, 0);
+});
+
+test("sweeper does not delete bytes when the durable pending-status write fails", async () => {
+  const repo = repository();
+  const backend = storage();
+  const service = createConversionArtifactService({
+    repository: repo,
+    storageAdapter: backend,
+    now: () => new Date("2026-07-30T00:00:00.000Z"),
+  });
+  const saved = await service.putArtifact({ ...binding, content: Buffer.from("artifact") });
+  repo.documents[0].expiresAt = new Date("2026-07-29T00:00:00.000Z");
+  repo.failStatusFor = saved.gridFsObjectId;
+
+  const result = await service.sweepExpiredArtifacts({ limit: 1 });
+
+  assert.equal(result.pending, 1);
+  assert.equal(backend.objects.has(saved.gridFsObjectId), true);
+  assert.equal(repo.documents[0].status, "available");
+});
+
+test("bounded sweeper includes expired tombstones, continues after repository failures, and redacts failures", async () => {
+  const repo = repository();
+  const backend = storage();
+  const service = createConversionArtifactService({
+    repository: repo,
+    storageAdapter: backend,
+    now: () => new Date("2026-07-30T00:00:00.000Z"),
+  });
+  const first = await service.putArtifact({ ...binding, content: Buffer.from("first") });
+  const second = await service.putArtifact({ ...binding, revision: 2, content: Buffer.from("second") });
+  for (const document of repo.documents) {
+    document.status = "deletion_pending";
+    document.purgeAt = new Date("2026-07-29T00:00:00.000Z");
+  }
+  repo.tombstones.push({
+    gridFsObjectId: "tombstone-object",
+    purgeAt: new Date("2026-08-06T00:00:00.000Z"),
+    status: "deletion_pending",
+    tombstoneOnly: true,
+  });
+  backend.objects.set("tombstone-object", Buffer.from("orphan"));
+  repo.failStatusFor = first.gridFsObjectId;
+
+  const result = await service.sweepExpiredArtifacts({ limit: 3 });
+
+  assert.equal(result.scanned, 3);
+  assert.equal(result.deleted, 2);
+  assert.equal(result.pending, 1);
+  assert.equal(result.failures.length, 1);
+  assert.deepEqual(Object.keys(result.failures[0]).sort(), ["code", "statusCode"]);
+  assert.equal(result.failures[0].objectId, undefined);
+  assert.equal(backend.objects.has(second.gridFsObjectId), false);
+  assert.equal(backend.objects.has("tombstone-object"), false);
 });

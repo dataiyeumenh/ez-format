@@ -1,4 +1,5 @@
 const crypto = require("node:crypto");
+const { Transform } = require("node:stream");
 const ConversionArtifact = require("../models/ConversionArtifact");
 const {
   assertMongoGridFsConfigured,
@@ -30,10 +31,6 @@ function normalizeOwnerScope(value) {
   return normalized;
 }
 
-function sha256(bytes) {
-  return crypto.createHash("sha256").update(bytes).digest("hex");
-}
-
 function plain(document) {
   return document && typeof document.toObject === "function" ? document.toObject() : document;
 }
@@ -61,12 +58,12 @@ function createMongooseArtifactRepository(Model = ConversionArtifact) {
     },
     async findExpired({ now, limit }) {
       const documents = await Model.find({
-        tombstoneOnly: false,
         $or: [
-          { status: "deletion_pending" },
-          { status: "available", expiresAt: { $lte: now } },
+          { tombstoneOnly: false, status: "deletion_pending" },
+          { tombstoneOnly: false, status: "available", expiresAt: { $lte: now } },
+          { tombstoneOnly: true, status: "deletion_pending" },
         ],
-      }).sort({ expiresAt: 1 }).limit(limit);
+      }).sort({ purgeAt: 1, expiresAt: 1 }).limit(limit);
       return documents.map(plain);
     },
   };
@@ -113,22 +110,33 @@ function createConversionArtifactService({
   }
 
   async function markDeletionPending(metadata) {
-    await repository.markStatus(metadata.gridFsObjectId, "deletion_pending", { purgeAt: null });
+    await repository.markStatus(metadata.gridFsObjectId, "deletion_pending", { purgeAt: purgeAt() });
+  }
+
+  async function createCleanupTombstone(orphan, expiresAt) {
+    if (!orphan?.objectId || !/^[a-f0-9]{64}$/.test(String(orphan.sha256 || "")) || !Number.isSafeInteger(orphan.sizeBytes) || orphan.sizeBytes < 0) {
+      throw storageError(503, "Artifact cleanup tracking failed", "ARTIFACT_TOMBSTONE_FAILED");
+    }
+    try {
+      await repository.createTombstone({
+        gridFsObjectId: orphan.objectId,
+        sha256: orphan.sha256,
+        sizeBytes: orphan.sizeBytes,
+        mime: String(orphan.mime || "application/octet-stream"),
+        expiresAt,
+        status: "deletion_pending",
+        purgeAt: purgeAt(),
+      });
+    } catch {
+      throw storageError(503, "Artifact cleanup tracking failed", "ARTIFACT_TOMBSTONE_FAILED");
+    }
   }
 
   async function compensate(objectId, metadata) {
     try {
       await storageAdapter.deleteArtifact({ objectId });
     } catch {
-      await repository.createTombstone({
-        gridFsObjectId: objectId,
-        sha256: metadata.sha256,
-        sizeBytes: metadata.sizeBytes,
-        mime: metadata.mime,
-        expiresAt: metadata.expiresAt,
-        status: "deletion_pending",
-        purgeAt: null,
-      }).catch(() => {});
+      await createCleanupTombstone({ objectId, ...metadata }, metadata.expiresAt);
     }
   }
 
@@ -144,10 +152,16 @@ function createConversionArtifactService({
       throw storageError(410, "Artifact revision has been retired", "ARTIFACT_REVISION_RETIRED");
     }
     const expectedSha256 = input.sha256 == null ? "" : String(input.sha256).trim().toLowerCase();
-    const uploaded = await storageAdapter.putArtifact({
-      bytes: input.bytes || input.content,
-      metadata: { ownerScope: binding.ownerScope, runId: binding.runId, mime: input.mime || input.contentType, sha256: expectedSha256, sizeBytes: input.sizeBytes },
-    });
+    let uploaded;
+    try {
+      uploaded = await storageAdapter.putArtifact({
+        bytes: input.bytes || input.content,
+        metadata: { ownerScope: binding.ownerScope, runId: binding.runId, mime: input.mime || input.contentType, sha256: expectedSha256, sizeBytes: input.sizeBytes },
+      });
+    } catch (error) {
+      if (error?.orphanedArtifact) await createCleanupTombstone(error.orphanedArtifact, expiresAt);
+      throw error;
+    }
     const metadata = {
       ...binding,
       workspaceId: input.workspaceId == null || String(input.workspaceId).trim() === "" ? null : normalizeIdentifier(input.workspaceId, "Workspace id"),
@@ -178,14 +192,25 @@ function createConversionArtifactService({
     if (metadata.status !== "available") throw storageError(410, "Artifact is unavailable", "ARTIFACT_UNAVAILABLE");
     if (new Date(metadata.expiresAt) <= now()) {
       try {
+        await markDeletionPending(metadata);
         await storageAdapter.deleteArtifact({ objectId: metadata.gridFsObjectId });
         await repository.markStatus(metadata.gridFsObjectId, "expired", { purgeAt: purgeAt() });
       } catch {
-        await markDeletionPending(metadata);
+        try { await markDeletionPending(metadata); } catch { /* leave metadata untouched if the first write failed */ }
       }
       throw storageError(410, "Artifact has expired", "ARTIFACT_EXPIRED");
     }
     return metadata;
+  }
+
+  async function retireCorruptedArtifact(metadata) {
+    try {
+      await markDeletionPending(metadata);
+      await storageAdapter.deleteArtifact({ objectId: metadata.gridFsObjectId });
+      await repository.markStatus(metadata.gridFsObjectId, "corrupted", { purgeAt: purgeAt() });
+    } catch {
+      try { await markDeletionPending(metadata); } catch { /* retain the durable state when possible */ }
+    }
   }
 
   async function getArtifact(input) {
@@ -195,22 +220,38 @@ function createConversionArtifactService({
       await repository.markStatus(metadata.gridFsObjectId, "missing", { purgeAt: purgeAt() });
       throw storageError(410, "Artifact bytes are unavailable", "ARTIFACT_GONE");
     }
-    const actualSha256 = found.sha256 || sha256(found.bytes);
-    const actualSizeBytes = found.sizeBytes == null ? found.bytes.length : found.sizeBytes;
-    if (actualSha256 !== metadata.sha256 || actualSizeBytes !== metadata.sizeBytes) {
-      try {
-        await storageAdapter.deleteArtifact({ objectId: metadata.gridFsObjectId });
-        await repository.markStatus(metadata.gridFsObjectId, "corrupted", { purgeAt: purgeAt() });
-      } catch {
-        await markDeletionPending(metadata);
-      }
+    if (found.sizeBytes !== metadata.sizeBytes || (found.sha256 && found.sha256 !== metadata.sha256)) {
+      await retireCorruptedArtifact(metadata);
       throw storageError(409, "Artifact checksum mismatch", "ARTIFACT_CHECKSUM_MISMATCH");
     }
-    return { metadata, content: found.bytes };
+    if (!found.stream || typeof found.stream.pipe !== "function") {
+      throw storageError(503, "Artifact stream is unavailable", "ARTIFACT_STREAM_UNAVAILABLE");
+    }
+    const digest = crypto.createHash("sha256");
+    let streamedBytes = 0;
+    const verified = new Transform({
+      transform: (chunk, _encoding, callback) => {
+        const buffer = Buffer.from(chunk);
+        streamedBytes += buffer.length;
+        digest.update(buffer);
+        callback(null, buffer);
+      },
+      flush: (callback) => {
+        if (streamedBytes !== metadata.sizeBytes || digest.digest("hex") !== metadata.sha256) {
+          const error = storageError(409, "Artifact checksum mismatch", "ARTIFACT_CHECKSUM_MISMATCH");
+          retireCorruptedArtifact(metadata).finally(() => callback(error));
+          return;
+        }
+        callback();
+      },
+    });
+    found.stream.pipe(verified);
+    return { metadata, content: verified };
   }
 
   async function deleteArtifact(input) {
     const metadata = await validatedMetadata(input);
+    await markDeletionPending(metadata);
     try {
       const result = await storageAdapter.deleteArtifact({ objectId: metadata.gridFsObjectId });
       await repository.markStatus(metadata.gridFsObjectId, "deleted", { purgeAt: purgeAt() });
@@ -225,17 +266,24 @@ function createConversionArtifactService({
     const candidates = await repository.findExpired({ now: now(), limit: Math.min(Math.max(Number(limit) || 100, 1), 1000) });
     let deleted = 0;
     let pending = 0;
+    const failures = [];
     for (const metadata of candidates) {
       try {
+        await markDeletionPending(metadata);
         await storageAdapter.deleteArtifact({ objectId: metadata.gridFsObjectId });
         await repository.markStatus(metadata.gridFsObjectId, "expired", { purgeAt: purgeAt() });
         deleted += 1;
-      } catch {
-        await markDeletionPending(metadata);
+      } catch (error) {
         pending += 1;
+        let failure = error;
+        try { await markDeletionPending(metadata); } catch (repositoryError) { failure = repositoryError; }
+        failures.push({
+          code: String(failure?.code || "ARTIFACT_SWEEP_FAILED").slice(0, 80),
+          statusCode: Number.isInteger(failure?.statusCode) ? failure.statusCode : 500,
+        });
       }
     }
-    return { scanned: candidates.length, deleted, pending };
+    return { scanned: candidates.length, deleted, pending, failures };
   }
 
   return { putArtifact, getArtifact, deleteArtifact, sweepExpiredArtifacts };
@@ -257,7 +305,7 @@ async function assertArtifactStorageReachable({ env = process.env, connection } 
   if (!db?.command) throw storageError(503, "MongoDB connection is required", "GRIDFS_DB_UNAVAILABLE");
   await db.command({ ping: 1 });
   if (typeof db.collection === "function") {
-    await db.collection(`${String(env.CONVERTER_GRIDFS_BUCKET).trim()}.files`).findOne({}, { projection: { _id: 1 } });
+    await db.collection(`${String(env.CONVERTER_MONGODB_GRIDFS_BUCKET).trim()}.files`).findOne({}, { projection: { _id: 1 } });
   }
   return true;
 }
@@ -267,9 +315,14 @@ function startConversionArtifactSweeper({ service = activeService(), env = proce
   const limit = Math.min(Math.max(Number(env.CONVERTER_ARTIFACT_SWEEP_MAX_FILES || 100), 1), 1000);
   let running;
   const runOnce = () => {
-    if (!running) running = service.sweepExpiredArtifacts({ limit }).catch((error) => {
-      logger.error?.(`[ARTIFACT_SWEEP] ${error.message}`);
-      return { scanned: 0, deleted: 0, pending: 0, failed: true };
+    if (!running) running = service.sweepExpiredArtifacts({ limit }).then((result) => {
+      for (const failure of result.failures || []) {
+        logger.error?.(`[ARTIFACT_SWEEP] candidate failed code=${failure.code} status=${failure.statusCode}`);
+      }
+      return result;
+    }).catch((error) => {
+      logger.error?.(`[ARTIFACT_SWEEP] run failed code=${String(error?.code || "ARTIFACT_SWEEP_FAILED").slice(0, 80)} status=${Number.isInteger(error?.statusCode) ? error.statusCode : 500}`);
+      return { scanned: 0, deleted: 0, pending: 0, failures: [{ code: "ARTIFACT_SWEEP_FAILED", statusCode: 500 }], failed: true };
     }).finally(() => { running = null; });
     return running;
   };
@@ -280,8 +333,23 @@ function startConversionArtifactSweeper({ service = activeService(), env = proce
 }
 
 async function ensureConversionArtifactIndexes({ model = ConversionArtifact } = {}) {
+  const droppedIndexes = [];
+  let indexes = [];
+  try {
+    indexes = await model.collection.indexes();
+  } catch (error) {
+    if (error?.code !== 26 && error?.codeName !== "NamespaceNotFound") throw error;
+  }
+  if (indexes.some((index) => index.name === "purgeAt_1")) {
+    try {
+      await model.collection.dropIndex("purgeAt_1");
+      droppedIndexes.push("purgeAt_1");
+    } catch (error) {
+      if (error?.code !== 27 && error?.codeName !== "IndexNotFound") throw error;
+    }
+  }
   await model.createIndexes();
-  return { droppedIndexes: [] };
+  return { droppedIndexes };
 }
 
 module.exports = {

@@ -1,9 +1,23 @@
 const express = require("express");
 const crypto = require("node:crypto");
+const { pipeline } = require("node:stream/promises");
 const { verifyConversionContextToken } = require("../services/conversionContextService");
 const { getArtifact, putArtifact } = require("../services/conversionArtifactService");
 
 const router = express.Router();
+const MAX_STATE_BYTES = 2 * 1024 * 1024;
+
+async function readState(stream) {
+  const chunks = [];
+  let size = 0;
+  for await (const chunk of stream) {
+    const buffer = Buffer.from(chunk);
+    size += buffer.length;
+    if (size > MAX_STATE_BYTES) throw new Error("Artifact state exceeds the size limit");
+    chunks.push(buffer);
+  }
+  return JSON.parse(Buffer.concat(chunks, size).toString("utf8"));
+}
 
 function internalContext(req, sessionId, runId) {
   const expected = String(process.env.CONVERTER_SERVICE_TOKEN || "").trim();
@@ -68,7 +82,7 @@ router.get("/:sessionId/state", asyncRoute(async (req, res) => {
   const runId = String(req.query.run_id || "");
   const claims = internalContext(req, sessionId, runId);
   const found = await getArtifact({ ...binding(claims, sessionId, runId, "state", req.query.revision) });
-  return res.json({ session: found.metadata, state: JSON.parse(found.content.toString("utf8")) });
+  return res.json({ session: found.metadata, state: await readState(found.content) });
 }));
 
 router.put("/:sessionId/artifacts/:kind", asyncRoute(async (req, res) => {
@@ -94,7 +108,7 @@ router.get("/:sessionId/artifacts/:kind", asyncRoute(async (req, res) => {
   const found = await getArtifact({ ...binding(claims, sessionId, runId, req.params.kind, req.query.revision) });
   res.setHeader("Content-Type", found.metadata.mime);
   res.setHeader("X-Artifact-Sha256", found.metadata.sha256);
-  return res.send(found.content);
+  await pipeline(found.content, res);
 }));
 
 module.exports = router;

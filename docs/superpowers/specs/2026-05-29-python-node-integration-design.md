@@ -4,7 +4,7 @@
 
 - **Node** (`backend/`): JWT auth, admin, MongoDB — port 5000
 - **Converter** (`converter/`): FastAPI Excel → MISA — port 8000
-- **Frontend**: Vite proxies `/api` → Node, `/python-api` → Converter
+- **Frontend**: Vite proxies `/api` to Node; authenticated Node gateway calls Converter
 
 ## User flow
 

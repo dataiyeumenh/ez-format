@@ -107,8 +107,9 @@ Không đưa `AI_TOKEN` lên Vercel frontend.
 
 ```env
 VITE_NODE_API_URL=https://<backend-node-render>.onrender.com
-VITE_PYTHON_API_URL=https://<converter-render>.onrender.com
 ```
+
+Browser requests must use the Node backend. Do not expose the FastAPI converter URL in Vite environment variables.
 
 Sau khi đổi env trên Vercel, cần redeploy frontend.
 

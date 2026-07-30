@@ -3,6 +3,7 @@ const test = require("node:test");
 
 const {
   assertConverterGatewayStartupConfig,
+  internalHeaders,
   isConverterGatewayUsageReady,
 } = require("../services/converterGatewayService");
 
@@ -14,7 +15,7 @@ const VALID_ENV = {
   CONVERTER_SERVICE_TOKEN: "s".repeat(32),
   CONVERTER_INTERNAL_URL: "https://converter.example/api",
   CONVERTER_ARTIFACT_STORAGE_DRIVER: "mongodb",
-  CONVERTER_GRIDFS_BUCKET: "conversion_artifacts",
+  CONVERTER_MONGODB_GRIDFS_BUCKET: "conversion_artifacts",
   MONGO_URI: "mongodb://mongo.example/ezformat",
 };
 
@@ -31,7 +32,7 @@ test("gateway on fails closed for missing context, service, and GridFS config", 
     "CONVERSION_CONTEXT_SECRET",
     "CONVERTER_SERVICE_TOKEN",
     "CONVERTER_ARTIFACT_STORAGE_DRIVER",
-    "CONVERTER_GRIDFS_BUCKET",
+    "CONVERTER_MONGODB_GRIDFS_BUCKET",
     "MONGO_URI",
   ]) {
     const env = { ...VALID_ENV };
@@ -46,4 +47,17 @@ test("gateway on fails closed for missing context, service, and GridFS config", 
 
 test("gateway on accepts strict HTTPS, secrets, and MongoDB/GridFS configuration", () => {
   assert.doesNotThrow(() => assertConverterGatewayStartupConfig(VALID_ENV));
+});
+
+test("template gateway requests require service authentication but not a conversion context", () => {
+  const previous = process.env.CONVERTER_SERVICE_TOKEN;
+  process.env.CONVERTER_SERVICE_TOKEN = "s".repeat(32);
+  try {
+    const headers = internalHeaders({ requestId: "request-1", requireContext: false });
+    assert.equal(headers["x-converter-service-token"], "s".repeat(32));
+    assert.equal(headers["x-conversion-context"], undefined);
+  } finally {
+    if (previous == null) delete process.env.CONVERTER_SERVICE_TOKEN;
+    else process.env.CONVERTER_SERVICE_TOKEN = previous;
+  }
 });
