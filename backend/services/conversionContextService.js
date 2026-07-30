@@ -1,30 +1,62 @@
 const jwt = require("jsonwebtoken");
 
 const MAX_STUDENT_CONTEXT_LIFETIME_SECONDS = 24 * 60 * 60;
+const MIN_PRODUCTION_CONTEXT_SECRET_LENGTH = 32;
 
-function contextSecret() {
-  const secret =
-    process.env.CONVERSION_CONTEXT_SECRET || process.env.JWT_SECRET;
-  if (!secret) throw new Error("CONVERSION_CONTEXT_SECRET chưa được cấu hình");
-  return secret;
+function contextSecret(env = process.env) {
+  const dedicated = String(env.CONVERSION_CONTEXT_SECRET || "").trim();
+  if (dedicated) return dedicated;
+  const environment = String(env.NODE_ENV || "").trim().toLowerCase();
+  const fallbackAllowed = ["development", "test"].includes(environment) &&
+    ["1", "true", "yes"].includes(String(env.CONVERSION_CONTEXT_ALLOW_JWT_SECRET_FALLBACK || "").trim().toLowerCase());
+  const fallback = String(env.JWT_SECRET || "").trim();
+  if (fallbackAllowed && fallback) return fallback;
+  throw new Error("CONVERSION_CONTEXT_SECRET chưa được cấu hình");
+}
+
+function assertConversionContextConfig(env = process.env) {
+  const secret = contextSecret(env);
+  if (String(env.NODE_ENV || "").trim().toLowerCase() === "production" && secret.length < MIN_PRODUCTION_CONTEXT_SECRET_LENGTH) {
+    throw new Error("CONVERSION_CONTEXT_SECRET must be at least 32 characters in production");
+  }
+  return true;
 }
 
 function createConversionContextToken({
   userId,
   workspaceId,
+  ownerScope,
   snapshotSetHash,
   snapshotIds = [],
   masterDataRevision = 0,
+  conversionContextId = "",
+  conversionRunId = "",
+  operationSessionId = "",
+  uploadId = "",
+  targetTemplateId = "",
+  scopes = [],
   expiresIn = "10m",
 }) {
+  const normalizedUserId = String(userId || "").trim();
+  if (!normalizedUserId) throw new Error("Conversion context thiếu user");
+  const normalizedWorkspaceId = workspaceId == null || String(workspaceId).trim() === "" ? null : String(workspaceId).trim();
+  const expectedOwnerScope = normalizedWorkspaceId ? `workspace:${normalizedWorkspaceId}` : `user:${normalizedUserId}`;
+  if (ownerScope != null && String(ownerScope).trim() !== expectedOwnerScope) throw new Error("Conversion context owner scope không hợp lệ");
   return jwt.sign(
     {
       purpose: "misa_conversion",
-      user_id: String(userId),
-      workspace_id: String(workspaceId),
-      snapshot_set_hash: String(snapshotSetHash),
+      user_id: normalizedUserId,
+      owner_scope: expectedOwnerScope,
+      workspace_id: normalizedWorkspaceId,
+      snapshot_set_hash: snapshotSetHash == null ? null : String(snapshotSetHash),
       snapshot_ids: snapshotIds.map(String),
       master_data_revision: Number(masterDataRevision) || 0,
+      conversion_context_id: String(conversionContextId || ""),
+      conversion_run_id: String(conversionRunId || ""),
+      operation_session_id: String(operationSessionId || ""),
+      upload_id: String(uploadId || ""),
+      target_template_id: String(targetTemplateId || ""),
+      scopes: scopes.map(String),
     },
     contextSecret(),
     { expiresIn },
@@ -32,7 +64,7 @@ function createConversionContextToken({
 }
 
 function verifyConversionContextToken(token) {
-  const claims = jwt.verify(token, contextSecret());
+  const claims = jwt.verify(token, contextSecret(), { algorithms: ["HS256"] });
   if (!["misa_conversion", "misa_reconstruction"].includes(claims.purpose)) {
     throw new Error("Conversion context token không hợp lệ");
   }
@@ -179,6 +211,7 @@ function verifyStudentContextToken(token, requiredScope) {
 }
 
 module.exports = {
+  assertConversionContextConfig,
   createStudentContextToken,
   createConversionContextToken,
   createReconstructionContextToken,

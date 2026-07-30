@@ -40,6 +40,7 @@ from app.misa_workflow import (
     readiness_mapping,
     templates_payload,
 )
+from app.internal_auth import assert_secure_production_config, require_internal_service
 from app.master_data import parse_master_data_file
 from app.master_data_client import ConversionContextError
 from app.models import ExportRowsRequest, PreviewResponse, ValidationReport
@@ -121,9 +122,22 @@ async def attach_request_id(request: Request, call_next):
     supplied = str(request.headers.get("x-request-id") or "").strip()
     request_id = supplied[:128] if supplied else uuid.uuid4().hex
     request.state.request_id = request_id
+    if request.url.path.startswith("/api/") and request.url.path != "/healthz":
+        try:
+            require_internal_service(
+                request,
+                request.headers.get("x-converter-service-token"),
+            )
+        except HTTPException as exc:
+            return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
     response = await call_next(request)
     response.headers["X-Request-ID"] = request_id
     return response
+
+
+@app.router.on_event("startup")
+def _assert_converter_security_config() -> None:
+    assert_secure_production_config()
 
 
 def _sanitize_validation_payload(value):

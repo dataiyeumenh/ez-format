@@ -1,4 +1,5 @@
 const express = require("express");
+const mongoose = require("mongoose");
 const cors = require("cors");
 const dotenv = require("dotenv");
 const crypto = require("crypto");
@@ -10,6 +11,19 @@ const {
 const { getRevenue } = require("./controllers/adminController");
 const { protect, adminOnly } = require("./middleware/auth");
 const requireDb = require("./middleware/requireDb");
+const {
+  assertConversionContextConfig,
+} = require("./services/conversionContextService");
+const {
+  assertArtifactStorageConfigured,
+  assertArtifactStorageReachable,
+  ensureConversionArtifactIndexes,
+  startConversionArtifactSweeper,
+} = require("./services/conversionArtifactService");
+const {
+  assertConverterGatewayStartupConfig,
+  isConverterGatewayUsageReady,
+} = require("./services/converterGatewayService");
 
 require("dotenv").config();
 
@@ -27,6 +41,7 @@ const voucherReconstructionEnabled =
   "true";
 const studentAssistantEnabled =
   String(process.env.STUDENT_ASSISTANT_ENABLED || "false").toLowerCase() === "true";
+const converterGatewayUsageReady = isConverterGatewayUsageReady();
 
 // CORS config: allow localhost for dev + Vercel production URL
 const allowedOrigins = [
@@ -57,6 +72,11 @@ app.use(express.json({ limit: "50mb" }));
 app.use(express.urlencoded({ extended: true, limit: "50mb" }));
 
 // Routes
+if (converterGatewayUsageReady) {
+  app.use("/api/converter", require("./routes/converterGateway").router);
+  app.use("/api/converter/context", require("./routes/conversionContext"));
+  app.use("/api/internal/converter-sessions", require("./routes/internalConverterSessions"));
+}
 app.use("/api/auth", require("./routes/auth"));
 app.use("/api/plans", require("./routes/plans"));
 app.use("/api/admin", require("./routes/admin"));
@@ -105,16 +125,31 @@ app.get("/api/health", (req, res) => {
 const PORT = process.env.PORT || 5000;
 
 async function startServer() {
-  await connectDB();
+  if (converterGatewayUsageReady) {
+    assertConversionContextConfig();
+    assertConverterGatewayStartupConfig();
+    assertArtifactStorageConfigured();
+  }
+  const connection = await connectDB();
+  if (converterGatewayUsageReady) {
+    const mongoConnection = connection || mongoose.connection;
+    await assertArtifactStorageReachable({ connection: mongoConnection });
+    await ensureConversionArtifactIndexes();
+  }
   const migration = await migrateMappingProfileOwnerScope();
   if (!migration.skipped) {
     console.log(
       `[DB] MappingProfile owner migration: ${migration.backfilled} backfilled, ${migration.droppedIndexes.length} obsolete index(es) dropped`,
     );
   }
-  return app.listen(PORT, () => {
+  const artifactSweeper = converterGatewayUsageReady
+    ? startConversionArtifactSweeper()
+    : null;
+  const server = app.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`);
   });
+  server.once("close", () => artifactSweeper?.stop());
+  return server;
 }
 
 if (require.main === module) {
@@ -124,4 +159,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { app, startServer };
+module.exports = { app, startServer, converterGatewayUsageReady };

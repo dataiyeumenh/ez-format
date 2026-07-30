@@ -1,28 +1,23 @@
 import { useCallback } from "react";
 import api from "../services/api";
+import { gatewayRequestError } from "../utils/converterOperations.js";
 
 const viteEnv = import.meta.env || {};
-const pythonBaseURL = viteEnv.VITE_PYTHON_API_URL
-  ? `${viteEnv.VITE_PYTHON_API_URL}`.replace(/\/+$/, "")
-  : "/python-api";
 
 export const studentAssistantEnabled =
-  String(viteEnv.VITE_STUDENT_ASSISTANT_ENABLED || "false").toLowerCase() ===
-    "true" &&
-  String(viteEnv.VITE_STUDENT_FILE_EXPLAIN_ENABLED || "false").toLowerCase() ===
-    "true";
+  String(viteEnv.VITE_STUDENT_ASSISTANT_ENABLED || "false").toLowerCase() === "true" &&
+  String(viteEnv.VITE_STUDENT_FILE_EXPLAIN_ENABLED || "false").toLowerCase() === "true";
 export const studentFileQaEnabled =
   studentAssistantEnabled &&
   String(viteEnv.VITE_STUDENT_FILE_QA_ENABLED || "false").toLowerCase() === "true";
-export const studentCheckWorkEnabled =
-  studentAssistantEnabled &&
-  String(viteEnv.VITE_STUDENT_CHECK_WORK_ENABLED || "false").toLowerCase() === "true";
 export const studentAccountingMapEnabled =
   studentAssistantEnabled &&
-  String(viteEnv.VITE_STUDENT_ACCOUNTING_MAP_ENABLED || "false").toLowerCase() === "true";
+  String(viteEnv.VITE_STUDENT_ACCOUNTING_MAP_ENABLED || "false").toLowerCase() ===
+    "true";
 export const studentReconciliationEnabled =
   studentAssistantEnabled &&
-  String(viteEnv.VITE_STUDENT_RECONCILIATION_ENABLED || "false").toLowerCase() === "true";
+  String(viteEnv.VITE_STUDENT_RECONCILIATION_ENABLED || "false").toLowerCase() ===
+    "true";
 export const studentInternshipEnabled =
   studentAssistantEnabled &&
   String(viteEnv.VITE_STUDENT_INTERNSHIP_ENABLED || "false").toLowerCase() === "true";
@@ -37,40 +32,42 @@ export const STUDENT_TEMPLATE_OPTIONS = [
   { id: "purchase_service", label: "Mua dịch vụ" },
 ];
 
-async function readJsonResponse(response, fallback) {
-  const payload = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    const error = new Error(payload.detail || payload.message || fallback);
-    error.status = response.status;
-    error.payload = payload;
-    throw error;
-  }
-  return payload;
-}
-
 function extensionFromFile(file) {
   const match = String(file?.name || "").match(/(\.[^.]+)$/);
   return match ? match[1].toLowerCase() : "";
 }
 
-export async function fetchStudentAssistantStatus(fetchImpl = fetch) {
+async function requestStudent(config, fallback) {
   try {
-    const response = await fetchImpl(`${pythonBaseURL}/healthz`, {
-      cache: "no-store",
-    });
-    if (!response.ok) return { serviceOnline: false, aiStatus: null };
-    const payload = await response.json();
+    const response = await api.request(config);
+    return response.data;
+  } catch (error) {
+    throw gatewayRequestError(error, fallback);
+  }
+}
+
+function studentOperationUrl(sessionId, operation) {
+  return `/student/sessions/${encodeURIComponent(sessionId)}/operations/${operation}`;
+}
+
+export async function fetchStudentAssistantStatus(apiClient = api) {
+  try {
+    const response = await apiClient.get("/converter/capabilities");
+    const payload = response.data;
     return {
-      serviceOnline: payload?.status === "ok",
+      serviceOnline: true,
       aiStatus: payload?.ai || "disabled",
       capabilityEnabled: Boolean(
         payload?.capabilities?.studentAssistant &&
-          payload?.capabilities?.studentFileExplain,
+        payload?.capabilities?.studentFileExplain,
       ),
       questionCapabilityEnabled: Boolean(payload?.capabilities?.studentFileQa),
-      attemptCapabilityEnabled: Boolean(payload?.capabilities?.studentCheckWork),
-      accountingMapCapabilityEnabled: Boolean(payload?.capabilities?.studentAccountingMap),
-      reconciliationCapabilityEnabled: Boolean(payload?.capabilities?.studentReconciliation),
+      accountingMapCapabilityEnabled: Boolean(
+        payload?.capabilities?.studentAccountingMap,
+      ),
+      reconciliationCapabilityEnabled: Boolean(
+        payload?.capabilities?.studentReconciliation,
+      ),
       internshipCapabilityEnabled: Boolean(payload?.capabilities?.studentInternship),
     };
   } catch {
@@ -92,33 +89,29 @@ export function useStudentAssistantApi() {
       });
       return response.data;
     } catch (error) {
-      const wrapped = new Error(
-        error.response?.data?.message || "Không thể tạo phiên giải thích file.",
-      );
-      wrapped.status = error.response?.status;
-      wrapped.payload = error.response?.data;
-      throw wrapped;
+      throw gatewayRequestError(error, "Không thể tạo phiên giải thích file.");
     }
   }, []);
 
-  const analyzeSession = useCallback(async (file, contextToken, targetTemplateId) => {
+  const analyzeSession = useCallback(async (file, contextToken, targetTemplateId, sessionId) => {
     const formData = new FormData();
     formData.append("file", file);
     formData.append("context_token", contextToken);
     if (targetTemplateId) formData.append("target_template_id", targetTemplateId);
-    const response = await fetch(`${pythonBaseURL}/api/v1/student/sessions/analyze`, {
-      method: "POST",
-      body: formData,
-    });
-    return readJsonResponse(response, "Không thể phân tích file cho chế độ sinh viên.");
+    return requestStudent(
+      { url: `/student/sessions/${encodeURIComponent(sessionId)}/analyze`, method: "POST", data: formData },
+      "Không thể phân tích file cho chế độ sinh viên.",
+    );
   }, []);
 
   const getOverview = useCallback(async (sessionId, contextToken) => {
-    const response = await fetch(
-      `${pythonBaseURL}/api/v1/student/sessions/${encodeURIComponent(sessionId)}/overview`,
-      { headers: { "X-Student-Context": contextToken }, cache: "no-store" },
+    return requestStudent(
+      {
+        url: studentOperationUrl(sessionId, "overview"),
+        headers: { "X-Student-Context": contextToken },
+      },
+      "Không thể tải lại phần giải thích file.",
     );
-    return readJsonResponse(response, "Không thể tải lại phần giải thích file.");
   }, []);
 
   const refreshContext = useCallback(async (sessionId) => {
@@ -128,155 +121,117 @@ export function useStudentAssistantApi() {
       );
       return response.data;
     } catch (error) {
-      const wrapped = new Error(
-        error.response?.data?.message || "Không thể làm mới phiên giải thích file.",
-      );
-      wrapped.status = error.response?.status;
-      wrapped.payload = error.response?.data;
-      throw wrapped;
+      throw gatewayRequestError(error, "Không thể làm mới phiên giải thích file.");
     }
   }, []);
 
   const askQuestion = useCallback(async (sessionId, contextToken, question) => {
-    const response = await fetch(
-      `${pythonBaseURL}/api/v1/student/sessions/${encodeURIComponent(sessionId)}/questions`,
+    return requestStudent(
       {
+        url: studentOperationUrl(sessionId, "questions"),
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "X-Student-Context": contextToken,
-        },
-        body: JSON.stringify({ question }),
-      },
-    );
-    return readJsonResponse(response, "Không thể trả lời câu hỏi về file này.");
-  }, []);
-
-  const getSourceRow = useCallback(async (sessionId, contextToken, worksheetRow, signal) => {
-    const response = await fetch(
-      `${pythonBaseURL}/api/v1/student/sessions/${encodeURIComponent(sessionId)}/source-rows/${encodeURIComponent(worksheetRow)}`,
-      {
+        data: { question },
         headers: { "X-Student-Context": contextToken },
-        cache: "no-store",
-        signal,
       },
+      "Không thể trả lời câu hỏi về file này.",
     );
-    return readJsonResponse(response, "Không thể tải dòng nguồn được chọn.");
   }, []);
 
-  const submitAttempt = useCallback(async (sessionId, contextToken, request) => {
-    const response = await fetch(
-      `${pythonBaseURL}/api/v1/student/sessions/${encodeURIComponent(sessionId)}/attempts`,
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "X-Student-Context": contextToken,
-        },
-        body: JSON.stringify(request),
-      },
-    );
-    return readJsonResponse(response, "Không thể kiểm tra bài làm hiện tại.");
-  }, []);
-
-  const revealHint = useCallback(
-    async (sessionId, contextToken, attemptId, issueId, level) => {
-      const response = await fetch(
-        `${pythonBaseURL}/api/v1/student/sessions/${encodeURIComponent(sessionId)}/attempts/${encodeURIComponent(attemptId)}/hints/${encodeURIComponent(level)}`,
+  const getSourceRow = useCallback(
+    async (sessionId, contextToken, worksheetRow, signal) => {
+      return requestStudent(
         {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "X-Student-Context": contextToken,
-          },
-          body: JSON.stringify({ issue_id: issueId }),
+          url: studentOperationUrl(sessionId, `source-rows/${encodeURIComponent(worksheetRow)}`),
+          headers: { "X-Student-Context": contextToken },
+          signal,
         },
+        "Không thể tải dòng nguồn được chọn.",
       );
-      return readJsonResponse(response, "Không thể mở gợi ý này.");
     },
     [],
   );
 
-  const getAttemptHistory = useCallback(async (sessionId, contextToken) => {
-    const response = await api.get(
-      `/student/sessions/${encodeURIComponent(sessionId)}/attempts`,
-      { headers: { "X-Student-Context": contextToken } },
-    );
-    return response.data;
-  }, []);
-
-  const getSkillProgress = useCallback(async () => {
-    const response = await api.get("/student/progress");
-    return response.data;
-  }, []);
-
   const getAccountingMap = useCallback(async (sessionId, contextToken) => {
-    const response = await fetch(
-      `${pythonBaseURL}/api/v1/student/sessions/${encodeURIComponent(sessionId)}/accounting-map`,
-      { headers: { "X-Student-Context": contextToken }, cache: "no-store" },
+    return requestStudent(
+      { url: studentOperationUrl(sessionId, "accounting-map"), headers: { "X-Student-Context": contextToken } },
+      "Không thể tải sơ đồ hạch toán.",
     );
-    return readJsonResponse(response, "Không thể tải sơ đồ hạch toán.");
   }, []);
 
   const getReconciliation = useCallback(async (sessionId, contextToken) => {
-    const response = await fetch(
-      `${pythonBaseURL}/api/v1/student/sessions/${encodeURIComponent(sessionId)}/reconciliation`,
-      { headers: { "X-Student-Context": contextToken }, cache: "no-store" },
+    return requestStudent(
+      { url: studentOperationUrl(sessionId, "reconciliation"), headers: { "X-Student-Context": contextToken } },
+      "Không thể tải kết quả đối chiếu.",
     );
-    return readJsonResponse(response, "Không thể tải kết quả đối chiếu.");
   }, []);
 
-  const previewAnonymization = useCallback(async (sessionId, contextToken, fullDocumentNumbers) => {
-    const response = await fetch(
-      `${pythonBaseURL}/api/v1/student/sessions/${encodeURIComponent(sessionId)}/anonymization/preview`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "X-Student-Context": contextToken },
-        body: JSON.stringify({ full_document_numbers: Boolean(fullDocumentNumbers) }),
-      },
-    );
-    return readJsonResponse(response, "Không thể xem trước bản ẩn danh.");
-  }, []);
+  const previewAnonymization = useCallback(
+    async (sessionId, contextToken, fullDocumentNumbers) => {
+      return requestStudent(
+        {
+          url: studentOperationUrl(sessionId, "anonymization/preview"),
+          method: "POST",
+          data: { full_document_numbers: Boolean(fullDocumentNumbers) },
+          headers: { "X-Student-Context": contextToken },
+        },
+        "Không thể xem trước bản ẩn danh.",
+      );
+    },
+    [],
+  );
 
-  const exportAnonymizedWorkbook = useCallback(async (sessionId, contextToken, fullDocumentNumbers) => {
-    const response = await fetch(
-      `${pythonBaseURL}/api/v1/student/sessions/${encodeURIComponent(sessionId)}/anonymization/export`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "X-Student-Context": contextToken },
-        body: JSON.stringify({ full_document_numbers: Boolean(fullDocumentNumbers) }),
-      },
-    );
-    if (!response.ok) await readJsonResponse(response, "Không thể xuất workbook ẩn danh.");
-    return { blob: await response.blob(), filename: "student-anonymized.xlsx" };
-  }, []);
+  const exportAnonymizedWorkbook = useCallback(
+    async (sessionId, contextToken, fullDocumentNumbers) => {
+      try {
+        const response = await api.post(
+          studentOperationUrl(sessionId, "anonymization/export"),
+          { full_document_numbers: Boolean(fullDocumentNumbers) },
+          { responseType: "blob", headers: { "X-Student-Context": contextToken } },
+        );
+        return { blob: response.data, filename: "student-anonymized.xlsx" };
+      } catch (error) {
+        throw gatewayRequestError(error, "Không thể xuất workbook ẩn danh.");
+      }
+    },
+    [],
+  );
 
   const getActivities = useCallback(async (sessionId, contextToken) => {
-    const response = await api.get(`/student/sessions/${encodeURIComponent(sessionId)}/activity`, {
-      headers: { "X-Student-Context": contextToken },
-    });
-    return response.data;
+    return requestStudent(
+      {
+        url: `/student/sessions/${encodeURIComponent(sessionId)}/activity`,
+        headers: { "X-Student-Context": contextToken },
+      },
+      "Không thể tải hoạt động phiên giải thích file.",
+    );
   }, []);
 
   const deleteActivities = useCallback(async (sessionId, contextToken) => {
-    const response = await api.delete(`/student/sessions/${encodeURIComponent(sessionId)}/activity`, {
-      headers: { "X-Student-Context": contextToken },
-    });
-    return response.data;
+    return requestStudent(
+      {
+        url: `/student/sessions/${encodeURIComponent(sessionId)}/activity`,
+        method: "DELETE",
+        headers: { "X-Student-Context": contextToken },
+      },
+      "Không thể xóa hoạt động phiên giải thích file.",
+    );
   }, []);
 
-  const generateInternshipReport = useCallback(async (sessionId, contextToken, request) => {
-    const response = await fetch(
-      `${pythonBaseURL}/api/v1/student/sessions/${encodeURIComponent(sessionId)}/internship-report`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "X-Student-Context": contextToken },
-        body: JSON.stringify(request),
-      },
-    );
-    if (!response.ok) await readJsonResponse(response, "Không thể tạo báo cáo bàn giao.");
-    return { blob: await response.blob(), filename: "internship-handoff.md" };
-  }, []);
+  const generateInternshipReport = useCallback(
+    async (sessionId, contextToken, request) => {
+      try {
+        const response = await api.post(
+          studentOperationUrl(sessionId, "internship-report"),
+          request,
+          { responseType: "blob", headers: { "X-Student-Context": contextToken } },
+        );
+        return { blob: response.data, filename: "internship-handoff.md" };
+      } catch (error) {
+        throw gatewayRequestError(error, "Không thể tạo báo cáo bàn giao.");
+      }
+    },
+    [],
+  );
 
   return {
     createSession,
@@ -285,10 +240,6 @@ export function useStudentAssistantApi() {
     refreshContext,
     askQuestion,
     getSourceRow,
-    submitAttempt,
-    revealHint,
-    getAttemptHistory,
-    getSkillProgress,
     getAccountingMap,
     getReconciliation,
     previewAnonymization,

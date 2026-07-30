@@ -1,12 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-
-const viteEnv = import.meta.env || {};
-const pythonBaseURL = viteEnv.VITE_PYTHON_API_URL
-  ? `${viteEnv.VITE_PYTHON_API_URL}`
-  : "/python-api";
-
-const HEALTH_URL = `${pythonBaseURL}/healthz`;
-const TEMPLATES_URL = `${pythonBaseURL}/api/v1/templates`;
+import api from "../services/api.js";
 const STATUS_REFRESH_MS = 15000;
 
 export const DEFAULT_CONVERTER_TEMPLATES = [
@@ -46,12 +39,17 @@ function buildUploadFormData(file, targetTemplateId, conversionContextToken = nu
   return formData;
 }
 
-async function readJsonResponse(response, fallback) {
-  const data = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    throw new Error(formatApiError(data, fallback));
+async function readApiResponse(request, fallback) {
+  try {
+    const response = await request;
+    return response.data;
+  } catch (error) {
+    const payload = error.response?.data;
+    const wrapped = new Error(formatApiError(payload, fallback));
+    wrapped.payload = payload;
+    wrapped.status = error.response?.status;
+    throw wrapped;
   }
-  return data;
 }
 
 function aiStatusFromHealth(health) {
@@ -69,15 +67,24 @@ async function fetchJson(fetchImpl, url) {
   return response.json();
 }
 
-export async function fetchConverterStatus(fetchImpl = fetch) {
-  const [healthResult, templatesResult] = await Promise.allSettled([
-    fetchJson(fetchImpl, HEALTH_URL),
-    fetchJson(fetchImpl, TEMPLATES_URL),
-  ]);
+export async function fetchConverterStatus(client = api) {
+  const [healthResult, templatesResult] = typeof client === "function"
+    ? await Promise.allSettled([
+        fetchJson(client, "/api/healthz"),
+        fetchJson(client, "/api/converter/templates"),
+      ])
+    : await Promise.allSettled([
+        client.get("/converter/capabilities"),
+        client.get("/converter/templates"),
+      ]);
 
-  const health = healthResult.status === "fulfilled" ? healthResult.value : null;
+  const health = healthResult.status === "fulfilled"
+    ? (typeof client === "function" ? healthResult.value : healthResult.value.data)
+    : null;
   const templatesData =
-    templatesResult.status === "fulfilled" ? templatesResult.value : null;
+    templatesResult.status === "fulfilled"
+      ? (typeof client === "function" ? templatesResult.value : templatesResult.value.data)
+      : null;
 
   const serviceOnline = Boolean(health || templatesData);
 
@@ -125,43 +132,26 @@ export function useConverterApi() {
 
   const analyzeFile = useCallback(
     async (file, targetTemplateId, conversionContextToken = null) => {
-      const response = await fetch(`${pythonBaseURL}/api/v1/uploads/analyze`, {
-        method: "POST",
-        body: buildUploadFormData(file, targetTemplateId, conversionContextToken),
-      });
-      return readJsonResponse(response, "Không thể phân tích file Excel.");
+      return readApiResponse(
+        api.post("/converter/uploads/analyze", buildUploadFormData(file, targetTemplateId, conversionContextToken), {
+          headers: conversionContextToken ? { "X-Conversion-Context": conversionContextToken } : undefined,
+        }),
+        "Không thể phân tích file Excel.",
+      );
     },
     [],
   );
 
   const previewMapping = useCallback(async (payload) => {
-    const response = await fetch(`${pythonBaseURL}/api/v1/mappings/preview`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-    });
-    return readJsonResponse(response, "Không thể xem trước mapping MISA.");
+    return readApiResponse(api.post("/converter/mappings/preview", payload), "Không thể xem trước mapping MISA.");
   }, []);
 
   const confirmMapping = useCallback(async (payload) => {
-    const response = await fetch(`${pythonBaseURL}/api/v1/mappings/confirm`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-    });
-    return readJsonResponse(response, "Không thể lưu setting mapping.");
+    return readApiResponse(api.post("/converter/mappings/confirm", payload), "Không thể lưu setting mapping.");
   }, []);
 
   const checkReadiness = useCallback(async (payload) => {
-    const response = await fetch(`${pythonBaseURL}/api/v1/mappings/readiness`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-    });
-    return readJsonResponse(
-      response,
-      "Không kiểm tra được trạng thái sẵn sàng import MISA.",
-    );
+    return readApiResponse(api.post("/converter/mappings/readiness", payload), "Không kiểm tra được trạng thái sẵn sàng import MISA.");
   }, []);
 
   const exportConfirmed = useCallback(
@@ -181,21 +171,12 @@ export function useConverterApi() {
       if (Array.isArray(rows) && rows.length > 0) {
         payload.rows = rows;
       }
-      const response = await fetch(`${pythonBaseURL}/api/v1/conversions/export`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
+      const response = await api.post("/converter/conversions/export", payload, {
+        responseType: "blob",
+        headers: conversionContextToken ? { "X-Conversion-Context": conversionContextToken } : undefined,
       });
-
-      if (!response.ok) {
-        const errData = await response.json().catch(() => ({}));
-        const error = new Error(formatApiError(errData, "Không thể tải file MISA."));
-        error.payload = errData;
-        throw error;
-      }
-
-      const blob = await response.blob();
-      const disposition = response.headers.get("Content-Disposition") || "";
+      const blob = response.data;
+      const disposition = response.headers["content-disposition"] || "";
       const match = disposition.match(/filename="?([^";\n]+)"?/i);
       return { blob, filename: match ? match[1] : "Import misa.xls" };
     },

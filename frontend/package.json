@@ -5,13 +5,14 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "test": "node --test src/utils/converterUx.test.mjs src/utils/masterData.test.mjs src/utils/reconstruction.test.mjs src/utils/studentAssistant.test.mjs src/utils/validationUi.test.mjs src/hooks/useConverterApi.status.test.mjs",
+    "test": "node --test src/utils/converterUx.test.mjs src/utils/masterData.test.mjs src/utils/reconstruction.test.mjs src/utils/studentAssistant.test.mjs src/utils/validationUi.test.mjs src/hooks/useConverterApi.status.test.mjs src/services/api.test.mjs",
     "build": "vite build",
     "preview": "vite preview",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
     "format": "prettier --write \"src/**/*.{js,jsx,css}\"",
-    "format:check": "prettier --check \"src/**/*.{js,jsx,css}\""
+    "format:check": "prettier --check \"src/**/*.{js,jsx,css}\"",
+    "prebuild": "node scripts/check-production-env.mjs"
   },
   "dependencies": {
     "@radix-ui/react-dialog": "^1.0.5",

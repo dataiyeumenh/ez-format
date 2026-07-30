@@ -9,6 +9,7 @@ import time
 from typing import Any
 
 import httpx
+from app.context_secrets import conversion_context_secret
 
 
 class ConversionContextError(ValueError):
@@ -24,9 +25,25 @@ def verify_conversion_context_token(token: str) -> dict[str, Any]:
     payload = _verify_signed_context_token(token)
     if payload.get("purpose") not in {"misa_conversion", "misa_reconstruction"}:
         raise ConversionContextError("Conversion context token sai mục đích")
-    if not payload.get("workspace_id") or not payload.get("snapshot_set_hash"):
-        raise ConversionContextError("Conversion context token thiếu phạm vi dữ liệu")
+    payload["owner_scope"] = conversion_context_owner_scope(payload)
     return payload
+
+
+def conversion_context_owner_scope(payload: dict[str, Any]) -> str:
+    user_id = str(payload.get("user_id") or "").strip()
+    workspace_id = str(payload.get("workspace_id") or "").strip()
+    if workspace_id:
+        if not payload.get("snapshot_set_hash"):
+            raise ConversionContextError("Conversion context token thiếu phạm vi dữ liệu")
+        expected = f"workspace:{workspace_id}"
+    else:
+        if not user_id:
+            raise ConversionContextError("Conversion context token thiếu user")
+        expected = f"user:{user_id}"
+    supplied = str(payload.get("owner_scope") or "").strip()
+    if supplied and supplied != expected:
+        raise ConversionContextError("Conversion context token có owner scope không hợp lệ")
+    return expected
 
 
 def verify_reconstruction_context_token(
@@ -47,9 +64,10 @@ def verify_reconstruction_context_token(
 
 
 def _verify_signed_context_token(token: str) -> dict[str, Any]:
-    secret = os.getenv("CONVERSION_CONTEXT_SECRET") or os.getenv("JWT_SECRET")
-    if not secret:
-        raise ConversionContextError("CONVERSION_CONTEXT_SECRET chưa được cấu hình")
+    try:
+        secret = conversion_context_secret()
+    except ValueError as exc:
+        raise ConversionContextError(str(exc)) from exc
     try:
         header_part, payload_part, signature_part = token.split(".")
         header = json.loads(_decode_part(header_part))

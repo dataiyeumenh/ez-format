@@ -1,21 +1,7 @@
-import { useCallback, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import api from "../services/api";
+import { gatewayRequestError } from "../utils/converterOperations.js";
 import { filenameFromDisposition } from "../utils/reconstruction";
-
-const pythonBaseURL = import.meta.env.VITE_PYTHON_API_URL
-  ? `${import.meta.env.VITE_PYTHON_API_URL}`
-  : "/python-api";
-
-async function readJson(response, fallback) {
-  const payload = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    const error = new Error(payload.detail || payload.message || fallback);
-    error.payload = payload;
-    error.status = response.status;
-    throw error;
-  }
-  return payload;
-}
 
 export function useVoucherReconstruction() {
   const [run, setRun] = useState(null);
@@ -23,17 +9,24 @@ export function useVoucherReconstruction() {
   const [report, setReport] = useState(null);
   const [validation, setValidation] = useState(null);
   const [approved, setApproved] = useState(false);
+  const runIdRef = useRef("");
 
   const createRun = useCallback(
     async ({ file, workspaceId, mode, targetTemplateId }) => {
-      const { data } = await api.post("/reconstructions", {
-        fileName: file.name,
-        fileSizeBytes: file.size,
-        workspaceId: workspaceId || "",
-        mode,
-        targetTemplateId: targetTemplateId || "",
-      });
+      let data;
+      try {
+        ({ data } = await api.post("/reconstructions", {
+          fileName: file.name,
+          fileSizeBytes: file.size,
+          workspaceId: workspaceId || "",
+          mode,
+          targetTemplateId: targetTemplateId || "",
+        }));
+      } catch (error) {
+        throw gatewayRequestError(error, "Không thể tạo phiên tái tạo chứng từ.");
+      }
       setRun(data.run);
+      runIdRef.current = data.run?.id || "";
       setContextToken(data.contextToken);
       return data;
     },
@@ -42,39 +35,42 @@ export function useVoucherReconstruction() {
 
   const analyze = useCallback(
     async ({ file, contextToken: token, mode, targetTemplateId }) => {
+      const runId = runIdRef.current || run?.id;
+      if (!runId) throw new Error("Phiên tái tạo chưa sẵn sàng.");
       const form = new FormData();
       form.append("file", file);
       form.append("context_token", token);
       form.append("mode", mode || "auto");
       if (targetTemplateId) form.append("target_template_id", targetTemplateId);
-      const response = await fetch(`${pythonBaseURL}/api/v1/reconstructions/analyze`, {
-        method: "POST",
-        body: form,
-      });
-      const payload = await readJson(response, "Không thể tái tạo chứng từ.");
+      let payload;
+      try {
+        const response = await api.post(`/reconstructions/${encodeURIComponent(runId)}/operations/analyze`, form);
+        payload = response.data;
+      } catch (error) {
+        throw gatewayRequestError(error, "Không thể tái tạo chứng từ.");
+      }
       setReport(payload);
       setValidation(null);
       setApproved(false);
       return payload;
     },
-    [],
+    [run?.id],
   );
 
   const request = useCallback(
     async (path, { method = "POST", body } = {}) => {
       if (!run?.id || !contextToken) throw new Error("Phiên tái tạo chưa sẵn sàng.");
-      const response = await fetch(
-        `${pythonBaseURL}/api/v1/reconstructions/${run.id}${path}`,
-        {
+      try {
+        const response = await api.request({
+          url: `/reconstructions/${encodeURIComponent(run.id)}/operations${path}`,
           method,
-          headers: {
-            "Content-Type": "application/json",
-            "x-reconstruction-context": contextToken,
-          },
-          body: body === undefined ? undefined : JSON.stringify(body),
-        },
-      );
-      return readJson(response, "Không thể cập nhật chứng từ.");
+          data: body,
+          headers: { "x-reconstruction-context": contextToken },
+        });
+        return response.data;
+      } catch (error) {
+        throw gatewayRequestError(error, "Không thể cập nhật chứng từ.");
+      }
     },
     [contextToken, run?.id],
   );
@@ -154,34 +150,30 @@ export function useVoucherReconstruction() {
   const exportFile = useCallback(
     async (acknowledgeWarnings) => {
       if (!run?.id || !contextToken) throw new Error("Phiên tái tạo chưa sẵn sàng.");
-      const response = await fetch(
-        `${pythonBaseURL}/api/v1/reconstructions/${run.id}/export`,
-        {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "x-reconstruction-context": contextToken,
-            "idempotency-key": crypto.randomUUID(),
+      let response;
+      try {
+        response = await api.post(
+          `/reconstructions/${encodeURIComponent(run.id)}/operations/export`,
+          { acknowledge_warnings: acknowledgeWarnings },
+          {
+            responseType: "blob",
+            headers: {
+              "x-reconstruction-context": contextToken,
+              "Idempotency-Key": globalThis.crypto?.randomUUID?.(),
+            },
           },
-          body: JSON.stringify({ acknowledge_warnings: acknowledgeWarnings }),
-        },
-      );
-      if (!response.ok) {
-        const payload = await response.json().catch(() => ({}));
-        const error = new Error(
-          payload.detail || payload.message || "Không thể xuất MISA.",
         );
-        error.payload = payload;
-        throw error;
+      } catch (error) {
+        throw gatewayRequestError(error, "Không thể xuất MISA.");
       }
-      const mediaType = response.headers.get("Content-Type") || "";
+      const mediaType = response.headers?.["content-type"] || "";
       const fallbackFilename = mediaType.includes("application/zip")
         ? "Import MISA.zip"
         : "Import MISA.xls";
       return {
-        blob: await response.blob(),
+        blob: response.data,
         filename: filenameFromDisposition(
-          response.headers.get("Content-Disposition"),
+          response.headers?.["content-disposition"],
           fallbackFilename,
         ),
       };
@@ -192,20 +184,25 @@ export function useVoucherReconstruction() {
   const saveProfile = useCallback(
     async (payload, activate = true) => {
       if (!run?.id) throw new Error("Phiên tái tạo chưa sẵn sàng.");
-      const { data } = await api.post(`/reconstructions/${run.id}/profiles`, payload);
-      if (activate) {
-        const activated = await api.post(
-          `/reconstructions/profiles/${data.profile.id}/activate`,
-        );
-        return activated.data.profile;
+      try {
+        const { data } = await api.post(`/reconstructions/${run.id}/profiles`, payload);
+        if (activate) {
+          const activated = await api.post(
+            `/reconstructions/profiles/${data.profile.id}/activate`,
+          );
+          return activated.data.profile;
+        }
+        return data.profile;
+      } catch (error) {
+        throw gatewayRequestError(error, "Không thể lưu hồ sơ tái tạo.");
       }
-      return data.profile;
     },
     [run?.id],
   );
 
   const reset = useCallback(() => {
     setRun(null);
+    runIdRef.current = "";
     setContextToken("");
     setReport(null);
     setValidation(null);
