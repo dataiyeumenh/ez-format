@@ -125,3 +125,21 @@ git diff --check: passed
 ownership verifier: all new/reviewed Task 5 paths singly owned; 48 pre-existing
   Task 3/4 unowned paths remain unchanged
 ```
+
+## Final Anonymized Export Blocker Closure (2026-07-30)
+
+- Root cause: student analysis rewrote its selected worksheet name to `Sheet1`,
+  while the anonymized exporter selected `workbook.active`.
+- The analysis signature now preserves the selected sheet name, header row, and
+  headers. Export receives that context, selects the named worksheet, and fails
+  closed if the worksheet, header row, or headers no longer match.
+- The rebuilt workbook keeps only that sanitized worksheet under its analyzed
+  name. The scanner still enumerates every exported worksheet cell before the
+  API returns `X-Anonymization-Scanner: passed`.
+- Regression: an active confidential cover sheet plus a second analyzed data
+  sheet exports only sanitized `Data`; the cover is absent and the exported-cell
+  scanner reports no confidential match.
+
+Focused verification: `python -m pytest tests/test_student_anonymization.py
+tests/test_student_api.py -q` -- 71 passed; one existing FastAPI deprecation
+warning.

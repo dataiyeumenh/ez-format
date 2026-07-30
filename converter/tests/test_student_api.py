@@ -1213,7 +1213,7 @@ def test_anonymized_export_removes_confidential_hidden_comment_and_metadata_laye
     assert exported.status_code == 200
     assert secret.encode("utf-8") not in exported.content
     sanitized = openpyxl.load_workbook(BytesIO(exported.content), data_only=False)
-    assert sanitized.sheetnames == ["Sheet1"]
+    assert sanitized.sheetnames == ["Data"]
     assert all(
         cell.comment is None
         for worksheet in sanitized.worksheets
@@ -1226,16 +1226,18 @@ def test_anonymized_export_removes_confidential_hidden_comment_and_metadata_laye
     assert sanitized.properties.description in {None, ""}
 
 
-def test_anonymized_export_excludes_unscanned_second_visible_sheet(student_api, monkeypatch):
+def test_anonymized_export_uses_analyzed_sheet_not_active_confidential_cover(
+    student_api,
+    monkeypatch,
+):
     client, _ = student_api
     session_id = "507f1f77bcf86cd799439011"
     token = _student_token()
-    visible_sheet_secret = "SECOND-VISIBLE-ONLY-SECRET-8301"
-    source = openpyxl.load_workbook(
-        BytesIO(_privacy_layer_workbook_bytes("hidden-secret")), data_only=False
-    )
-    second_sheet = source.create_sheet("Unscanned visible sheet")
-    second_sheet["A1"] = visible_sheet_secret
+    cover_secret = "Khách A"
+    source = openpyxl.load_workbook(BytesIO(_workbook_bytes()), data_only=False)
+    cover_sheet = source.create_sheet("Confidential Cover", 0)
+    cover_sheet["A1"] = cover_secret
+    source.active = 0
     source_bytes = BytesIO()
     source.save(source_bytes)
 
@@ -1262,16 +1264,18 @@ def test_anonymized_export_excludes_unscanned_second_visible_sheet(student_api, 
     assert preview.status_code == 200
     assert preview.json()["scanner_status"] == "passed"
     assert exported.status_code == 200
-    assert visible_sheet_secret.encode("utf-8") not in exported.content
     sanitized = openpyxl.load_workbook(BytesIO(exported.content), data_only=False)
-    assert sanitized.sheetnames == ["Sheet1"]
+    assert sanitized.sheetnames == ["Data"]
+    assert sanitized["Data"]["C2"].value != cover_secret
+    assert "Confidential Cover" not in sanitized.sheetnames
     assert (
         scan_confidential_values(
             _workbook_values(exported.content, ".xlsx"),
-            {"company": [visible_sheet_secret]},
+            {"counterparty": [cover_secret]},
         )
         == ()
     )
+    assert exported.headers["X-Anonymization-Scanner"] == "passed"
 
 
 def test_student_analysis_persists_no_preview_or_mapped_row_values(student_api):

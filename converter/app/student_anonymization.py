@@ -162,6 +162,9 @@ def anonymize_workbook_bytes(
     session: AnonymizationSession,
     confidential_values: Mapping[str, Iterable[Any]],
     full_document_numbers: bool = False,
+    analyzed_sheet_name: str | None = None,
+    analyzed_header_row_index: int | None = None,
+    analyzed_headers: Iterable[Any] | None = None,
 ) -> AnonymizedWorkbook:
     """Return a newly serialized, scanner-gated workbook without writing the source."""
     normalized_filename = str(filename or "").strip()
@@ -177,7 +180,12 @@ def anonymize_workbook_bytes(
     )
     if extension == ".xlsx":
         exported, replaced_categories, replaced_layers = _anonymize_xlsx(
-            content, session, active_values
+            content,
+            session,
+            active_values,
+            analyzed_sheet_name=analyzed_sheet_name,
+            analyzed_header_row_index=analyzed_header_row_index,
+            analyzed_headers=analyzed_headers,
         )
         warnings: tuple[str, ...] = ()
     else:
@@ -223,6 +231,10 @@ def _anonymize_xlsx(
     content: bytes,
     session: AnonymizationSession,
     confidential_values: Mapping[str, Iterable[Any]],
+    *,
+    analyzed_sheet_name: str | None,
+    analyzed_header_row_index: int | None,
+    analyzed_headers: Iterable[Any] | None,
 ) -> tuple[bytes, set[str], set[str]]:
     _validate_xlsx_archive(content)
     source_workbook = load_workbook(BytesIO(content), data_only=False)
@@ -238,19 +250,23 @@ def _anonymize_xlsx(
     if not visible_sheets:
         raise AnonymizationUnsupportedLayerError("no_visible_worksheets")
 
-    source_worksheet = source_workbook.active
-    if source_worksheet.sheet_state != "visible":
-        source_worksheet = visible_sheets[0]
+    source_worksheet = _analyzed_xlsx_worksheet(
+        source_workbook,
+        visible_sheets,
+        analyzed_sheet_name=analyzed_sheet_name,
+        analyzed_header_row_index=analyzed_header_row_index,
+        analyzed_headers=analyzed_headers,
+    )
 
     # Export only the analyzed sheet. Other visible sheets are not part of the
     # Student Assistant output and could otherwise bypass its value inventory.
     workbook = Workbook()
-    workbook.remove(workbook.active)
     replaced_categories: set[str] = set()
     replaced_layers = _removed_xlsx_layers(source_workbook)
     if len(visible_sheets) > 1:
-        replaced_layers.add("non_active_visible_sheets_removed")
-    worksheet = workbook.create_sheet("Sheet1")
+        replaced_layers.add("non_analyzed_visible_sheets_removed")
+    worksheet = workbook.worksheets[0]
+    worksheet.title = source_worksheet.title
     for row in source_worksheet.iter_rows():
         for source_cell in row:
             value = source_cell.value
@@ -276,6 +292,56 @@ def _anonymize_xlsx(
         replaced_categories.update(archive_categories)
         replaced_layers.add("ooxml_text_parts")
     return exported, replaced_categories, replaced_layers
+
+
+def _analyzed_xlsx_worksheet(
+    workbook: Any,
+    visible_sheets: list[Any],
+    *,
+    analyzed_sheet_name: str | None,
+    analyzed_header_row_index: int | None,
+    analyzed_headers: Iterable[Any] | None,
+) -> Any:
+    context_values = (
+        analyzed_sheet_name,
+        analyzed_header_row_index,
+        analyzed_headers,
+    )
+    if all(value is None for value in context_values):
+        if len(visible_sheets) == 1:
+            return visible_sheets[0]
+        raise AnonymizationUnsupportedLayerError("analyzed_sheet_context")
+    if any(value is None for value in context_values):
+        raise AnonymizationUnsupportedLayerError("analyzed_sheet_context")
+
+    sheet_name = str(analyzed_sheet_name).strip()
+    if not sheet_name or sheet_name not in workbook.sheetnames:
+        raise AnonymizationUnsupportedLayerError("analyzed_sheet_not_found")
+    if isinstance(analyzed_header_row_index, bool) or not isinstance(
+        analyzed_header_row_index, int
+    ) or analyzed_header_row_index < 0:
+        raise AnonymizationUnsupportedLayerError("analyzed_sheet_header_context")
+    if isinstance(analyzed_headers, (str, bytes, bytearray)):
+        raise AnonymizationUnsupportedLayerError("analyzed_sheet_header_context")
+
+    worksheet = workbook[sheet_name]
+    header_row = next(
+        worksheet.iter_rows(
+            min_row=analyzed_header_row_index + 1,
+            max_row=analyzed_header_row_index + 1,
+            values_only=True,
+        ),
+        (),
+    )
+    actual_headers = tuple(
+        "" if value is None else str(value).strip() for value in header_row
+    )
+    expected_headers = tuple(
+        "" if value is None else str(value).strip() for value in analyzed_headers
+    )
+    if actual_headers != expected_headers:
+        raise AnonymizationUnsupportedLayerError("analyzed_sheet_header_mismatch")
+    return worksheet
 
 
 def _reject_unsupported_xlsx_binary_layers(content: bytes) -> None:

@@ -585,6 +585,7 @@ def _anonymized_student_workbook(
             raise KeyError("Không tìm thấy workbook nguồn của phiên học")
         content = input_path.read_bytes()
         table = _read_upload_table(upload_id)
+        sheet_name, header_row_index, headers = _analyzed_sheet_context(metadata)
         confidential_values = _student_confidential_values(table)
         exported = anonymize_workbook_bytes(
             filename=str(metadata.get("filename") or input_path.name),
@@ -595,6 +596,9 @@ def _anonymized_student_workbook(
             ),
             confidential_values=confidential_values,
             full_document_numbers=full_document_numbers,
+            analyzed_sheet_name=sheet_name,
+            analyzed_header_row_index=header_row_index,
+            analyzed_headers=headers,
         )
     except AnonymizationUnsupportedLayerError as exc:
         raise StudentWorkflowError(422, str(exc)) from exc
@@ -618,6 +622,24 @@ def _anonymized_student_workbook(
         ),
         confidential_values,
     )
+
+
+def _analyzed_sheet_context(metadata: dict[str, Any]) -> tuple[str, int, list[str]]:
+    signature = metadata.get("signature")
+    if not isinstance(signature, dict):
+        raise AnonymizationUnsupportedLayerError("analyzed_sheet_context")
+    sheet_name = str(signature.get("sheet_name") or "").strip()
+    header_row = signature.get("header_row")
+    headers = signature.get("headers")
+    if (
+        not sheet_name
+        or isinstance(header_row, bool)
+        or not isinstance(header_row, int)
+        or header_row < 1
+        or not isinstance(headers, list)
+    ):
+        raise AnonymizationUnsupportedLayerError("analyzed_sheet_context")
+    return sheet_name, header_row - 1, [str(header) for header in headers]
 
 
 def _student_anonymization_secret() -> str:

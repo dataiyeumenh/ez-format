@@ -277,6 +277,30 @@ def test_anonymize_xlsx_accepts_a_single_confidential_string_value():
     assert exported.replaced_categories == ("company",)
 
 
+def test_anonymize_xlsx_fails_closed_when_analyzed_header_context_changes():
+    workbook = Workbook()
+    worksheet = workbook.active
+    worksheet.title = "Data"
+    worksheet.append(["Company"])
+    worksheet.append(["Công ty TNHH Sao Mai"])
+    stream = BytesIO()
+    workbook.save(stream)
+
+    with pytest.raises(
+        AnonymizationUnsupportedLayerError,
+        match="analyzed_sheet_header_mismatch",
+    ):
+        anonymize_workbook_bytes(
+            filename="student.xlsx",
+            content=stream.getvalue(),
+            session=AnonymizationSession("session-header-context", "secret"),
+            confidential_values={"company": ["Công ty TNHH Sao Mai"]},
+            analyzed_sheet_name="Data",
+            analyzed_header_row_index=0,
+            analyzed_headers=["Changed Company Header"],
+        )
+
+
 def test_anonymize_xlsx_sanitizes_metadata_hyperlinks_comments_and_hidden_sheets():
     secret = "Công ty TNHH Sao Mai"
     workbook = Workbook()
@@ -308,7 +332,7 @@ def test_anonymize_xlsx_sanitizes_metadata_hyperlinks_comments_and_hidden_sheets
     assert secret.casefold() not in str(sanitized.code_name).casefold()
     assert secret.casefold() not in str(sanitized.properties.creator).casefold()
     assert secret.casefold() not in str(sanitized.properties.description).casefold()
-    assert sanitized.sheetnames == ["Sheet1"]
+    assert sanitized.sheetnames == ["Sheet"]
     assert sanitized.active["A1"].comment is None
     assert sanitized.active["A2"].hyperlink is None
     assert "SensitiveCompany" not in sanitized.defined_names
@@ -404,6 +428,9 @@ def test_anonymize_xlsx_sanitizes_all_ooxml_text_parts():
         content=stream.getvalue(),
         session=AnonymizationSession("session-ooxml", "secret"),
         confidential_values={"company": [secret]},
+        analyzed_sheet_name="Data",
+        analyzed_header_row_index=0,
+        analyzed_headers=["Company", "Amount"],
     )
 
     with ZipFile(BytesIO(exported.content)) as archive:

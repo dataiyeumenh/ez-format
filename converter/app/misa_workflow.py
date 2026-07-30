@@ -219,8 +219,6 @@ def analyze_upload(
     issues = validate_mapping(target_template_id, suggestion.mapping, template.headers)
     metadata = _read_metadata(upload_id)
     signature_payload = signature.__dict__.copy()
-    if student_claims:
-        signature_payload["sheet_name"] = "Sheet1"
     metadata.update(
         {
             "target_template_id": target_template_id,
