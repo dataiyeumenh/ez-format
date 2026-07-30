@@ -42,9 +42,23 @@ NODE_INTERNAL_API_URL=https://<node-backend>.onrender.com/api/internal
 MASTER_DATA_CONTEXT_TIMEOUT_SECONDS=15
 MASTER_DATA_CONTEXT_CACHE_SECONDS=300
 MAPPING_PROFILE_TIMEOUT_SECONDS=15
+MISA_TEMPLATE_DIR=fixtures/templates
+MISA_TEMPLATE_MANIFEST_PATH=config/misa-template-manifest.json
 ```
 
-Keep `MISA_TEMPLATE_DIR`, AI variables, and CORS settings unchanged.
+Package both configured paths in the converter deployment image. Relative paths
+resolve from the converter directory. Startup verifies canonical filenames,
+SHA-256 values, sheet names, header rows, column counts, and ordered headers for
+every export target; a missing or mismatched template/manifest prevents startup.
+Do not point production at an unreviewed local template folder.
+
+Before deployment, run `python -m app.misa_templates verify` from `converter/`.
+For an intentional rotation, use the documented `regenerate-manifest` and
+`review-manifest` commands in `converter/README.md`, review the candidate diff,
+then commit the reviewed template and versioned manifest together. The service
+never updates trust data automatically.
+
+Keep AI variables and CORS settings unchanged.
 
 ## Vercel frontend
 

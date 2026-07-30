@@ -92,6 +92,7 @@ E:\0. EXE2\ez-format\.artifacts\ngrok-ai\vps-ai.env
 
 ```env
 MISA_TEMPLATE_DIR=fixtures/templates
+MISA_TEMPLATE_MANIFEST_PATH=config/misa-template-manifest.json
 MAPPING_DB_PATH=data/mapping_profiles.sqlite
 
 AI_PROVIDER=remote_http

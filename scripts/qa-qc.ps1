@@ -37,22 +37,13 @@ $steps = @()
     if (-not (Get-Command npm -ErrorAction SilentlyContinue)) { throw "npm not found" }
 })
 
-[void]($steps += Step "Fixtures templates" {
-    $tpl = Join-Path $RepoRoot "converter\fixtures\templates"
-    $required = @(
-        "bsn_sales.xls", "bsn_purchase.xls", "sales_goods.xls",
-        "sales_service.xls", "purchase_goods.xls", "purchase_service.xls"
-    )
-    foreach ($f in $required) {
-        if (-not (Test-Path (Join-Path $tpl $f))) {
-            & (Join-Path $RepoRoot "scripts\setup-fixtures.ps1")
-            break
-        }
-    }
-    foreach ($f in $required) {
-        if (-not (Test-Path (Join-Path $tpl $f))) {
-            throw "Missing template: $f (run npm run setup:fixtures)"
-        }
+[void]($steps += Step "MISA template provenance" {
+    Push-Location (Join-Path $RepoRoot "converter")
+    try {
+        python -m app.misa_templates verify
+        if ($LASTEXITCODE -ne 0) { throw "MISA template provenance verification failed" }
+    } finally {
+        Pop-Location
     }
 })
 

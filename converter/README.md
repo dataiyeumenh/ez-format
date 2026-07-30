@@ -8,14 +8,52 @@ FastAPI service for Excel → MISA import conversion.
 python -m pip install -r requirements.txt
 ```
 
-Templates live in `fixtures/templates/`. Test samples in `fixtures/samples/`.
+Templates live in `fixtures/templates/`. Their reviewed SHA-256 and exact workbook
+schema live in the tracked, versioned `config/misa-template-manifest.json`.
+Test samples live in `fixtures/samples/`.
 
-Optional production/local template override:
+Production/local template configuration:
 
 ```powershell
-$env:MISA_TEMPLATE_DIR='E:\0. EXE2\Misa File'
+$env:MISA_TEMPLATE_DIR='fixtures/templates'
+$env:MISA_TEMPLATE_MANIFEST_PATH='config/misa-template-manifest.json'
 $env:MAPPING_DB_PATH='converter\data\mapping_profiles.sqlite'
 ```
+
+Relative template and manifest paths resolve from this `converter` directory.
+An external `MISA_TEMPLATE_DIR` must contain exact reviewed bytes under each
+official filename recorded as `canonical_filename`; a same-header replacement
+is rejected. Production imports verify every supported template and fail before
+the API starts when the manifest, filename, SHA-256, sheet, header row, or ordered
+header schema differs.
+
+Verify the active deployment assets:
+
+```powershell
+python -m app.misa_templates verify
+```
+
+Template rotation is never learned automatically. Replace reviewed template
+files intentionally, generate a candidate without overwriting the active
+manifest, review it, then commit the template and manifest together:
+
+```powershell
+python -m app.misa_templates regenerate-manifest `
+  --template-dir fixtures/templates `
+  --output ../.artifacts/misa-template-manifest.candidate.json `
+  --manifest-version 2026-08-01.1
+python -m app.misa_templates review-manifest `
+  --template-dir fixtures/templates `
+  --candidate ../.artifacts/misa-template-manifest.candidate.json
+git diff --no-index config/misa-template-manifest.json `
+  ../.artifacts/misa-template-manifest.candidate.json
+```
+
+The commands preserve filename, sheet, header-row, column-count, and ordered
+header invariants. Schema changes require separate manual manifest review. The
+manifest covers all export targets, including the six canonical purchase/sales
+forms and the supported `misa_purchase_domestic` compatibility target. Keep the
+BSN sales template at its reviewed 59-column schema.
 
 ## Run
 
