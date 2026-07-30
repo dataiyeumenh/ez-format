@@ -1,5 +1,5 @@
 const crypto = require("node:crypto");
-const { Readable, Transform } = require("node:stream");
+const { compose, Readable, Transform } = require("node:stream");
 const { pipeline } = require("node:stream/promises");
 const mongoose = require("mongoose");
 
@@ -138,13 +138,14 @@ class MongoGridFsArtifactStorageAdapter {
         callback();
       },
     });
-    reader.pipe(bounded);
+    // Compose keeps GridFS reader errors attached to the returned stream.
+    const stream = compose(reader, bounded);
     return {
       sizeBytes,
       mime: file.metadata?.mime || file.contentType || "application/octet-stream",
       objectId: id,
       metadata: file.metadata || {},
-      stream: bounded,
+      stream,
     };
   }
 

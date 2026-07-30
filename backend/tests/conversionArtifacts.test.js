@@ -1,6 +1,8 @@
 const assert = require("node:assert/strict");
 const test = require("node:test");
 const { Readable } = require("node:stream");
+const { Writable } = require("node:stream");
+const { pipeline } = require("node:stream/promises");
 const { readFile } = require("node:fs/promises");
 const path = require("node:path");
 
@@ -218,6 +220,42 @@ test("streamed checksum failure retires corrupted bytes without buffering the do
   await assert.rejects(collect(found.content), (error) => error.code === "ARTIFACT_CHECKSUM_MISMATCH");
   assert.equal(repo.documents[0].status, "corrupted");
   assert.equal(backend.objects.size, 0);
+});
+
+test("source stream errors terminate the HTTP pipeline instead of hanging", async () => {
+  const repo = repository();
+  const backend = storage();
+  const service = createConversionArtifactService({ repository: repo, storageAdapter: backend });
+  const saved = await service.putArtifact({ ...binding, content: Buffer.from("artifact") });
+  const sourceError = new Error("GridFS source failed");
+  backend.getArtifact = async () => ({
+    sizeBytes: saved.sizeBytes,
+    stream: Readable.from((async function* () {
+      yield Buffer.from("artifact");
+      throw sourceError;
+    })()),
+  });
+  const response = new Writable({ write(_chunk, _encoding, callback) { callback(); } });
+
+  const found = await service.getArtifact(binding);
+  await assert.rejects(pipeline(found.content, response), (error) => error === sourceError);
+  assert.equal(response.destroyed, true);
+});
+
+test("stream size mismatch terminates the returned response pipeline", async () => {
+  const repo = repository();
+  const backend = storage();
+  const service = createConversionArtifactService({ repository: repo, storageAdapter: backend });
+  const saved = await service.putArtifact({ ...binding, content: Buffer.from("artifact") });
+  backend.getArtifact = async () => ({
+    sizeBytes: saved.sizeBytes,
+    stream: Readable.from([Buffer.from("short")]),
+  });
+  const response = new Writable({ write(_chunk, _encoding, callback) { callback(); } });
+
+  const found = await service.getArtifact(binding);
+  await assert.rejects(pipeline(found.content, response), (error) => error.code === "ARTIFACT_CHECKSUM_MISMATCH");
+  assert.equal(response.destroyed, true);
 });
 
 test("metadata failure plus GridFS delete failure creates a purgeable tombstone", async () => {

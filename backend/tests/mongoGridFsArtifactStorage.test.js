@@ -118,6 +118,27 @@ test("GridFS adapter deletes only the generated object id", async () => {
   assert.equal(gridFs.files.size, 0);
 });
 
+test("GridFS download source errors terminate the returned artifact stream", async () => {
+  const gridFs = memoryGridFs();
+  const adapter = new MongoGridFsArtifactStorageAdapter({
+    db: {},
+    bucketName: "conversion_artifacts",
+    maxBytes: 32,
+    GridFSBucket: gridFs.FakeBucket,
+  });
+  const published = await adapter.putArtifact({ bytes: Buffer.from("hello"), metadata: {} });
+  const sourceError = new Error("GridFS source failed");
+  adapter.bucket.openDownloadStream = () => Readable.from((async function* () {
+    yield Buffer.from("hello");
+    throw sourceError;
+  })());
+
+  const found = await adapter.getArtifact({ objectId: published.objectId });
+  await assert.rejects((async () => {
+    for await (const chunk of found.stream) void chunk;
+  })(), (error) => error === sourceError);
+});
+
 test("GridFS write cleanup failure exposes only bounded orphan metadata for tombstoning", async () => {
   const gridFs = memoryGridFs();
   const adapter = new MongoGridFsArtifactStorageAdapter({

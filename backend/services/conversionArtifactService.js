@@ -1,5 +1,5 @@
 const crypto = require("node:crypto");
-const { Transform } = require("node:stream");
+const { compose, Transform } = require("node:stream");
 const ConversionArtifact = require("../models/ConversionArtifact");
 const {
   assertMongoGridFsConfigured,
@@ -245,8 +245,8 @@ function createConversionArtifactService({
         callback();
       },
     });
-    found.stream.pipe(verified);
-    return { metadata, content: verified };
+    // Keep source failures in the stream consumed by the HTTP pipeline.
+    return { metadata, content: compose(found.stream, verified) };
   }
 
   async function deleteArtifact(input) {
