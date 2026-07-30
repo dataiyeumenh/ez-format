@@ -555,6 +555,9 @@ def test_session_export_uses_active_revision_and_ignores_client_rows(tmp_path, m
         json={
             "upload_id": analyzed["upload_id"],
             "profile_id": confirm["profile_id"],
+            "session_id": active["session_id"],
+            "revision": None,
+            "state_hash": None,
             "acknowledge_warnings": True,
         },
     )

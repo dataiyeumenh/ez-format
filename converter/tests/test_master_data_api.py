@@ -1,5 +1,6 @@
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 from openpyxl import Workbook
 
@@ -36,6 +37,7 @@ def test_master_data_parse_endpoint(tmp_path: Path):
     assert payload["entries"][0]["code"] == "KHO01"
 
 
+@pytest.mark.no_converter_auth
 def test_master_data_parse_requires_configured_service_token(tmp_path: Path, monkeypatch):
     monkeypatch.setenv("CONVERTER_SERVICE_TOKEN", "service-secret")
     path = tmp_path / "warehouses.xlsx"

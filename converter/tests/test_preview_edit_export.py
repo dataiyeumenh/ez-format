@@ -11,7 +11,7 @@ SAMPLES = ROOT / "fixtures" / "samples"
 client = TestClient(app)
 
 
-def test_export_uses_edited_preview_rows(tmp_path, monkeypatch):
+def test_session_export_ignores_client_edited_preview_rows(tmp_path, monkeypatch):
     monkeypatch.setenv("MAPPING_DB_PATH", str(tmp_path / "profiles.sqlite"))
     monkeypatch.setenv("AI_PROVIDER", "disabled")
 
@@ -37,7 +37,13 @@ def test_export_uses_edited_preview_rows(tmp_path, monkeypatch):
             "upload_id": analyze_payload["upload_id"],
             "target_template_id": "bsn_sales",
             "mapping": suggestion["mapping"],
-            "defaults": suggestion["defaults"],
+            "defaults": {
+                **suggestion["defaults"],
+                "Hình thức bán hàng": "Bán hàng hóa trong nước",
+                "Phương thức thanh toán": "Chưa thu tiền",
+                "TK Tiền/Chi phí/Nợ (*)": "131",
+                "TK Doanh thu/Có (*)": "5111",
+            },
             "formulas": suggestion["formulas"],
         },
     )
@@ -53,7 +59,13 @@ def test_export_uses_edited_preview_rows(tmp_path, monkeypatch):
             "upload_id": analyze_payload["upload_id"],
             "target_template_id": "bsn_sales",
             "mapping": suggestion["mapping"],
-            "defaults": suggestion["defaults"],
+            "defaults": {
+                **suggestion["defaults"],
+                "Hình thức bán hàng": "Bán hàng hóa trong nước",
+                "Phương thức thanh toán": "Chưa thu tiền",
+                "TK Tiền/Chi phí/Nợ (*)": "131",
+                "TK Doanh thu/Có (*)": "5111",
+            },
             "formulas": suggestion["formulas"],
             "profile_name": "Edited preview export",
         },
@@ -75,4 +87,7 @@ def test_export_uses_edited_preview_rows(tmp_path, monkeypatch):
     workbook = xlrd.open_workbook(file_contents=export.content)
     sheet = workbook.sheet_by_index(0)
     headers = preview_payload["headers"]
-    assert sheet.cell_value(8, headers.index(doc_header)) == "EDITED-PREVIEW-001"
+    assert (
+        sheet.cell_value(8, headers.index(doc_header))
+        == preview_payload["rows"][0][doc_header]
+    )

@@ -10,6 +10,7 @@ from io import BytesIO
 from pathlib import Path
 
 import openpyxl
+import pytest
 import xlrd
 from fastapi.testclient import TestClient
 
@@ -20,6 +21,11 @@ from app.main import app
 ROOT = Path(__file__).resolve().parents[1]
 SAMPLES = ROOT / "fixtures" / "samples"
 client = TestClient(app)
+
+
+@pytest.fixture(autouse=True)
+def _allow_legacy_row_export(monkeypatch):
+    monkeypatch.setenv("ALLOW_LEGACY_ROW_EXPORT", "true")
 
 SALES_HEADERS = [
     "Mã hóa đơn",

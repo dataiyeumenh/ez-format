@@ -1,4 +1,9 @@
+import base64
+import hashlib
+import hmac
 import json
+import os
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -66,12 +71,19 @@ def _context(alias_raw: str | None = None) -> dict:
 
 
 def _patch_context(monkeypatch, context: dict):
+    from app.master_data_client import verify_conversion_context_token
+
+    def verify_test_context(token: str) -> dict:
+        if token == "context-token":
+            return {
+                "workspace_id": "workspace-1",
+                "snapshot_set_hash": "snapshot-hash",
+            }
+        return verify_conversion_context_token(token)
+
     monkeypatch.setattr(
         "app.misa_workflow.verify_conversion_context_token",
-        lambda _token: {
-            "workspace_id": "workspace-1",
-            "snapshot_set_hash": "snapshot-hash",
-        },
+        verify_test_context,
     )
     monkeypatch.setattr(
         "app.misa_workflow.fetch_master_data_context", lambda _token: context
@@ -82,6 +94,56 @@ def _patch_context(monkeypatch, context: dict):
     monkeypatch.setattr(
         "app.misa_workflow.mark_mapping_profile_used", lambda *_args, **_kwargs: None
     )
+
+
+def _operation_state(analyzed: dict) -> dict[str, object]:
+    session = analyzed["session"]
+    assert session is not None
+    return {
+        "session_id": session["session_id"],
+        "revision": session["active_revision"],
+        "state_hash": session["state_hash"],
+    }
+
+
+def _context_token(analyzed: dict) -> str:
+    session = analyzed["session"]
+    assert session is not None
+    from app.operation_store import OperationStore
+
+    stored = OperationStore().load_session(session["session_id"])
+    payload = {
+        "purpose": "misa_conversion",
+        "user_id": str(stored.user_id or ""),
+        "owner_scope": stored.owner_scope,
+        "workspace_id": str(stored.workspace_id or ""),
+        "snapshot_set_hash": "snapshot-hash",
+        "conversion_context_id": "context-id",
+        "conversion_run_id": str(
+            stored.revisions[0].context.get("conversion_run_id") or ""
+        ),
+        "operation_session_id": session["session_id"],
+        "upload_id": analyzed["upload_id"],
+        "target_template_id": stored.target_template_id,
+        "max_file_bytes": 20 * 1024 * 1024,
+        "scopes": ["analyze", "preview", "readiness", "confirm", "export"],
+        "exp": int(time.time()) + 300,
+    }
+
+    def encode(value: dict) -> str:
+        raw = json.dumps(value, separators=(",", ":")).encode("utf-8")
+        return base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
+
+    header = encode({"alg": "HS256", "typ": "JWT"})
+    body = encode(payload)
+    secret = os.getenv("CONVERSION_CONTEXT_SECRET", "pytest-conversion-context-secret")
+    signature = hmac.new(
+        secret.encode("utf-8"),
+        f"{header}.{body}".encode("ascii"),
+        hashlib.sha256,
+    ).digest()
+    encoded_signature = base64.urlsafe_b64encode(signature).rstrip(b"=").decode("ascii")
+    return f"{header}.{body}.{encoded_signature}"
 
 
 def test_preview_applies_confirmed_master_data_alias(tmp_path, monkeypatch):
@@ -96,6 +158,7 @@ def test_preview_applies_confirmed_master_data_alias(tmp_path, monkeypatch):
         requested_target_template_id="bsn_sales",
         conversion_context_token="context-token",
     )
+    context_token = _context_token(analyze)
     preview = preview_mapping(
         upload_id=analyze["upload_id"],
         target_template_id="bsn_sales",
@@ -104,7 +167,8 @@ def test_preview_applies_confirmed_master_data_alias(tmp_path, monkeypatch):
             "Hình thức bán hàng": "Bán hàng hóa trong nước",
             "Phương thức thanh toán": "Chưa thu tiền",
         },
-        conversion_context_token="context-token",
+        conversion_context_token=context_token,
+        **_operation_state(analyze),
     )
 
     assert preview["rows"][0]["Mã hàng (*)"] == "HH001"
@@ -128,6 +192,7 @@ def test_readiness_blocks_unknown_required_master_data_code(tmp_path, monkeypatc
         requested_target_template_id="bsn_sales",
         conversion_context_token="context-token",
     )
+    context_token = _context_token(analyze)
     report = readiness_mapping(
         upload_id=analyze["upload_id"],
         target_template_id="bsn_sales",
@@ -136,7 +201,8 @@ def test_readiness_blocks_unknown_required_master_data_code(tmp_path, monkeypatc
             "Hình thức bán hàng": "Bán hàng hóa trong nước",
             "Phương thức thanh toán": "Chưa thu tiền",
         },
-        conversion_context_token="context-token",
+        conversion_context_token=context_token,
+        **_operation_state(analyze),
     )
 
     assert report["summary"]["blocker"] >= 1
@@ -157,11 +223,24 @@ def test_context_cannot_change_after_analyze(tmp_path, monkeypatch):
         requested_target_template_id="bsn_sales",
         conversion_context_token="context-token",
     )
+    context_token = _context_token(analyze)
+    from app.operation_store import OperationStore
+
+    stored = OperationStore().load_session(analyze["session"]["session_id"])
     monkeypatch.setattr(
         "app.misa_workflow.verify_conversion_context_token",
         lambda _token: {
-            "workspace_id": "workspace-2",
+            "workspace_id": "workspace-1",
             "snapshot_set_hash": "other-hash",
+            "user_id": str(stored.user_id or ""),
+            "owner_scope": stored.owner_scope,
+            "operation_session_id": stored.session_id,
+            "upload_id": analyze["upload_id"],
+            "target_template_id": stored.target_template_id,
+            "conversion_run_id": str(
+                stored.revisions[0].context.get("conversion_run_id") or ""
+            ),
+            "scopes": ["preview"],
         },
     )
 
@@ -170,7 +249,8 @@ def test_context_cannot_change_after_analyze(tmp_path, monkeypatch):
             upload_id=analyze["upload_id"],
             target_template_id="bsn_sales",
             mapping=_mapping(),
-            conversion_context_token="other-token",
+            conversion_context_token=context_token,
+            **_operation_state(analyze),
         )
     except ValueError as exc:
         assert "không khớp" in str(exc)
@@ -210,16 +290,21 @@ def test_confirm_saves_workspace_mapping_profile_in_node_backend(tmp_path, monke
         requested_target_template_id="bsn_sales",
         conversion_context_token="context-token",
     )
+    context_token = _context_token(analyze)
 
     result = confirm_mapping(
         upload_id=analyze["upload_id"],
         target_template_id="bsn_sales",
         mapping=_mapping(),
         defaults={"Hình thức bán hàng": "Bán hàng hóa trong nước"},
-        conversion_context_token="context-token",
+        conversion_context_token=context_token,
+        **_operation_state(analyze),
     )
 
-    assert result == {"profile_id": "mongo-profile-1", "saved": True}
+    assert result["profile_id"] == "mongo-profile-1"
+    assert result["saved"] is True
+    assert result["mapping_profile_kind"] == "v1"
+    assert result["session"]["session_id"] == analyze["session"]["session_id"]
     assert captured["source_signature_hash"] == analyze["detected"]["source_signature_hash"]
 
 
@@ -234,6 +319,7 @@ def test_preview_rejects_stale_master_data_revision(tmp_path, monkeypatch):
         requested_target_template_id="bsn_sales",
         conversion_context_token="context-token",
     )
+    context_token = _context_token(analyze)
 
     def stale_context(_token):
         raise ConversionContextError(
@@ -248,7 +334,8 @@ def test_preview_rejects_stale_master_data_revision(tmp_path, monkeypatch):
             upload_id=analyze["upload_id"],
             target_template_id="bsn_sales",
             mapping=_mapping(),
-            conversion_context_token="context-token",
+            conversion_context_token=context_token,
+            **_operation_state(analyze),
         )
     except ValueError as exc:
         assert "đã thay đổi" in str(exc)
@@ -269,6 +356,7 @@ def test_export_derives_workspace_owner_from_legacy_upload_metadata(
         requested_target_template_id="bsn_sales",
         conversion_context_token="context-token",
     )
+    context_token = _context_token(analyzed)
     suggestion = analyzed["mapping_suggestion"]
     metadata_path = misa_workflow._metadata_path(analyzed["upload_id"])
     metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
@@ -307,7 +395,8 @@ def test_export_derives_workspace_owner_from_legacy_upload_metadata(
         analyzed["upload_id"],
         "mongo-profile-1",
         acknowledge_warnings=True,
-        conversion_context_token="context-token",
+        conversion_context_token=context_token,
+        **_operation_state(analyzed),
     )
 
     assert content

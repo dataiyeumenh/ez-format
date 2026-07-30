@@ -38,7 +38,14 @@ def _signed_conversion_context(url: object, kwargs: dict) -> str:
     if not session_id:
         match = re.search(r"/api/v1/sessions/([^/?]+)", path)
         session_id = match.group(1) if match else ""
-    if not session_id and upload_id and path.startswith("/api/v1/mappings/"):
+    if (
+        not session_id
+        and upload_id
+        and (
+            path.startswith("/api/v1/mappings/")
+            or path == "/api/v1/conversions/export"
+        )
+    ):
         try:
             from app.misa_workflow import _read_metadata
 
@@ -68,7 +75,10 @@ def _signed_conversion_context(url: object, kwargs: dict) -> str:
     ):
         body = dict(body)
         body.setdefault("conversion_run_id", run_id)
-        if path.startswith("/api/v1/mappings/") and session is not None:
+        if (
+            path.startswith("/api/v1/mappings/")
+            or path == "/api/v1/conversions/export"
+        ) and session is not None:
             body.setdefault("session_id", session.session_id)
             body.setdefault("revision", session.active_revision)
             body.setdefault("state_hash", session.state_hash)

@@ -206,6 +206,12 @@ def test_analyze_preview_confirm_export_learns_profile(tmp_path, monkeypatch):
     assert analyze_payload["detected"]["header_row"] == 1
     assert analyze_payload["detected"]["row_count"] == 1930
     suggestion = analyze_payload["mapping_suggestion"]
+    suggestion["defaults"].update(
+        {
+            "TK Tiền/Chi phí/Nợ (*)": "131",
+            "TK Doanh thu/Có (*)": "5111",
+        }
+    )
     assert suggestion["mapping"]["Mã hóa đơn"] == "Số chứng từ (*)"
     assert suggestion["mapping"]["Thời gian"] == [
         "Ngày hạch toán (*)",
@@ -213,7 +219,7 @@ def test_analyze_preview_confirm_export_learns_profile(tmp_path, monkeypatch):
     ]
     assert suggestion["mapping"]["Column1"] == "Tiền chiết khấu"
     assert "Địa chỉ (Khách hàng)" not in suggestion["mapping"]
-    assert suggestion["defaults"]["Mã khách hàng"] == "KH_LE"
+    assert "Mã khách hàng" not in suggestion["defaults"]
     assert suggestion["formulas"]["Số phiếu xuất"] == "XK_${Số chứng từ (*)}"
 
     preview = client.post(
@@ -240,7 +246,7 @@ def test_analyze_preview_confirm_export_learns_profile(tmp_path, monkeypatch):
     assert first["Số lô"] == "01072029"
     assert first["Hạn sử dụng"] == "2029-07-01T00:00:00"
     assert preview_payload["rows"][35]["ĐVT"] == "Hộp"
-    assert preview_payload["rows"][113]["Mã khách hàng"] == "KH_LE"
+    assert preview_payload["rows"][113]["Mã khách hàng"] == ""
     assert preview_payload["rows"][1870]["Số chứng từ (*)"] == "HDO1764925151999"
     assert preview_payload["rows"][1870]["Số phiếu xuất"] == "XK_HDO1764925151999"
 
@@ -292,9 +298,9 @@ def test_analyze_preview_confirm_export_learns_profile(tmp_path, monkeypatch):
     assert sheet.cell_value(8, headers.index("Hạn sử dụng")) == 47300
     assert sheet.cell_value(8, headers.index("Ngày hạch toán (*)")) == 46016.724817905095
     assert sheet.cell_value(9, headers.index("Mã hàng (*)")) == "SP094013"
-    assert sheet.cell_value(9, headers.index("ĐVT")) == "Hộp"
+    assert sheet.cell_value(9, headers.index("ĐVT")) == ""
     assert sheet.cell_value(43, headers.index("ĐVT")) == "Hộp"
-    assert sheet.cell_value(121, headers.index("Mã khách hàng")) == "KH_LE"
+    assert sheet.cell_value(121, headers.index("Mã khách hàng")) == ""
     assert sheet.cell_value(1878, headers.index("Số chứng từ (*)")) == "HDO1764925151999"
     assert sheet.cell_value(1878, headers.index("Số phiếu xuất")) == "XK_HDO1764925151999"
 
@@ -394,9 +400,16 @@ def test_analyze_repairs_stale_profile_missing_required_mapping(tmp_path, monkey
 
     assert repaired.status_code == 200
     repaired_suggestion = repaired.json()["mapping_suggestion"]
-    assert repaired_suggestion["source"] == "mixed"
+    assert repaired_suggestion["source"] == "heuristic"
     assert repaired_suggestion["mapping"]["Mã hàng"] == "Mã hàng (*)"
-    assert not any(issue["code"] == "missing_required_mapping" for issue in repaired.json()["issues"])
+    assert any(
+        issue["code"] == "missing_required_mapping"
+        and issue["field"] in {
+            "TK Tiền/Chi phí/Nợ (*)",
+            "TK Doanh thu/Có (*)",
+        }
+        for issue in repaired.json()["issues"]
+    )
 
 
 def test_high_confidence_unknown_schema_still_uses_remote_ai(tmp_path, monkeypatch):
@@ -438,12 +451,19 @@ def test_high_confidence_unknown_schema_still_uses_remote_ai(tmp_path, monkeypat
         return {"mapping": {}, "defaults": {}, "formulas": {}, "confidence": 0.0}
 
     monkeypatch.setattr("app.misa_workflow.heuristic_suggestion", high_confidence_unknown_heuristic)
-    monkeypatch.setattr("app.misa_workflow.request_mapping_suggestion", mark_ai_called)
+    monkeypatch.setattr(
+        "app.misa_workflow.ai_mapping_client.request_mapping_suggestion",
+        mark_ai_called,
+    )
 
     with raw_path.open("rb") as handle:
         response = client.post(
             "/api/v1/uploads/analyze",
-            data={"target_template_id": "bsn_sales"},
+            data={
+                "target_template_id": "bsn_sales",
+                "use_ai": "true",
+                "ai_mapping_opt_in": "true",
+            },
             files={
                 "file": (
                     raw_path.name,
@@ -477,7 +497,11 @@ def test_analyze_falls_back_when_low_confidence_remote_ai_fails(tmp_path, monkey
     with raw_path.open("rb") as handle:
         response = client.post(
             "/api/v1/uploads/analyze",
-            data={"target_template_id": "bsn_sales"},
+            data={
+                "target_template_id": "bsn_sales",
+                "use_ai": "true",
+                "ai_mapping_opt_in": "true",
+            },
             files={
                 "file": (
                     raw_path.name,
@@ -490,7 +514,7 @@ def test_analyze_falls_back_when_low_confidence_remote_ai_fails(tmp_path, monkey
     assert response.status_code == 200
     suggestion = response.json()["mapping_suggestion"]
     assert suggestion["source"] == "heuristic"
-    assert any("AI" in warning for warning in suggestion["warnings"])
+    assert "ai_unavailable" in suggestion["warnings"]
 
 
 def test_ai_gateway_requires_bearer_token(monkeypatch):

@@ -35,6 +35,11 @@ ARTIFACT_DIR = ROOT / ".artifacts" / "stress-999"
 client = TestClient(app)
 
 
+@pytest.fixture(autouse=True)
+def _allow_legacy_row_export(monkeypatch):
+    monkeypatch.setenv("ALLOW_LEGACY_ROW_EXPORT", "true")
+
+
 @pytest.fixture(scope="module")
 def matrix_report_path() -> Path:
     ARTIFACT_DIR.mkdir(parents=True, exist_ok=True)

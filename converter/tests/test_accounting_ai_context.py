@@ -59,10 +59,12 @@ def test_ai_merge_removes_stale_missing_mapping_warning_after_fields_are_filled(
     result = normalize_ai_suggestion(
         {
             "mapping": {
-                "LOAI_MUA": ["Hình thức mua hàng", "TK kho/TK chi phí (*)"],
+                "LOAI_MUA": "Hình thức mua hàng",
                 "NGAYCT": ["Ngày hạch toán (*)", "Ngày chứng từ (*)"],
                 "SOCT": "Số phiếu nhập (*)",
                 "MA_VTHH": "Mã hàng (*)",
+                "TK Nợ đã duyệt": "TK kho/TK chi phí (*)",
+                "TK Có đã duyệt": "TK công nợ/TK tiền (*)",
             },
             "confidence": 0.8,
             "notes": [],

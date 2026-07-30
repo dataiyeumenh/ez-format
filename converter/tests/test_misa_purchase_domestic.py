@@ -26,20 +26,20 @@ def _write_purchase_workbook(path):
     detail = workbook.create_sheet("Smart_KTSC_OK")
     headers = [
         "SR_HD", "SOCT", "NGAYCT", "SO_HD", "NGAY_HD", "DIENGIAI", "HTTT",
-        "TKCO", "MATHANG", "TENDM", "Phân loại", "DONVI", "LUONG", "DGVND",
+        "TKCO", "TKNO", "MATHANG", "TENDM", "Phân loại", "DONVI", "LUONG", "DGVND",
         "TTVND", "PT_CK", "CHIETKHAU", "TKTHUE", "TS_GTGT", "THUEVND",
         "MADTPNCO", "TENKH", "DIACHI",
     ]
     detail.append(headers)
     detail.append([
         "1C26TAA", "PN001", datetime(2026, 4, 2), "HD001", datetime(2026, 4, 2),
-        "Tiền điện", "", "331", "Điện", "Điện", "Dịch vụ", "kWh", 804, 0,
+        "Tiền điện", "", "331", "6428", "Điện", "Điện", "Dịch vụ", "kWh", 804, 0,
         2905880, 0, 0, "1331", 8, 232470, "0300951119-005", "Nhà cung cấp A",
         "TP.HCM",
     ])
     detail.append([
         "1C26TBB", "PN002", datetime(2026, 4, 3), "HD002", datetime(2026, 4, 3),
-        "Mua nguyên liệu", "Chuyển khoản", "1111", "NL001", "Nguyên liệu 1",
+        "Mua nguyên liệu", "Chuyển khoản", "1111", "1561", "NL001", "Nguyên liệu 1",
         "Hàng hóa", "Kg", 10, 10000, 100000, 0, 0, "1331", 10, 10000,
         "0312345678", "Nhà cung cấp B", "Bình Dương",
     ])
@@ -96,10 +96,8 @@ def test_analyze_preview_and_export_purchase_file(tmp_path, monkeypatch):
     assert payload["detected"]["header_row"] == 1
     assert payload["detected"]["row_count"] == 2
     suggestion = payload["mapping_suggestion"]
-    assert suggestion["mapping"]["Phân loại"] == [
-        "Hình thức mua hàng",
-        "TK kho/TK chi phí (*)",
-    ]
+    suggestion["mapping"]["TKNO"] = "TK kho/TK chi phí (*)"
+    assert suggestion["mapping"]["Phân loại"] == "Hình thức mua hàng"
     assert suggestion["mapping"]["NGAYCT"] == [
         "Ngày hạch toán (*)",
         "Ngày chứng từ (*)",
