@@ -113,3 +113,21 @@ backend: node --test tests/converterGatewayStartup.test.js tests/conversionArtif
 syntax: node --check services/mongoGridFsArtifactStorage.js services/conversionArtifactService.js
 passed
 ```
+
+## Response Lifecycle Blocker Closure (2026-07-30)
+
+### Changes
+
+- `internalConverterSessions.js` now forwards pre-header async failures to Express via `next(error)`.
+- Destroyed responses exit the rejection handler without attempting JSON writes; streamed failures therefore cannot trigger `ERR_HTTP_HEADERS_SENT` or an unhandled rejection.
+- Added focused tests for source failure before headers and source failure after a partial response.
+
+### Verification
+
+```text
+backend: node --test backend/tests/internalConverterSessions.test.js backend/tests/conversionArtifacts.test.js backend/tests/mongoGridFsArtifactStorage.test.js backend/tests/converterGatewayStartup.test.js backend/tests/serverStartupReadiness.test.js
+30 passed, 0 failed
+
+syntax: node --check backend/routes/internalConverterSessions.js
+passed
+```

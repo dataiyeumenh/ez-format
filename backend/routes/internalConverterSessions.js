@@ -58,7 +58,8 @@ function binding(claims, sessionId, runId, kind, revision) {
 
 function asyncRoute(handler) {
   return (req, res, next) => Promise.resolve(handler(req, res, next)).catch((error) => {
-    res.status(Number(error.statusCode) || 500).json({ message: error.message, code: error.code });
+    if (res.destroyed) return;
+    return next(error);
   });
 }
 
@@ -112,3 +113,4 @@ router.get("/:sessionId/artifacts/:kind", asyncRoute(async (req, res) => {
 }));
 
 module.exports = router;
+module.exports.asyncRoute = asyncRoute;
