@@ -9,7 +9,11 @@ const {
   createStudentContextToken,
   verifyStudentContextToken,
 } = require("../services/conversionContextService");
-const { buildOwnerScope } = require("../services/studentSessionService");
+const {
+  buildOwnerScope,
+  hashStudentQuestion,
+  normalizeStudentQuestion,
+} = require("../services/studentSessionService");
 
 const DEFAULT_RETENTION_MS = 24 * 60 * 60 * 1000;
 const UNSAFE_METADATA_KEYS = new Set([
@@ -40,6 +44,20 @@ const STUDENT_QUESTION_OUTCOMES = new Set([
   "supported",
   "unsupported",
   "ai_unavailable",
+]);
+const STUDENT_QUESTION_CATEGORIES = new Set([
+  "file_summary",
+  "locate_column",
+  "locate_rows",
+  "explain_mapping",
+  "explain_issue",
+  "aggregate_amount",
+  "count_documents",
+  "find_duplicates",
+  "find_vat_mismatches",
+  "required_actions_before_export",
+  "concept_explanation",
+  "unsupported_legal_or_business_judgment",
 ]);
 const STUDENT_ACTIVITY_CONFIG = {
   accounting_map_reviewed: {
@@ -184,6 +202,18 @@ function cleanAnalysisCompletedPayload(body = {}) {
 }
 
 function cleanQuestionEventPayload(body = {}) {
+  const legacyQuestion = normalizeStudentQuestion(body.question);
+  const suppliedHash = cleanString(body.questionHash, 64).toLowerCase();
+  const questionHash = /^[a-f0-9]{64}$/.test(suppliedHash)
+    ? suppliedHash
+    : legacyQuestion
+      ? hashStudentQuestion(legacyQuestion)
+      : "";
+  const suppliedLength = cleanNonNegativeNumber(body.questionLength);
+  const questionLength = legacyQuestion
+    ? [...legacyQuestion].length
+    : Math.min(2000, Math.floor(suppliedLength || 0));
+  const category = cleanString(body.category, 64);
   const answerType = cleanString(body.answerType, 64);
   const outcome = cleanString(body.outcome, 64);
   const evidenceIds = Array.isArray(body.evidenceIds)
@@ -195,7 +225,10 @@ function cleanQuestionEventPayload(body = {}) {
   const evidenceCount = cleanNonNegativeNumber(body.evidenceCount);
   return {
     event: cleanString(body.event, 64),
-    question: cleanString(body.question, 2000),
+    questionHash,
+    questionLength,
+    category: STUDENT_QUESTION_CATEGORIES.has(category) ? category : "",
+    operation: body.operation === "ask" ? "ask" : "",
     answerType: STUDENT_ANSWER_TYPES.has(answerType) ? answerType : "",
     evidenceIds,
     evidenceCount: evidenceCount === undefined ? 0 : evidenceCount,
@@ -747,7 +780,10 @@ async function recordStudentQuestionEvent(req, res) {
     const payload = cleanQuestionEventPayload(req.body);
     if (
       payload.event !== "question_answered" ||
-      !payload.question ||
+      !payload.questionHash ||
+      !payload.questionLength ||
+      !payload.category ||
+      !payload.operation ||
       !payload.answerType ||
       !payload.outcome ||
       payload.evidenceCount < payload.evidenceIds.length
@@ -776,7 +812,10 @@ async function recordStudentQuestionEvent(req, res) {
       userId: session.userId,
       workspaceId: session.workspaceId || null,
       ownerScope: session.ownerScope,
-      question: payload.question,
+      questionHash: payload.questionHash,
+      questionLength: payload.questionLength,
+      category: payload.category,
+      operation: payload.operation,
       answerType: payload.answerType,
       evidenceIds: payload.evidenceIds,
       evidenceCount: payload.evidenceCount,

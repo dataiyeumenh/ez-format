@@ -186,8 +186,8 @@ async function analyzeStudentSession(req, res) {
   return sendUpstream(response, res);
 }
 
-async function proxyStudentOperation(req, res) {
-  const operation = safeOperation(req.params[0]);
+async function proxyStudentOperation(req, res, requestedOperation) {
+  const operation = safeOperation(requestedOperation);
   const requiredScope = operationScope(operation);
   const trusted = await trustedSession(req, requiredScope);
   if (!trusted.session.converterUploadId) {
@@ -222,10 +222,34 @@ if (isConverterGatewayUsageReady()) {
     upload.single("file"),
     asyncRoute(analyzeStudentSession),
   );
-  router
-    .route("/sessions/:id/operations/*")
-    .get(asyncRoute(proxyStudentOperation))
-    .post(asyncRoute(proxyStudentOperation));
+  const proxy = (operation) =>
+    asyncRoute((req, res) => proxyStudentOperation(req, res, operation(req)));
+  router.get("/sessions/:id/operations/overview", proxy(() => "overview"));
+  router.post("/sessions/:id/operations/questions", proxy(() => "questions"));
+  router.get(
+    "/sessions/:id/operations/source-rows/:worksheetRow",
+    proxy((req) => `source-rows/${req.params.worksheetRow}`),
+  );
+  router.get(
+    "/sessions/:id/operations/accounting-map",
+    proxy(() => "accounting-map"),
+  );
+  router.get(
+    "/sessions/:id/operations/reconciliation",
+    proxy(() => "reconciliation"),
+  );
+  router.post(
+    "/sessions/:id/operations/anonymization/preview",
+    proxy(() => "anonymization/preview"),
+  );
+  router.post(
+    "/sessions/:id/operations/anonymization/export",
+    proxy(() => "anonymization/export"),
+  );
+  router.post(
+    "/sessions/:id/operations/internship-report",
+    proxy(() => "internship-report"),
+  );
 }
 
 module.exports = router;

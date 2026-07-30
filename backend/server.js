@@ -24,6 +24,10 @@ const {
   assertConverterGatewayStartupConfig,
   isConverterGatewayUsageReady,
 } = require("./services/converterGatewayService");
+const StudentQuestionEvent = require("./models/StudentQuestionEvent");
+const {
+  migrateStudentQuestionEventPrivacy,
+} = require("./services/studentSessionService");
 
 require("dotenv").config();
 
@@ -141,6 +145,16 @@ async function startServer() {
     console.log(
       `[DB] MappingProfile owner migration: ${migration.backfilled} backfilled, ${migration.droppedIndexes.length} obsolete index(es) dropped`,
     );
+  }
+  if (studentAssistantEnabled) {
+    const questionMigration = await migrateStudentQuestionEventPrivacy(
+      StudentQuestionEvent,
+    );
+    if (questionMigration.purged) {
+      console.log(
+        `[DB] Student question privacy migration: ${questionMigration.purged} legacy event(s) purged`,
+      );
+    }
   }
   const artifactSweeper = converterGatewayUsageReady
     ? startConversionArtifactSweeper()

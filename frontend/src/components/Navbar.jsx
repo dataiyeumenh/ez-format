@@ -6,7 +6,7 @@ import ezFormatLogo from "../assets/ezformat-logo-64.webp";
 import UserPlanBadge from "./UserPlanBadge";
 import FeedbackModal from "./FeedbackModal";
 import ChangePasswordModal from "./ChangePasswordModal";
-import { studentAssistantEnabled } from "../hooks/useStudentAssistantApi";
+import { useStudentAssistantAvailability } from "../hooks/useStudentAssistantApi";
 
 const workspacesEnabled =
   String(
@@ -41,6 +41,7 @@ const Navbar = () => {
   const [logoutConfirmOpen, setLogoutConfirmOpen] = useState(false);
   const [feedbackOpen, setFeedbackOpen] = useState(false);
   const [changePwOpen, setChangePwOpen] = useState(false);
+  const studentAssistantAvailable = useStudentAssistantAvailability();
   const menuRef = useRef(null);
 
   const closeMobile = () => setMobileOpen(false);
@@ -127,7 +128,7 @@ const Navbar = () => {
             <NavLink to="/convert" className={navLinkClass}>
               Chuyển đổi
             </NavLink>
-            {studentAssistantEnabled && (
+            {studentAssistantAvailable && (
               <NavLink to="/student" className={navLinkClass}>
                 Sinh viên
               </NavLink>
@@ -248,7 +249,7 @@ const Navbar = () => {
           <NavLink to="/convert" className={navLinkClass} onClick={closeMobile}>
             Chuyển đổi
           </NavLink>
-          {studentAssistantEnabled && (
+          {studentAssistantAvailable && (
             <NavLink to="/student" className={navLinkClass} onClick={closeMobile}>
               Sinh viên
             </NavLink>

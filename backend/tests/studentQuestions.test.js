@@ -9,6 +9,10 @@ const {
   cleanQuestionEventPayload,
   recordStudentQuestionEvent,
 } = require("../controllers/studentSessionController");
+const {
+  hashStudentQuestion,
+  migrateStudentQuestionEventPrivacy,
+} = require("../services/studentSessionService");
 
 process.env.CONVERSION_CONTEXT_SECRET = "test-student-question-secret";
 
@@ -39,10 +43,13 @@ function questionToken(overrides = {}) {
 }
 
 test("question event payload keeps metadata only and rejects raw row fields", () => {
+  const question = "Có bao nhiêu hóa đơn?";
   assert.deepEqual(
     cleanQuestionEventPayload({
       event: "question_answered",
-      question: "  Có bao nhiêu hóa đơn?  ",
+      question: `  ${question}  `,
+      category: "count_documents",
+      operation: "ask",
       answerType: "deterministic_file_query",
       evidenceIds: [" evidence-1 ", "evidence-2"],
       evidenceCount: 22,
@@ -54,7 +61,10 @@ test("question event payload keeps metadata only and rejects raw row fields", ()
     }),
     {
       event: "question_answered",
-      question: "Có bao nhiêu hóa đơn?",
+      questionHash: hashStudentQuestion(question),
+      questionLength: question.length,
+      category: "count_documents",
+      operation: "ask",
       answerType: "deterministic_file_query",
       evidenceIds: ["evidence-1", "evidence-2"],
       evidenceCount: 22,
@@ -64,7 +74,11 @@ test("question event payload keeps metadata only and rejects raw row fields", ()
 });
 
 test("StudentQuestionEvent schema contains no full row or answer payload", () => {
-  assert.equal(StudentQuestionEvent.schema.path("question").instance, "String");
+  assert.equal(StudentQuestionEvent.schema.path("question"), undefined);
+  assert.equal(StudentQuestionEvent.schema.path("questionHash").instance, "String");
+  assert.equal(StudentQuestionEvent.schema.path("questionLength").instance, "Number");
+  assert.equal(StudentQuestionEvent.schema.path("category").instance, "String");
+  assert.equal(StudentQuestionEvent.schema.path("operation").instance, "String");
   assert.equal(StudentQuestionEvent.schema.path("answerType").instance, "String");
   assert.equal(StudentQuestionEvent.schema.path("evidenceIds").instance, "Array");
   assert.equal(StudentQuestionEvent.schema.path("evidenceCount").instance, "Number");
@@ -111,7 +125,10 @@ test("internal question event is ask-scope and owner bounded", async () => {
         },
         body: {
           event: "question_answered",
-          question: "Có bao nhiêu hóa đơn?",
+          questionHash: hashStudentQuestion("Có bao nhiêu hóa đơn?"),
+          questionLength: "Có bao nhiêu hóa đơn?".length,
+          category: "count_documents",
+          operation: "ask",
           answerType: "deterministic_file_query",
           evidenceIds: ["evidence-1", "evidence-2"],
           evidenceCount: 2,
@@ -144,7 +161,10 @@ test("internal question event is ask-scope and owner bounded", async () => {
       userId: session.userId,
       workspaceId: null,
       ownerScope: session.ownerScope,
-      question: "Có bao nhiêu hóa đơn?",
+      questionHash: hashStudentQuestion("Có bao nhiêu hóa đơn?"),
+      questionLength: "Có bao nhiêu hóa đơn?".length,
+      category: "count_documents",
+      operation: "ask",
       answerType: "deterministic_file_query",
       evidenceIds: ["evidence-1", "evidence-2"],
       evidenceCount: 2,
@@ -154,6 +174,44 @@ test("internal question event is ask-scope and owner bounded", async () => {
     StudentFileSession.findOne = originalFindOne;
     StudentQuestionEvent.create = originalCreate;
   }
+});
+
+test("legacy question migration purges raw content without requiring new fields", async () => {
+  const calls = [];
+  const result = await migrateStudentQuestionEventPrivacy({
+    collection: {
+      updateMany: async (filter, update) => {
+        calls.push({ filter, update });
+        return { modifiedCount: 4 };
+      },
+    },
+  });
+
+  assert.equal(result.purged, 4);
+  assert.deepEqual(calls[0].filter, {
+    $or: [
+      { question: { $exists: true } },
+      { answer: { $exists: true } },
+      { rows: { $exists: true } },
+      { rawRows: { $exists: true } },
+      { evidence: { $exists: true } },
+      { workbook: { $exists: true } },
+      { workbookBytes: { $exists: true } },
+      { content: { $exists: true } },
+    ],
+  });
+  assert.deepEqual(calls[0].update, {
+    $unset: {
+      question: 1,
+      answer: 1,
+      rows: 1,
+      rawRows: 1,
+      evidence: 1,
+      workbook: 1,
+      workbookBytes: 1,
+      content: 1,
+    },
+  });
 });
 
 test("internal question event rejects a different session before database access", async () => {

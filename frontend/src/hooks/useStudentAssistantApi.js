@@ -1,5 +1,6 @@
-import { useCallback } from "react";
+import { useCallback, useEffect, useState } from "react";
 import api from "../services/api";
+import { isStudentAssistantAvailable } from "../utils/studentAssistant";
 
 const viteEnv = import.meta.env || {};
 
@@ -85,6 +86,32 @@ export async function fetchStudentAssistantStatus(apiClient = api) {
   } catch {
     return { serviceOnline: false, aiStatus: null, capabilityEnabled: false };
   }
+}
+
+export function useStudentAssistantAvailability({
+  frontendEnabled = studentAssistantEnabled,
+  statusLoader = fetchStudentAssistantStatus,
+} = {}) {
+  const [available, setAvailable] = useState(false);
+
+  useEffect(() => {
+    let active = true;
+    if (!frontendEnabled) {
+      return () => {
+        active = false;
+      };
+    }
+    statusLoader().then((status) => {
+      if (active) {
+        setAvailable(isStudentAssistantAvailable(frontendEnabled, status));
+      }
+    });
+    return () => {
+      active = false;
+    };
+  }, [frontendEnabled, statusLoader]);
+
+  return available;
 }
 
 export function useStudentAssistantApi() {

@@ -7,12 +7,16 @@ import json
 import time
 from concurrent.futures import ThreadPoolExecutor
 from io import BytesIO
+from pathlib import Path
 from threading import Event, Lock
 
 import openpyxl
 import pytest
 import xlwt
 from fastapi.testclient import TestClient
+from openpyxl.comments import Comment
+from openpyxl.packaging.custom import StringProperty
+from openpyxl.workbook.defined_name import DefinedName
 
 from app import main as main_module
 from app import student_store, student_workflow
@@ -175,6 +179,34 @@ def _structured_xls_workbook_bytes():
     sheet.write(1, 6, xlwt.Formula("E2*F2"))
     sheet.row(1).hidden = True
     sheet.col(0).hidden = True
+    output = BytesIO()
+    workbook.save(output)
+    return output.getvalue()
+
+
+def _privacy_layer_workbook_bytes(secret: str):
+    workbook = openpyxl.Workbook()
+    sheet = workbook.active
+    sheet.title = "Data"
+    sheet.append(
+        [
+            "Mã hóa đơn",
+            "Thời gian",
+            "Tên khách hàng",
+            "Mã hàng",
+            "Số lượng",
+            "Đơn giá",
+        ]
+    )
+    sheet.append(["HD001", "01/01/2026", "Khách an toàn", "SP001", 2, 100000])
+    sheet["A1"].comment = Comment(f"comment:{secret}", secret)
+    hidden = workbook.create_sheet(f"hidden-{secret}")
+    hidden.sheet_state = "hidden"
+    hidden["A1"] = secret
+    workbook.properties.creator = secret
+    workbook.properties.description = f"metadata:{secret}"
+    workbook.custom_doc_props.append(StringProperty(name="Confidential", value=secret))
+    workbook.defined_names.add(DefinedName("ConfidentialName", attr_text=f'"{secret}"'))
     output = BytesIO()
     workbook.save(output)
     return output.getvalue()
@@ -725,14 +757,20 @@ def test_student_question_returns_valid_evidence_and_sanitized_best_effort_event
     assert event == {
         "event": "question_answered",
         "sessionId": "507f1f77bcf86cd799439011",
-        "question": "Những dòng nào có hóa đơn HD001?",
+        "questionHash": hashlib.sha256(
+            "Những dòng nào có hóa đơn HD001?".encode("utf-8")
+        ).hexdigest(),
+        "questionLength": len("Những dòng nào có hóa đơn HD001?"),
+        "category": "locate_rows",
+        "operation": "ask",
         "answerType": "deterministic_file_query",
         "evidenceIds": [item["id"] for item in payload["evidence"]],
         "evidenceCount": payload["evidence_count"],
         "outcome": "supported",
     }
     serialized = json.dumps(event, ensure_ascii=False).lower()
-    assert "rows" not in serialized
+    assert "những dòng nào" not in serialized
+    assert '"rows":' not in serialized
     assert "actual" not in serialized
     assert "expected" not in serialized
 
@@ -827,7 +865,10 @@ def test_question_event_client_sends_only_sanitized_metadata(monkeypatch):
     payload = {
         "event": "question_answered",
         "sessionId": "507f1f77bcf86cd799439011",
-        "question": "Có bao nhiêu hóa đơn?",
+        "questionHash": hashlib.sha256("Có bao nhiêu hóa đơn?".encode("utf-8")).hexdigest(),
+        "questionLength": len("Có bao nhiêu hóa đơn?"),
+        "category": "count_documents",
+        "operation": "ask",
         "answerType": "deterministic_file_query",
         "evidenceIds": ["question-evidence-1"],
         "evidenceCount": 1,
@@ -1136,6 +1177,85 @@ def test_anonymization_preview_and_export_are_copy_only_and_scanner_gated(
             "evidenceCount": 1,
         }
     ]
+
+
+def test_anonymized_export_removes_confidential_hidden_comment_and_metadata_layers(
+    student_api,
+    monkeypatch,
+):
+    client, _ = student_api
+    session_id = "507f1f77bcf86cd799439011"
+    token = _student_token()
+    secret = "HIDDEN-META-SECRET-9472"
+    analyzed = _analyze_bytes(
+        client,
+        _privacy_layer_workbook_bytes(secret),
+        token=token,
+        filename="privacy.xlsx",
+    )
+    assert analyzed.status_code == 200
+    monkeypatch.setenv("STUDENT_INTERNSHIP_ENABLED", "true")
+
+    preview = client.post(
+        f"/api/v1/student/sessions/{session_id}/anonymization/preview",
+        headers={"X-Student-Context": token},
+        json={"full_document_numbers": False},
+    )
+    exported = client.post(
+        f"/api/v1/student/sessions/{session_id}/anonymization/export",
+        headers={"X-Student-Context": token},
+        json={"full_document_numbers": False},
+    )
+
+    assert preview.status_code == 200
+    assert preview.json()["scanner_status"] == "passed"
+    assert exported.status_code == 200
+    assert secret.encode("utf-8") not in exported.content
+    sanitized = openpyxl.load_workbook(BytesIO(exported.content), data_only=False)
+    assert sanitized.sheetnames == ["Sheet1"]
+    assert all(
+        cell.comment is None
+        for worksheet in sanitized.worksheets
+        for row in worksheet.iter_rows()
+        for cell in row
+    )
+    assert not sanitized.defined_names
+    assert len(sanitized.custom_doc_props) == 0
+    assert sanitized.properties.creator in {None, ""}
+    assert sanitized.properties.description in {None, ""}
+
+
+def test_student_analysis_persists_no_preview_or_mapped_row_values(student_api):
+    client, _ = student_api
+    response = _analyze(client, _student_token())
+    assert response.status_code == 200
+    assert response.json()["student_preview"]["rows"]
+
+    upload_id = response.json()["upload_id"]
+    input_path = _read_metadata(upload_id)["input_path"]
+    json_paths = sorted(Path(input_path).parent.glob("*.json"))
+    assert json_paths
+    for path in json_paths:
+        serialized = path.read_text(encoding="utf-8")
+        assert "Khách A" not in serialized
+        payload = json.loads(serialized)
+        assert "rows" not in json.dumps(payload, ensure_ascii=False).lower()
+        assert "student_preview" not in payload
+
+    persisted_overview = json.loads(
+        (Path(input_path).parent / "student-overview.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert set(persisted_overview) <= {
+        "cache_version",
+        "upload_id",
+        "student_state_hash",
+        "target_template_id",
+        "schema",
+        "counts",
+        "anonymized_metadata",
+    }
 
 
 def test_internship_report_requires_verified_activity_ids_and_safe_approved_notes(

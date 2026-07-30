@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import hmac
 import os
@@ -142,34 +143,6 @@ def get_student_overview(*, session_id: str, context_token: str) -> dict[str, An
         status_code = 410 if "hết hạn" in str(exc).lower() else 403
         raise StudentWorkflowError(status_code, str(exc)) from exc
 
-    try:
-        metadata = _read_metadata(upload_id)
-        (
-            target_template_id,
-            mapping_source,
-            mapping_identity,
-            mapping,
-            defaults,
-            formulas,
-        ) = _effective_mapping(metadata)
-    except KeyError as exc:
-        raise StudentWorkflowError(404, str(exc)) from exc
-    except ValueError as exc:
-        raise StudentWorkflowError(400, str(exc)) from exc
-    current_state_hash = explanation_state_hash(
-        session_id=claims.session_id,
-        upload_id=upload_id,
-        target_template_id=target_template_id,
-        source_signature_hash=str((metadata.get("signature") or {}).get("hash") or ""),
-        mapping_source=mapping_source,
-        mapping_identity=mapping_identity,
-        mapping=mapping,
-        defaults=defaults,
-        formulas=formulas,
-    )
-    cached = _read_overview_cache(upload_id)
-    if cached and cached.get("student_state_hash") == current_state_hash:
-        return cached
     return _build_current_overview(upload_id=upload_id, token=context_token, claims=claims)
 
 
@@ -444,7 +417,10 @@ def ask_student_question(
     event = {
         "event": "question_answered",
         "sessionId": claims.session_id,
-        "question": normalized_question,
+        "questionHash": hashlib.sha256(normalized_question.encode("utf-8")).hexdigest(),
+        "questionLength": len(normalized_question),
+        "category": answer.intent,
+        "operation": "ask",
         "answerType": answer.answer_type,
         "evidenceIds": [item.id for item in answer.evidence],
         "evidenceCount": answer.evidence_count,
@@ -1091,29 +1067,48 @@ def _overview_path(upload_id: str) -> Path:
     return input_path.parent / OVERVIEW_FILENAME
 
 
-def _read_overview_cache(upload_id: str) -> dict[str, Any] | None:
-    path = _overview_path(upload_id)
-    if not path.is_file():
-        return None
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
-    return payload if isinstance(payload, dict) else None
-
-
 def _write_overview_cache(upload_id: str, payload: dict[str, Any]) -> None:
     path = _overview_path(upload_id)
     temporary = path.with_suffix(".tmp")
+    safe_payload = _safe_overview_cache(payload)
     temporary.write_text(
         json.dumps(
-            jsonable_encoder(payload),
+            jsonable_encoder(safe_payload),
             ensure_ascii=False,
             separators=(",", ":"),
         ),
         encoding="utf-8",
     )
     temporary.replace(path)
+
+
+def _safe_overview_cache(payload: dict[str, Any]) -> dict[str, Any]:
+    detected = payload.get("detected") or {}
+    summary = payload.get("student_summary") or {}
+    return {
+        "cache_version": 2,
+        "upload_id": str(payload.get("upload_id") or ""),
+        "student_state_hash": str(payload.get("student_state_hash") or ""),
+        "target_template_id": str(payload.get("target_template_id") or ""),
+        "schema": {
+            "source_headers": list(detected.get("headers") or []),
+            "target_headers": list(payload.get("target_headers") or []),
+        },
+        "counts": {
+            "data_row_count": int(summary.get("data_row_count") or 0),
+            "document_count": summary.get("document_count"),
+            "recognized_columns": int(summary.get("recognized_columns") or 0),
+            "unresolved_columns": int(summary.get("unresolved_columns") or 0),
+            "mapping_counts": dict(summary.get("mapping_counts") or {}),
+            "issue_counts": dict(summary.get("issue_counts") or {}),
+            "explanation_count": int(summary.get("explanation_count") or 0),
+        },
+        "anonymized_metadata": {
+            "file_label": "student-workbook",
+            "sheet_label": "Sheet1",
+            "source_signature_hash": str(detected.get("source_signature_hash") or ""),
+        },
+    }
 
 
 def _decimal_number(value) -> int | float:

@@ -86,3 +86,42 @@ Exact-source check: 30 source-owned student blobs matched
   ownership decisions were not guessed in this task.
 - `useVoucherReconstruction.js` temporarily owns its gateway error wrapper so the
   required frontend build passes before the shared `converterOperations.js` task.
+
+## Reviewer Findings Closure (2026-07-30)
+
+All six Task 5 reviewer findings were reproduced with failing tests before the
+fixes:
+
+- Anonymized `.xlsx` exports now rebuild from sanitized visible cell output.
+  Hidden sheets, comments, hyperlinks, names, custom/core metadata, drawings and
+  other unclassified workbook layers are not copied. External links and embedded
+  binary objects fail closed. The scanner inspects every exported cell and OOXML
+  text part before `scanner_status=passed` is returned.
+- `student-overview.json` now stores only schema, counts, state hashes and generic
+  labels. Raw preview/mapped rows remain ephemeral in the response. Student upload
+  JSON also uses generic file and sheet labels.
+- Question events now persist SHA-256, length, deterministic intent category,
+  operation and bounded evidence metadata. Raw questions and answers remain
+  ephemeral. Startup purges legacy raw question/answer/row/workbook fields through
+  the native Mongo collection API, avoiding strict-schema migration loss.
+- Desktop and mobile Student links now use the Vite gate plus live backend
+  capability. `/student` remains a lazy production chunk. Rendered Navbar and hook
+  integration tests cover disabled/enabled matrices.
+- Root and converter environment examples document the dedicated 32+ character
+  anonymization secret and required distinctness.
+- Student gateway operations now use eight explicit route/method pairs; the
+  wildcard GET/POST operation route was removed.
+
+Fresh focused verification after remediation:
+
+```text
+backend Task 5 + startup: 52 passed, 0 failed
+converter Task 5: 135 passed, 0 failed, 1 existing FastAPI deprecation warning
+frontend student utility: 25 passed, 0 failed
+frontend rendered/integration: 4 passed, 0 failed
+frontend build: passed; StudentAssistantPage remains a separate lazy chunk
+frontend lint: passed
+git diff --check: passed
+ownership verifier: all new/reviewed Task 5 paths singly owned; 48 pre-existing
+  Task 3/4 unowned paths remain unchanged
+```

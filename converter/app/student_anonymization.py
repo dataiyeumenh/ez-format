@@ -6,12 +6,13 @@ import re
 import xml.etree.ElementTree as ElementTree
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
+from datetime import datetime
 from io import BytesIO
 from pathlib import Path
 from typing import Any
 from zipfile import BadZipFile, ZipFile
 
-from openpyxl import load_workbook
+from openpyxl import Workbook, load_workbook
 from openpyxl.comments import Comment
 from xlrd import open_workbook
 from xlutils.copy import copy as copy_xls_workbook
@@ -194,7 +195,7 @@ def anonymize_workbook_bytes(
             category for category in ANONYMIZATION_CATEGORIES if category in replaced_categories
         ),
         warnings=warnings,
-        replaced_layers=tuple(replaced_layers),
+        replaced_layers=tuple(sorted(replaced_layers)),
     )
 
 
@@ -224,24 +225,42 @@ def _anonymize_xlsx(
     confidential_values: Mapping[str, Iterable[Any]],
 ) -> tuple[bytes, set[str], set[str]]:
     _validate_xlsx_archive(content)
-    workbook = load_workbook(BytesIO(content), data_only=False)
-    if list(getattr(workbook, "_external_links", ())):
+    source_workbook = load_workbook(BytesIO(content), data_only=False)
+    if list(getattr(source_workbook, "_external_links", ())):
         raise AnonymizationUnsupportedLayerError("external_links")
+    _reject_unsupported_xlsx_binary_layers(content)
+
+    visible_sheets = [
+        worksheet
+        for worksheet in source_workbook.worksheets
+        if worksheet.sheet_state == "visible"
+    ]
+    if not visible_sheets:
+        raise AnonymizationUnsupportedLayerError("no_visible_worksheets")
+
+    # Rebuild from visible cell values only. Unclassified workbook layers are
+    # omitted rather than copied into an export that claims scanner success.
+    workbook = Workbook()
+    workbook.remove(workbook.active)
     replaced_categories: set[str] = set()
-    replaced_layers: set[str] = set()
-    for worksheet in workbook.worksheets:
-        for row in worksheet.iter_rows():
-            for cell in row:
+    replaced_layers = _removed_xlsx_layers(source_workbook)
+    for sheet_index, source_worksheet in enumerate(visible_sheets, start=1):
+        worksheet = workbook.create_sheet(f"Sheet{sheet_index}")
+        for row in source_worksheet.iter_rows():
+            for source_cell in row:
+                value = source_cell.value
                 replacement = _replacement_for_cell(
-                    cell.value, session, confidential_values
+                    value, session, confidential_values
                 )
                 if replacement is not None:
-                    cell.value, category = replacement
+                    value, category = replacement
                     replaced_categories.add(category)
                     replaced_layers.add("cell_values")
-                    replaced_layers.add(
-                        "hidden_sheet_cells" if worksheet.sheet_state != "visible" else "cell_values"
-                    )
+                worksheet.cell(
+                    row=source_cell.row,
+                    column=source_cell.column,
+                    value=value,
+                )
     replaced_layers.update(_sanitize_xlsx_metadata(workbook, session, confidential_values))
     stream = BytesIO()
     workbook.save(stream)
@@ -252,6 +271,37 @@ def _anonymize_xlsx(
         replaced_categories.update(archive_categories)
         replaced_layers.add("ooxml_text_parts")
     return exported, replaced_categories, replaced_layers
+
+
+def _reject_unsupported_xlsx_binary_layers(content: bytes) -> None:
+    with ZipFile(BytesIO(content), "r") as archive:
+        for name in archive.namelist():
+            if name.casefold().startswith(("xl/media/", "xl/embeddings/", "xl/activex/")):
+                raise AnonymizationUnsupportedLayerError("embedded_binary_objects")
+
+
+def _removed_xlsx_layers(workbook: Any) -> set[str]:
+    layers = {"workbook_properties", "defined_names"}
+    if any(sheet.sheet_state != "visible" for sheet in workbook.worksheets):
+        layers.update({"hidden_sheets_removed", "hidden_sheet_cells"})
+    if any(
+        cell.comment is not None
+        for sheet in workbook.worksheets
+        for row in sheet.iter_rows()
+        for cell in row
+    ):
+        layers.add("comments")
+    if any(
+        cell.hyperlink is not None
+        for sheet in workbook.worksheets
+        for row in sheet.iter_rows()
+        for cell in row
+    ):
+        layers.add("hyperlinks")
+    custom_properties = getattr(workbook, "custom_doc_props", None)
+    if custom_properties and len(custom_properties):
+        layers.add("custom_document_properties")
+    return layers
 
 
 def _validate_xlsx_archive(content: bytes) -> None:
@@ -373,6 +423,9 @@ def _sanitize_xlsx_metadata(
         for name in property_names:
             if hasattr(properties, name):
                 setattr(properties, name, "")
+        properties.created = datetime(1980, 1, 1)
+        properties.modified = datetime(1980, 1, 1)
+        properties.lastPrinted = None
 
     custom_properties = getattr(workbook, "custom_doc_props", None)
     if custom_properties and len(custom_properties):

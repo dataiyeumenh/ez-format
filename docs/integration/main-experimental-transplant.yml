@@ -86,6 +86,12 @@ rules:
   - path: frontend/src/components/admin/AdminLayout.jsx
     owner: compose
     reason: shared admin layout boundary
+  - path: frontend/src/components/Navbar.jsx
+    owner: compose
+    reason: student navigation requires frontend and backend capability gates
+  - path: frontend/src/components/Navbar.studentAssistant.test.jsx
+    owner: compose
+    reason: rendered desktop and mobile student navigation contract
   - path: frontend/src/pages/ConvertPage.jsx
     owner: compose
     reason: shared conversion page boundary
@@ -105,8 +111,8 @@ rules:
     owner: source
     reason: reviewed student session metadata model
   - path: backend/models/StudentQuestionEvent.js
-    owner: source
-    reason: reviewed question metadata model
+    owner: compose
+    reason: reviewed model composed with hashed question privacy contract
   - path: backend/models/StudentAttempt.js
     owner: compose
     reason: remove unsupported student attempt persistence
@@ -120,8 +126,8 @@ rules:
     owner: compose
     reason: bind source student routes to deploy-safe gateway
   - path: backend/services/studentSessionService.js
-    owner: source
-    reason: reviewed student ownership helper
+    owner: compose
+    reason: reviewed ownership helper plus legacy question privacy migration
   - path: backend/tests/studentActivities.test.js
     owner: source
     reason: reviewed student activity privacy tests
@@ -129,8 +135,8 @@ rules:
     owner: compose
     reason: remove unsupported student grading tests
   - path: backend/tests/studentQuestions.test.js
-    owner: source
-    reason: reviewed student question privacy tests
+    owner: compose
+    reason: reviewed question tests plus hashed persistence and migration coverage
   - path: backend/tests/studentSessions.test.js
     owner: compose
     reason: source tests plus gateway and support-only bindings
@@ -138,8 +144,8 @@ rules:
     owner: source
     reason: reviewed student accounting map
   - path: converter/app/student_anonymization.py
-    owner: source
-    reason: reviewed student workbook anonymization
+    owner: compose
+    reason: reviewed anonymization plus full-workbook privacy sanitization
   - path: converter/app/student_context.py
     owner: source
     reason: reviewed student context verification
@@ -233,6 +239,9 @@ rules:
   - path: frontend/src/hooks/useStudentAssistantApi.js
     owner: compose
     reason: source student API bound to Node gateway
+  - path: frontend/src/hooks/useStudentAssistantAvailability.test.jsx
+    owner: compose
+    reason: rendered dual feature-gate integration contract
   - path: frontend/src/hooks/useVoucherReconstruction.js
     owner: compose
     reason: keep existing voucher hook buildable before shared utility task

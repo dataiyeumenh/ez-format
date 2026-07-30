@@ -111,7 +111,12 @@ def save_upload(
         bind_upload_to_student(upload_id, student_claims, student_ttl_seconds)
     input_path = directory / f"input{suffix}"
     input_path.write_bytes(content)
-    metadata = {"upload_id": upload_id, "filename": filename, "input_path": str(input_path)}
+    persisted_filename = f"student-workbook{suffix}" if student_claims else filename
+    metadata = {
+        "upload_id": upload_id,
+        "filename": persisted_filename,
+        "input_path": str(input_path),
+    }
     _write_metadata(upload_id, metadata)
     return upload_id, input_path
 
@@ -213,10 +218,13 @@ def analyze_upload(
 
     issues = validate_mapping(target_template_id, suggestion.mapping, template.headers)
     metadata = _read_metadata(upload_id)
+    signature_payload = signature.__dict__.copy()
+    if student_claims:
+        signature_payload["sheet_name"] = "Sheet1"
     metadata.update(
         {
             "target_template_id": target_template_id,
-            "signature": signature.__dict__,
+            "signature": signature_payload,
             "suggestion": suggestion.model_dump(),
             "issues": issues,
             "conversion_context": (
@@ -233,7 +241,7 @@ def analyze_upload(
     _write_metadata(upload_id, metadata)
     store.record_run(
         run_id=upload_id,
-        upload_filename=filename,
+        upload_filename=str(metadata.get("filename") or "student-workbook"),
         target_template_id=target_template_id,
         profile_id=suggestion.profile_id,
         mapping_source=suggestion.source,

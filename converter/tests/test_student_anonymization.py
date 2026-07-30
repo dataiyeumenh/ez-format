@@ -308,14 +308,13 @@ def test_anonymize_xlsx_sanitizes_metadata_hyperlinks_comments_and_hidden_sheets
     assert secret.casefold() not in str(sanitized.code_name).casefold()
     assert secret.casefold() not in str(sanitized.properties.creator).casefold()
     assert secret.casefold() not in str(sanitized.properties.description).casefold()
-    assert secret.casefold() not in str(sanitized["Hidden"]["A1"].value).casefold()
-    assert secret.casefold() not in str(sanitized.active["A1"].comment.text).casefold()
-    assert secret.casefold() not in str(sanitized.active["A1"].comment.author).casefold()
+    assert sanitized.sheetnames == ["Sheet1"]
+    assert sanitized.active["A1"].comment is None
     assert sanitized.active["A2"].hyperlink is None
     assert "SensitiveCompany" not in sanitized.defined_names
     assert {
-        "cell_values",
         "hidden_sheet_cells",
+        "hidden_sheets_removed",
         "comments",
         "hyperlinks",
         "workbook_properties",
@@ -323,7 +322,7 @@ def test_anonymize_xlsx_sanitizes_metadata_hyperlinks_comments_and_hidden_sheets
     } <= set(exported.replaced_layers)
 
 
-def test_anonymize_xlsx_replaces_every_confidential_value_in_comment_and_author():
+def test_anonymize_xlsx_removes_comments_instead_of_persisting_their_content():
     company = "Công ty TNHH Sao Mai"
     email = "alice@example.com"
     workbook = Workbook()
@@ -343,9 +342,7 @@ def test_anonymize_xlsx_replaces_every_confidential_value_in_comment_and_author(
     )
 
     comment = load_workbook(BytesIO(exported.content)).active["A1"].comment
-    serialized_comment = f"{comment.text} {comment.author}".casefold()
-    assert company.casefold() not in serialized_comment
-    assert email.casefold() not in serialized_comment
+    assert comment is None
     assert "comments" in exported.replaced_layers
 
 
@@ -416,7 +413,7 @@ def test_anonymize_xlsx_sanitizes_all_ooxml_text_parts():
             if name.lower().endswith((".xml", ".rels", ".txt"))
         ).decode("utf-8", errors="ignore")
     assert secret.casefold() not in text_parts.casefold()
-    assert "ooxml_text_parts" in exported.replaced_layers
+    assert "workbook_properties" in exported.replaced_layers
 
 
 def test_anonymize_xlsx_rejects_oversized_archive_before_decompression(monkeypatch):
@@ -499,20 +496,22 @@ def test_ooxml_scanner_detects_confidential_text_split_across_rich_text_runs():
     )
 
 
-def test_anonymize_xlsx_fails_closed_when_unmodified_ooxml_attribute_has_pii():
+def test_anonymize_xlsx_rebuild_removes_unclassified_style_metadata():
     secret = "SecretCo"
     workbook = Workbook()
     workbook.add_named_style(NamedStyle(name=secret))
     stream = BytesIO()
     workbook.save(stream)
 
-    with pytest.raises(AnonymizationExportError, match="company"):
-        anonymize_workbook_bytes(
-            filename="student.xlsx",
-            content=stream.getvalue(),
-            session=AnonymizationSession("session-style-name", "secret"),
-            confidential_values={"company": [secret]},
-        )
+    exported = anonymize_workbook_bytes(
+        filename="student.xlsx",
+        content=stream.getvalue(),
+        session=AnonymizationSession("session-style-name", "secret"),
+        confidential_values={"company": [secret]},
+    )
+
+    sanitized = load_workbook(BytesIO(exported.content), data_only=False)
+    assert secret not in sanitized.named_styles
 
 
 def test_anonymize_xlsx_fails_closed_when_external_links_cannot_be_scanned():
@@ -606,6 +605,10 @@ def test_student_feature_flags_and_retention_values_are_documented():
     assert "VITE_STUDENT_CHECK_WORK_ENABLED" not in frontend_env
     assert "CONVERSION_CONTEXT_SECRET=" in root_env
     assert "CONVERSION_CONTEXT_SECRET=" in converter_env
+    for documented_env in (root_env, converter_env):
+        assert "STUDENT_ANONYMIZATION_SECRET=" in documented_env
+        assert "at least 32 characters" in documented_env
+        assert "distinct from CONVERSION_CONTEXT_SECRET and CONVERTER_SERVICE_TOKEN" in documented_env
     assert "STUDENT_UPLOAD_RETENTION_SECONDS=86400" in root_env
     assert "STUDENT_UPLOAD_RETENTION_SECONDS=86400" in converter_env
     assert "STUDENT_UPLOAD_CLEANUP_INTERVAL_SECONDS=300" in converter_env

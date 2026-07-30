@@ -44,21 +44,32 @@ const {
 process.env.CONVERSION_CONTEXT_SECRET = "test-student-session-secret";
 
 test("student router exposes support endpoints only", () => {
-  const routePaths = studentRouter.stack
-    .map((layer) => layer.route?.path)
-    .filter(Boolean);
+  const routes = studentRouter.stack
+    .filter((layer) => layer.route)
+    .map((layer) => ({
+      path: layer.route.path,
+      methods: Object.keys(layer.route.methods).sort(),
+    }));
+  const routePaths = routes.map(({ path }) => path);
 
   assert.equal(routePaths.some((path) => path.includes("attempt")), false);
   assert.equal(routePaths.some((path) => path.includes("score")), false);
   assert.equal(routePaths.some((path) => path.includes("grade")), false);
 
-  const operations = studentRouter.stack.find(
-    (layer) => layer.route?.path === "/sessions/:id/operations/*",
+  assert.equal(routePaths.includes("/sessions/:id/operations/*"), false);
+  assert.deepEqual(
+    routes.filter(({ path }) => path.includes("/operations/")),
+    [
+      { path: "/sessions/:id/operations/overview", methods: ["get"] },
+      { path: "/sessions/:id/operations/questions", methods: ["post"] },
+      { path: "/sessions/:id/operations/source-rows/:worksheetRow", methods: ["get"] },
+      { path: "/sessions/:id/operations/accounting-map", methods: ["get"] },
+      { path: "/sessions/:id/operations/reconciliation", methods: ["get"] },
+      { path: "/sessions/:id/operations/anonymization/preview", methods: ["post"] },
+      { path: "/sessions/:id/operations/anonymization/export", methods: ["post"] },
+      { path: "/sessions/:id/operations/internship-report", methods: ["post"] },
+    ],
   );
-  assert.deepEqual(Object.keys(operations?.route?.methods || {}).sort(), [
-    "get",
-    "post",
-  ]);
 });
 
 test("internal student routes expose no grading or attempt state", () => {
