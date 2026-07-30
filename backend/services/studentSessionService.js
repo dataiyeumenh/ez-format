@@ -105,6 +105,11 @@ async function migrateRetentionMetadata({
   mode,
   batchSize,
   now,
+  beforeMutate = () => {},
+  afterMutate = () => {},
+  afterBatch = () => {},
+  failIncomplete,
+  assertTimeRemaining = () => {},
 }) {
   const candidates = await findBounded(
     model,
@@ -157,21 +162,40 @@ async function migrateRetentionMetadata({
   if (typeof model.updateMany !== "function" || typeof model.deleteMany !== "function") {
     throw new Error("Student privacy model phải hỗ trợ updateMany và deleteMany");
   }
+  beforeMutate(candidates.length);
   let backfilled = 0;
   for (const item of backfills) {
+    assertTimeRemaining();
     const result = await model.updateMany(
       { _id: item._id, retentionExpiresAt: { $in: [null] } },
       { $set: { retentionExpiresAt: item.retentionExpiresAt } },
     );
-    backfilled += Number(result?.modifiedCount || 0);
+    const modified = Number(result?.modifiedCount || 0);
+    backfilled += modified;
+    afterMutate(modified);
+    afterBatch();
+    if (modified !== 1 && typeof failIncomplete === "function") {
+      failIncomplete("Student retention metadata không được backfill đầy đủ");
+    }
+    assertTimeRemaining();
   }
+  assertTimeRemaining();
   const deletion = purgeIds.length
     ? await model.deleteMany({ _id: { $in: purgeIds } })
     : { deletedCount: 0 };
+  const purged = Number(deletion?.deletedCount || 0);
+  if (purgeIds.length) {
+    afterMutate(purged);
+    afterBatch();
+  }
+  if (purged !== purgeIds.length && typeof failIncomplete === "function") {
+    failIncomplete("Student orphan metadata không được purge đầy đủ");
+  }
+  assertTimeRemaining();
   return {
     scanned: candidates.length,
     backfilled,
-    purged: Number(deletion?.deletedCount || 0),
+    purged,
   };
 }
 
@@ -211,35 +235,20 @@ async function migrateStudentPrivacy(
   if (mode === "off") return report;
 
   const limit = boundedBatchSize(batchSize);
-  const rawEvents = await findBounded(
-    questionEventModel,
-    {
-      $or: RAW_STUDENT_QUESTION_FIELDS.map((field) => ({
-        [field]: { $exists: true },
-      })),
-    },
-    limit,
-    { _id: 1 },
-  );
-  const rawIds = rawEvents.map((event) => event?._id).filter(Boolean);
-  report.rawCandidates = rawIds.length;
-  report.scanned += rawIds.length;
-  if (mode === "apply" && rawIds.length) {
-    if (typeof questionEventModel.updateMany !== "function") {
-      throw new Error("StudentQuestionEvent model phải hỗ trợ updateMany");
-    }
-    const result = await questionEventModel.updateMany(
-      { _id: { $in: rawIds } },
-      {
-        $unset: Object.fromEntries(
-          RAW_STUDENT_QUESTION_FIELDS.map((field) => [field, 1]),
-        ),
-      },
-    );
-    report.scrubbed = Number(result?.modifiedCount || 0);
-  }
-
   if (mode !== "apply") {
+    const rawEvents = await findBounded(
+      questionEventModel,
+      {
+        $or: RAW_STUDENT_QUESTION_FIELDS.map((field) => ({
+          [field]: { $exists: true },
+        })),
+      },
+      limit,
+      { _id: 1 },
+    );
+    const rawIds = rawEvents.map((event) => event?._id).filter(Boolean);
+    report.rawCandidates = rawIds.length;
+    report.scanned += rawIds.length;
     for (const collectionName of RETIRED_STUDENT_COLLECTION_NAMES) {
       const collection = retiredCollections?.[collectionName];
       const candidates = await findRetiredCollectionBatch(collection, limit);
@@ -248,121 +257,203 @@ async function migrateStudentPrivacy(
       report.retiredRawCandidates += candidateIds.length;
       report.retiredCollections[collectionName].candidates = candidateIds.length;
     }
-  } else {
-    const maxTotal = boundedPositiveInteger(
-      maxRetiredRecords,
-      DEFAULT_RETIRED_MAX_TOTAL,
-      1_000_000,
-    );
-    const timeLimitMs = boundedPositiveInteger(
-      maxDurationMs,
-      DEFAULT_RETIRED_MAX_DURATION_MS,
-      10 * 60 * 1000,
-    );
-    if (typeof clock !== "function") {
-      throw new Error("Student privacy migration clock không hợp lệ");
+    for (const model of [questionEventModel, activityModel]) {
+      const retention = await migrateRetentionMetadata({
+        model,
+        sessionModel,
+        mode,
+        batchSize: limit,
+        now,
+      });
+      report.scanned += retention.scanned;
     }
-    const startedAt = Number(clock());
-    report.retiredDrain = {
-      status: "running",
-      reason: null,
-      batches: 0,
-      maxTotal,
-      maxDurationMs: timeLimitMs,
-      elapsedMs: 0,
-    };
-    const elapsedMs = () => Math.max(0, Number(clock()) - startedAt);
-    const failDrain = (code, reason, message) => {
-      report.retiredDrain.status = "failed";
-      report.retiredDrain.reason = reason;
-      report.retiredDrain.elapsedMs = elapsedMs();
-      const error = new Error(message);
-      error.code = code;
-      error.report = report;
-      throw error;
-    };
-    const assertTimeRemaining = () => {
-      if (elapsedMs() > timeLimitMs) {
-        failDrain(
-          "STUDENT_PRIVACY_TIME_LIMIT_EXCEEDED",
-          "time-limit",
-          "Student privacy retired drain vượt quá giới hạn thời gian",
-        );
-      }
-    };
-
-    try {
-      for (const collectionName of RETIRED_STUDENT_COLLECTION_NAMES) {
-        const collection = retiredCollections?.[collectionName];
-        if (typeof collection?.deleteMany !== "function") {
-          throw new Error("Retired Student collection phải hỗ trợ deleteMany");
-        }
-        while (true) {
-          assertTimeRemaining();
-          const remaining = maxTotal - report.retiredRawPurged;
-          const queryLimit = remaining >= limit ? limit : Math.max(1, remaining + 1);
-          const candidates = await findRetiredCollectionBatch(collection, queryLimit);
-          assertTimeRemaining();
-          const candidateIds = candidates.map((item) => item?._id).filter(Boolean);
-          report.scanned += candidateIds.length;
-          report.retiredRawCandidates += candidateIds.length;
-          report.retiredCollections[collectionName].candidates += candidateIds.length;
-          if (candidateIds.length === 0) break;
-          if (candidateIds.length !== candidates.length) {
-            failDrain(
-              "STUDENT_PRIVACY_INVALID_RETIRED_RECORD",
-              "invalid-record",
-              "Retired Student collection chứa record không có _id",
-            );
-          }
-          if (candidateIds.length > remaining) {
-            failDrain(
-              "STUDENT_PRIVACY_MAX_TOTAL_EXCEEDED",
-              "max-total",
-              "Student privacy retired drain vượt quá giới hạn tổng record",
-            );
-          }
-          const deletion = await collection.deleteMany({
-            _id: { $in: candidateIds },
-          });
-          const purged = Number(deletion?.deletedCount || 0);
-          report.retiredRawPurged += purged;
-          report.retiredCollections[collectionName].purged += purged;
-          report.retiredDrain.batches += 1;
-          if (purged !== candidateIds.length) {
-            failDrain(
-              "STUDENT_PRIVACY_DELETE_INCOMPLETE",
-              "delete-incomplete",
-              "Retired Student batch không được purge đầy đủ",
-            );
-          }
-          assertTimeRemaining();
-        }
-      }
-      report.retiredDrain.status = "completed";
-      report.retiredDrain.elapsedMs = elapsedMs();
-    } catch (error) {
-      if (error?.report) throw error;
-      report.retiredDrain.status = "failed";
-      report.retiredDrain.reason = "error";
-      report.retiredDrain.elapsedMs = elapsedMs();
-      error.code ||= "STUDENT_PRIVACY_RETIRED_DRAIN_FAILED";
-      error.report = report;
-      throw error;
-    }
+    return report;
   }
 
-  for (const model of [questionEventModel, activityModel]) {
-    const retention = await migrateRetentionMetadata({
-      model,
-      sessionModel,
-      mode,
-      batchSize: limit,
-      now,
-    });
-    report.scanned += retention.scanned;
-    report.backfilled += retention.backfilled;
-    report.orphansPurged += retention.purged;
+  const maxTotal = boundedPositiveInteger(
+    maxRetiredRecords,
+    DEFAULT_RETIRED_MAX_TOTAL,
+    1_000_000,
+  );
+  const timeLimitMs = boundedPositiveInteger(
+    maxDurationMs,
+    DEFAULT_RETIRED_MAX_DURATION_MS,
+    10 * 60 * 1000,
+  );
+  if (typeof clock !== "function") {
+    throw new Error("Student privacy migration clock không hợp lệ");
+  }
+  const startedAt = Number(clock());
+  report.privacyDrain = {
+    status: "running",
+    reason: null,
+    batches: 0,
+    mutated: 0,
+    maxTotal,
+    maxDurationMs: timeLimitMs,
+    elapsedMs: 0,
+  };
+  // Compatibility for startup reporting while the budget now covers every privacy category.
+  report.retiredDrain = report.privacyDrain;
+  const elapsedMs = () => Math.max(0, Number(clock()) - startedAt);
+  const failDrain = (code, reason, message) => {
+    report.privacyDrain.status = "failed";
+    report.privacyDrain.reason = reason;
+    report.privacyDrain.elapsedMs = elapsedMs();
+    const error = new Error(message);
+    error.code = code;
+    error.report = report;
+    throw error;
+  };
+  const assertTimeRemaining = () => {
+    if (elapsedMs() > timeLimitMs) {
+      failDrain(
+        "STUDENT_PRIVACY_TIME_LIMIT_EXCEEDED",
+        "time-limit",
+        "Student privacy drain vượt quá giới hạn thời gian",
+      );
+    }
+  };
+  const remainingCapacity = () => maxTotal - report.privacyDrain.mutated;
+  const queryLimit = () => {
+    const remaining = remainingCapacity();
+    return remaining >= limit ? limit : Math.max(1, remaining + 1);
+  };
+  const assertCapacity = (count) => {
+    if (count > remainingCapacity()) {
+      failDrain(
+        "STUDENT_PRIVACY_MAX_TOTAL_EXCEEDED",
+        "max-total",
+        "Student privacy drain vượt quá giới hạn tổng record",
+      );
+    }
+  };
+  const recordMutation = (count) => {
+    report.privacyDrain.mutated += Number(count || 0);
+  };
+  const recordBatch = () => {
+    report.privacyDrain.batches += 1;
+  };
+  const failIncomplete = (message) => failDrain(
+    "STUDENT_PRIVACY_DELETE_INCOMPLETE",
+    "delete-incomplete",
+    message,
+  );
+
+  try {
+    if (typeof questionEventModel?.updateMany !== "function") {
+      throw new Error("StudentQuestionEvent model phải hỗ trợ updateMany");
+    }
+    while (true) {
+      assertTimeRemaining();
+      const rawEvents = await findBounded(
+        questionEventModel,
+        {
+          $or: RAW_STUDENT_QUESTION_FIELDS.map((field) => ({
+            [field]: { $exists: true },
+          })),
+        },
+        queryLimit(),
+        { _id: 1 },
+      );
+      assertTimeRemaining();
+      const rawIds = rawEvents.map((event) => event?._id).filter(Boolean);
+      report.rawCandidates += rawIds.length;
+      report.scanned += rawIds.length;
+      if (rawIds.length === 0) break;
+      if (rawIds.length !== rawEvents.length) {
+        failDrain(
+          "STUDENT_PRIVACY_INVALID_RAW_RECORD",
+          "invalid-record",
+          "StudentQuestionEvent raw chứa record không có _id",
+        );
+      }
+      assertCapacity(rawIds.length);
+      const result = await questionEventModel.updateMany(
+        { _id: { $in: rawIds } },
+        {
+          $unset: Object.fromEntries(
+            RAW_STUDENT_QUESTION_FIELDS.map((field) => [field, 1]),
+          ),
+        },
+      );
+      const scrubbed = Number(result?.modifiedCount || 0);
+      report.scrubbed += scrubbed;
+      recordMutation(scrubbed);
+      recordBatch();
+      if (scrubbed !== rawIds.length) {
+        failIncomplete("StudentQuestionEvent raw không được scrub đầy đủ");
+      }
+      assertTimeRemaining();
+    }
+
+    for (const model of [questionEventModel, activityModel]) {
+      while (true) {
+        assertTimeRemaining();
+        const retention = await migrateRetentionMetadata({
+          model,
+          sessionModel,
+          mode,
+          batchSize: queryLimit(),
+          now,
+          beforeMutate: assertCapacity,
+          afterMutate: recordMutation,
+          afterBatch: recordBatch,
+          failIncomplete,
+          assertTimeRemaining,
+        });
+        report.scanned += retention.scanned;
+        report.backfilled += retention.backfilled;
+        report.orphansPurged += retention.purged;
+        assertTimeRemaining();
+        if (retention.scanned === 0) break;
+      }
+    }
+
+    for (const collectionName of RETIRED_STUDENT_COLLECTION_NAMES) {
+      const collection = retiredCollections?.[collectionName];
+      if (typeof collection?.deleteMany !== "function") {
+        throw new Error("Retired Student collection phải hỗ trợ deleteMany");
+      }
+      while (true) {
+        assertTimeRemaining();
+        const candidates = await findRetiredCollectionBatch(collection, queryLimit());
+        assertTimeRemaining();
+        const candidateIds = candidates.map((item) => item?._id).filter(Boolean);
+        report.scanned += candidateIds.length;
+        report.retiredRawCandidates += candidateIds.length;
+        report.retiredCollections[collectionName].candidates += candidateIds.length;
+        if (candidateIds.length === 0) break;
+        if (candidateIds.length !== candidates.length) {
+          failDrain(
+            "STUDENT_PRIVACY_INVALID_RETIRED_RECORD",
+            "invalid-record",
+            "Retired Student collection chứa record không có _id",
+          );
+        }
+        assertCapacity(candidateIds.length);
+        const deletion = await collection.deleteMany({ _id: { $in: candidateIds } });
+        const purged = Number(deletion?.deletedCount || 0);
+        report.retiredRawPurged += purged;
+        report.retiredCollections[collectionName].purged += purged;
+        recordMutation(purged);
+        recordBatch();
+        if (purged !== candidateIds.length) {
+          failIncomplete("Retired Student batch không được purge đầy đủ");
+        }
+        assertTimeRemaining();
+      }
+    }
+    report.privacyDrain.status = "completed";
+    report.privacyDrain.elapsedMs = elapsedMs();
+  } catch (error) {
+    if (error?.report) throw error;
+    report.privacyDrain.status = "failed";
+    report.privacyDrain.reason = "error";
+    report.privacyDrain.elapsedMs = elapsedMs();
+    error.code ||= "STUDENT_PRIVACY_DRAIN_FAILED";
+    error.report = report;
+    throw error;
   }
   return report;
 }

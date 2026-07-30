@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import re
+import unicodedata
 import xml.etree.ElementTree as ElementTree
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
@@ -27,6 +28,7 @@ ANONYMIZATION_CATEGORIES = (
     "phone",
     "bank_account",
     "document_number",
+    "free_text",
 )
 
 MAX_XLSX_ARCHIVE_ENTRIES = 2048
@@ -52,6 +54,7 @@ _TEXT_PREFIXES = {
     "company": "COMPANY",
     "counterparty": "COUNTERPARTY",
     "address": "ADDRESS",
+    "free_text": "TEXT",
 }
 _NUMERIC_PREFIXES = {
     "tax_code": "TAX",
@@ -113,6 +116,79 @@ _VIETNAMESE_ADDRESS_PATTERN = re.compile(
     r"(?!\w)"
 )
 _CCCD_PATTERN = re.compile(r"(?<!\d)(\d{12})(?!\d)")
+_STRICT_IDENTIFIER_PATTERN = re.compile(r"\d{9}|\d{12}")
+_PASSPORT_PATTERN = re.compile(r"[A-Z][0-9]{7,8}", re.IGNORECASE)
+_SAFE_CODE_PATTERN = re.compile(r"[A-Z0-9][A-Z0-9._/-]{0,39}", re.IGNORECASE)
+_SAFE_NUMBER_PATTERN = re.compile(r"[-+]?(?:\d{1,3}(?:[.,]\d{3})+|\d+)(?:[.,]\d+)?")
+_SAFE_FORMULA_PATTERN = re.compile(r"=[A-Z0-9_$:.,()+\-*/\s]+", re.IGNORECASE)
+_SAFE_DATE_PATTERNS = (
+    re.compile(r"\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01])"),
+    re.compile(r"(?:0[1-9]|[12]\d|3[01])[/.-](?:0[1-9]|1[0-2])[/.-]\d{4}"),
+)
+
+_ACCOUNTING_SAFE_HEADERS = {
+    "date": {
+        "ngay",
+        "ngay_chung_tu",
+        "ngay_hoa_don",
+        "ngay_hach_toan",
+        "thoi_gian",
+    },
+    "number": {
+        "don_gia",
+        "so_luong",
+        "so_tien",
+        "thanh_tien",
+        "thue_suat",
+        "tien_thue",
+        "ty_gia",
+    },
+    "code": {
+        "don_vi_tinh",
+        "ma_hang",
+        "ma_hoa_don",
+        "ma_tien_te",
+        "ma_vat",
+        "so_chung_tu",
+        "so_hoa_don",
+        "tai_khoan_co",
+        "tai_khoan_no",
+    },
+}
+_SENSITIVE_SCHEMA_HEADERS = {
+    "address",
+    "company",
+    "counterparty",
+    "dia_chi",
+    "dien_thoai",
+    "email",
+    "ghi_chu",
+    "khach_hang",
+    "ma_so_thue",
+    "nha_cung_cap",
+    "noi_dung",
+    "so_dien_thoai",
+    "so_ho_chieu",
+    "ten_cong_ty",
+    "ten_doanh_nghiep",
+    "ten_doi_tac",
+    "ten_khach_hang",
+    "ten_nha_cung_cap",
+}
+_KNOWN_SCHEMA_HEADERS = frozenset(
+    _SENSITIVE_SCHEMA_HEADERS.union(
+        *(headers for headers in _ACCOUNTING_SAFE_HEADERS.values())
+    )
+)
+
+# This validator intentionally duplicates the export policy instead of reusing
+# primary redaction helpers. A primary regression must still stop publication.
+_POST_SCAN_ACCOUNTING_HEADERS = {
+    "date": frozenset(_ACCOUNTING_SAFE_HEADERS["date"]),
+    "number": frozenset(_ACCOUNTING_SAFE_HEADERS["number"]),
+    "code": frozenset(_ACCOUNTING_SAFE_HEADERS["code"]),
+}
+_POST_SCAN_SCHEMA_HEADERS = frozenset(_KNOWN_SCHEMA_HEADERS)
 
 # Deliberately separate from primary discovery. Export validation must still
 # detect PII when discovery or replacement inventory regresses.
@@ -377,6 +453,165 @@ def _merge_confidential_values(
     return {category: tuple(values) for category, values in merged.items()}
 
 
+def _normalized_header(value: Any) -> str:
+    text = unicodedata.normalize("NFKD", str(value or "").replace("Đ", "D").replace("đ", "d"))
+    ascii_text = "".join(char for char in text if not unicodedata.combining(char))
+    return re.sub(r"[^a-z0-9]+", "_", ascii_text.casefold()).strip("_")
+
+
+def _column_policy(header: Any) -> str:
+    normalized = _normalized_header(header)
+    for policy, headers in _ACCOUNTING_SAFE_HEADERS.items():
+        if normalized in headers:
+            return policy
+    return "free_text"
+
+
+def _looks_sensitive_identifier(value: Any) -> bool:
+    text = str(value or "").strip()
+    return bool(
+        _STRICT_IDENTIFIER_PATTERN.fullmatch(text)
+        or _PASSPORT_PATTERN.fullmatch(text)
+    )
+
+
+def _is_strict_accounting_value(value: Any, policy: str) -> bool:
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return True
+    if _looks_sensitive_identifier(value):
+        return False
+    if isinstance(value, str) and value.startswith("="):
+        return policy == "number" and bool(_SAFE_FORMULA_PATTERN.fullmatch(value))
+    if policy == "date":
+        if isinstance(value, datetime):
+            return True
+        text = str(value).strip()
+        return any(pattern.fullmatch(text) for pattern in _SAFE_DATE_PATTERNS)
+    if policy == "number":
+        if isinstance(value, bool):
+            return True
+        if isinstance(value, (int, float)):
+            return True
+        return bool(_SAFE_NUMBER_PATTERN.fullmatch(str(value).strip()))
+    if policy == "code":
+        return bool(_SAFE_CODE_PATTERN.fullmatch(str(value).strip()))
+    return False
+
+
+def _inferred_header_row(worksheet: Any) -> int | None:
+    for row in worksheet.iter_rows():
+        normalized = {_normalized_header(cell.value) for cell in row if cell.value is not None}
+        if normalized.intersection(_KNOWN_SCHEMA_HEADERS):
+            return row[0].row if row else None
+        if normalized:
+            return None
+    return None
+
+
+def _scan_export_cells_independently(
+    content: bytes,
+    *,
+    header_row_number: int | None,
+) -> tuple[str, ...]:
+    workbook = load_workbook(BytesIO(content), data_only=False)
+    if len(workbook.worksheets) != 1:
+        return ("free_text",)
+    worksheet = workbook.worksheets[0]
+    independent_header_row = header_row_number
+    if independent_header_row is None:
+        for row in worksheet.iter_rows():
+            names = {
+                re.sub(
+                    r"[^a-z0-9]+",
+                    "_",
+                    "".join(
+                        char
+                        for char in unicodedata.normalize(
+                            "NFKD",
+                            str(cell.value or "").replace("Đ", "D").replace("đ", "d"),
+                        )
+                        if not unicodedata.combining(char)
+                    ).casefold(),
+                ).strip("_")
+                for cell in row
+                if cell.value is not None
+            }
+            if names.intersection(_POST_SCAN_SCHEMA_HEADERS):
+                independent_header_row = row[0].row if row else None
+            break
+
+    policies: dict[int, str] = {}
+    if independent_header_row is not None:
+        for cell in worksheet[independent_header_row]:
+            raw_header = str(cell.value or "").strip()
+            normalized = re.sub(
+                r"[^a-z0-9]+",
+                "_",
+                "".join(
+                    char
+                    for char in unicodedata.normalize(
+                        "NFKD", raw_header.replace("Đ", "D").replace("đ", "d")
+                    )
+                    if not unicodedata.combining(char)
+                ).casefold(),
+            ).strip("_")
+            if normalized not in _POST_SCAN_SCHEMA_HEADERS and not re.fullmatch(
+                r"COLUMN-\d+", raw_header, re.IGNORECASE
+            ):
+                return ("free_text",)
+            policies[cell.column] = next(
+                (
+                    policy
+                    for policy, headers in _POST_SCAN_ACCOUNTING_HEADERS.items()
+                    if normalized in headers
+                ),
+                "free_text",
+            )
+
+    generated_text = re.compile(
+        r"(?:COMPANY|COUNTERPARTY|ADDRESS|TEXT)-[A-F0-9]{12}"
+        r"|(?:PHONE|TAX|BANK|DOC)-[A-Z0-9-]+"
+        r"|(?:anon|student)-[a-f0-9]{12}@example\.invalid",
+        re.IGNORECASE,
+    )
+    safe_code = re.compile(r"[A-Z0-9][A-Z0-9._/-]{0,39}", re.IGNORECASE)
+    safe_number = re.compile(r"[-+]?(?:\d{1,3}(?:[.,]\d{3})+|\d+)(?:[.,]\d+)?")
+    safe_formula = re.compile(r"=[A-Z0-9_$:.,()+\-*/\s]+", re.IGNORECASE)
+    sensitive_id = re.compile(r"(?:\d{9}|\d{12}|[A-Z][0-9]{7,8})", re.IGNORECASE)
+    safe_dates = (
+        re.compile(r"\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01])"),
+        re.compile(r"(?:0[1-9]|[12]\d|3[01])[/.-](?:0[1-9]|1[0-2])[/.-]\d{4}"),
+    )
+    for row in worksheet.iter_rows():
+        for cell in row:
+            value = cell.value
+            if value is None or (isinstance(value, str) and not value.strip()):
+                continue
+            if independent_header_row is not None and cell.row == independent_header_row:
+                continue
+            text = str(value).strip()
+            if generated_text.fullmatch(text):
+                continue
+            policy = policies.get(cell.column, "free_text")
+            if sensitive_id.fullmatch(text):
+                return ("document_number",)
+            if policy == "date" and (
+                isinstance(value, datetime)
+                or any(pattern.fullmatch(text) for pattern in safe_dates)
+            ):
+                continue
+            if policy == "number" and (
+                isinstance(value, (bool, int, float))
+                or safe_number.fullmatch(text)
+                or safe_formula.fullmatch(text)
+            ):
+                continue
+            if policy == "code" and safe_code.fullmatch(text):
+                continue
+            return ("free_text",)
+    return ()
+
+
 def anonymize_workbook_bytes(
     *,
     filename: str,
@@ -427,9 +662,19 @@ def anonymize_workbook_bytes(
     matches = scan_confidential_values(exported_values, active_values)
     try:
         independent_matches = _scan_export_pii_independently(exported_values)
+        conservative_matches = _scan_export_cells_independently(
+            exported,
+            header_row_number=(
+                analyzed_header_row_index + 1
+                if analyzed_header_row_index is not None
+                else None
+            ),
+        )
     except Exception as exc:
         raise AnonymizationUnsupportedLayerError("pii_post_scan") from exc
-    failed_categories = tuple(dict.fromkeys((*matches, *independent_matches)))
+    failed_categories = tuple(
+        dict.fromkeys((*matches, *independent_matches, *conservative_matches))
+    )
     if failed_categories:
         raise AnonymizationExportError(failed_categories)
     return AnonymizedWorkbook(
@@ -493,6 +738,19 @@ def _anonymize_xlsx(
         analyzed_header_row_index=analyzed_header_row_index,
         analyzed_headers=analyzed_headers,
     )
+    header_row_number = (
+        analyzed_header_row_index + 1
+        if analyzed_header_row_index is not None
+        else _inferred_header_row(source_worksheet)
+    )
+    column_policies = {
+        cell.column: _column_policy(cell.value)
+        for cell in (
+            source_worksheet[header_row_number]
+            if header_row_number is not None
+            else ()
+        )
+    }
 
     # Export only the analyzed sheet. Other visible sheets are not part of the
     # Student Assistant output and could otherwise bypass its value inventory.
@@ -506,9 +764,21 @@ def _anonymize_xlsx(
     for row in source_worksheet.iter_rows():
         for source_cell in row:
             value = source_cell.value
-            replacement = _replacement_for_cell(
-                value, session, confidential_values
-            )
+            if source_cell.row == header_row_number:
+                normalized_header = _normalized_header(value)
+                replacement = (
+                    None
+                    if not str(value or "").strip()
+                    or normalized_header in _KNOWN_SCHEMA_HEADERS
+                    else (f"COLUMN-{source_cell.column}", {"free_text"})
+                )
+            else:
+                replacement = _replacement_for_cell(
+                    value,
+                    session,
+                    confidential_values,
+                    column_policy=column_policies.get(source_cell.column, "free_text"),
+                )
             if replacement is not None:
                 value, categories = replacement
                 replaced_categories.update(categories)
@@ -908,13 +1178,26 @@ def _replacement_for_cell(
     value: Any,
     session: AnonymizationSession,
     confidential_values: Mapping[str, Iterable[Any]],
-) -> tuple[str, set[str]] | None:
-    if not isinstance(value, str) or value.startswith("="):
+    *,
+    column_policy: str = "free_text",
+) -> tuple[Any, set[str]] | None:
+    if value is None or (isinstance(value, str) and not value.strip()):
         return None
     replacement, categories = _replace_all_known_text(
         value, session, confidential_values
     )
-    return (replacement, categories) if categories else None
+    if isinstance(value, str) and value.startswith("="):
+        if categories or not _is_strict_accounting_value(value, column_policy):
+            return None
+        return None
+    if categories:
+        first_category = next(
+            category for category in ANONYMIZATION_CATEGORIES if category in categories
+        )
+        return session.replace(first_category, str(value)), categories
+    if _is_strict_accounting_value(value, column_policy):
+        return None
+    return session.replace("free_text", str(value)), {"free_text"}
 
 
 def _workbook_values(content: bytes, extension: str) -> list[Any]:

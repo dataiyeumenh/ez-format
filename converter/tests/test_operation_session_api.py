@@ -4,9 +4,10 @@ import base64
 import hashlib
 import hmac
 import json
+import os
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import openpyxl
@@ -18,6 +19,7 @@ from app.main import app
 from app.operation_store import (
     STUDENT_METADATA_STATE_CONTRACT,
     OperationStore,
+    OperationStoreError,
     OperationStoreExpiredError,
     cleanup_expired_operation_sessions,
 )
@@ -111,6 +113,40 @@ def test_health_capabilities_are_fixed_booleans():
     assert payload["status"] == "ok"
     assert payload["capabilities"]["converter"] is True
     assert payload["capabilities"]["operations"] is True
+
+
+def test_node_operation_store_client_deletes_bound_remote_state(monkeypatch):
+    from app.operation_store_client import NodeOperationStoreClient
+
+    client = object.__new__(NodeOperationStoreClient)
+    client.session_id = "session-1"
+    client.run_id = "student:session-1"
+    captured = {}
+    monkeypatch.setattr(
+        client,
+        "_request",
+        lambda method, path, **kwargs: captured.update(
+            {"method": method, "path": path, **kwargs}
+        )
+        or {
+            "success": True,
+            "session_id": "session-1",
+            "run_id": "student:session-1",
+            "remote_operation_session_deleted": True,
+        },
+    )
+
+    result = client.delete_state(
+        session_id="session-1",
+        run_id="student:session-1",
+    )
+
+    assert captured == {
+        "method": "DELETE",
+        "path": "/converter-sessions/session-1/state",
+        "params": {"run_id": "student:session-1"},
+    }
+    assert result["remote_operation_session_deleted"] is True
 
 
 def test_converter_capability_endpoint_matches_health_source_of_truth(monkeypatch):
@@ -365,8 +401,168 @@ def test_operation_session_sweeper_preserves_in_flight_creation_without_session_
     release_write.set()
     creator.join(2)
     assert not creator.is_alive()
-    assert (in_flight_dir / "session.json").is_file()
-    assert not (in_flight_dir / ".creating.json").exists()
+    final_dir = store.root / result["session"].session_id
+    assert not in_flight_dir.exists()
+    assert (final_dir / "session.json").is_file()
+    assert not (final_dir / ".creating.json").exists()
+
+
+def test_student_operation_create_is_atomic_through_remote_save_and_future_sweep(
+    tmp_path,
+):
+    session_id = "student-create-interleave"
+    remote_started = threading.Event()
+    release_remote = threading.Event()
+    captured = {}
+
+    class RemoteStore:
+        def __init__(self):
+            self.run_id = f"student:{session_id}"
+            self.session_id = session_id
+
+        @staticmethod
+        def put_state(**payload):
+            captured.update(payload)
+            remote_started.set()
+            assert release_remote.wait(2)
+            return {"session": {"revision": payload["revision"]}}
+
+    store = OperationStore(
+        root=tmp_path / "sessions",
+        remote_client=RemoteStore(),
+        conversion_run_id=f"student:{session_id}",
+    )
+    result = {}
+
+    def create():
+        try:
+            result["session"] = _create_test_operation_session(
+                store,
+                session_id=session_id,
+            )
+        except Exception as exc:  # pragma: no cover - asserted through result
+            result["error"] = exc
+
+    creator = threading.Thread(target=create, daemon=True)
+    creator.start()
+    assert remote_started.wait(2)
+
+    published = store.root / session_id
+    assert not published.exists()
+    staging = [path for path in store.root.iterdir() if path.is_dir()]
+    assert len(staging) == 1
+    assert (staging[0] / ".creating.json").is_file()
+    assert (staging[0] / "table.json").is_file()
+    marker = json.loads((staging[0] / ".creating.json").read_text(encoding="utf-8"))
+    assert marker["session_id"] == session_id
+    assert marker["owner_type"] == "student"
+    assert marker["state_contract"] == STUDENT_METADATA_STATE_CONTRACT
+
+    deleted = cleanup_expired_operation_sessions(
+        root=store.root,
+        now=datetime.now(timezone.utc) + timedelta(days=1),
+        batch_size=10,
+    )
+    assert deleted == []
+    assert staging[0].is_dir()
+
+    release_remote.set()
+    creator.join(2)
+    assert not creator.is_alive()
+    assert "error" not in result
+    assert (published / "session.json").is_file()
+    assert (published / "table.json").is_file()
+    assert not staging[0].exists()
+    assert "table" not in captured["state"]
+
+
+def test_student_operation_create_remote_failure_publishes_no_local_state(tmp_path):
+    session_id = "student-create-remote-failure"
+
+    class RemoteStore:
+        def __init__(self):
+            self.run_id = f"student:{session_id}"
+            self.session_id = session_id
+
+        @staticmethod
+        def put_state(**_payload):
+            raise RuntimeError("remote unavailable")
+
+    store = OperationStore(
+        root=tmp_path / "sessions",
+        remote_client=RemoteStore(),
+        conversion_run_id=f"student:{session_id}",
+    )
+
+    with pytest.raises(OperationStoreError, match="Node"):
+        _create_test_operation_session(store, session_id=session_id)
+
+    assert not (store.root / session_id).exists()
+    assert list(store.root.iterdir()) == []
+    assert session_id not in store._remote_payloads
+
+
+def test_student_operation_purge_removes_local_state_but_fails_closed_on_remote_partial(
+    tmp_path,
+):
+    session_id = "student-purge-remote-partial"
+
+    class RemoteStore:
+        def __init__(self):
+            self.run_id = f"student:{session_id}"
+            self.session_id = session_id
+
+        @staticmethod
+        def put_state(**payload):
+            return {"session": {"revision": payload["revision"]}}
+
+        @staticmethod
+        def delete_state(**payload):
+            return {
+                "success": True,
+                "session_id": payload["session_id"],
+                "run_id": payload["run_id"],
+                "remote_operation_session_deleted": False,
+            }
+
+    store = OperationStore(
+        root=tmp_path / "sessions",
+        remote_client=RemoteStore(),
+        conversion_run_id=f"student:{session_id}",
+    )
+    _create_test_operation_session(store, session_id=session_id)
+
+    report = store.purge_session_state(session_id)
+
+    assert report == {
+        "local_operation_session_deleted": True,
+        "remote_operation_session_deleted": False,
+        "operation_session_deleted": False,
+    }
+    assert not (store.root / session_id).exists()
+
+
+def test_operation_sweeper_cleans_crashed_staging_after_creation_grace(
+    tmp_path,
+    monkeypatch,
+):
+    root = tmp_path / "sessions"
+    staging = root / ".creating-crashed-session"
+    staging.mkdir(parents=True)
+    (staging / "table.json").write_text('{"raw":"state"}', encoding="utf-8")
+    monkeypatch.setenv("OPERATION_SESSION_CREATION_GRACE_SECONDS", "30")
+    old = datetime.now(timezone.utc) - timedelta(minutes=2)
+    timestamp = old.timestamp()
+    os.utime(staging, (timestamp, timestamp))
+
+    deleted = cleanup_expired_operation_sessions(
+        root=root,
+        now=datetime.now(timezone.utc),
+        batch_size=1,
+    )
+
+    assert deleted == [staging.name]
+    assert not staging.exists()
 
 
 def test_student_startup_cleanup_wires_operation_session_sweeper(monkeypatch):

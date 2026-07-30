@@ -9,10 +9,12 @@ const {
   purgeStudentOperationSession,
   recordStudentActivity,
   recordStudentQuestionEvent,
+  refreshStudentContext,
 } = require("../controllers/studentSessionController");
 const {
   createStudentContextToken,
   verifyConversionContextToken,
+  verifyStudentContextToken,
 } = require("../services/conversionContextService");
 const { createStartServer } = require("../server");
 const {
@@ -85,21 +87,84 @@ function retiredCollection(name, documents, calls) {
   };
 }
 
+function drainingPrivacyModel(name, { raw = [], retention = [] }, calls) {
+  let rawRemaining = [...raw];
+  let retentionRemaining = [...retention];
+  const boundedQuery = (source) => {
+    let limit = source.length;
+    return {
+      sort(value) {
+        calls.push([`${name}-sort`, value]);
+        return this;
+      },
+      limit(value) {
+        calls.push([`${name}-limit`, value]);
+        limit = value;
+        return this;
+      },
+      select(value) {
+        calls.push([`${name}-select`, value]);
+        return this;
+      },
+      lean: async () => source.slice(0, limit),
+    };
+  };
+  return {
+    find(filter) {
+      const scansRawFields = filter.$or?.some((item) => "question" in item);
+      return boundedQuery(scansRawFields ? rawRemaining : retentionRemaining);
+    },
+    async updateMany(filter, update) {
+      const ids = new Set(filter._id?.$in?.map(String) || [String(filter._id)]);
+      if (update.$unset) {
+        const before = rawRemaining.length;
+        rawRemaining = rawRemaining.filter((item) => !ids.has(String(item._id)));
+        const modifiedCount = before - rawRemaining.length;
+        calls.push([`${name}-raw-update`, filter, update, modifiedCount]);
+        return { modifiedCount };
+      }
+      const before = retentionRemaining.length;
+      retentionRemaining = retentionRemaining.filter((item) => !ids.has(String(item._id)));
+      const modifiedCount = before - retentionRemaining.length;
+      calls.push([`${name}-retention-update`, filter, update, modifiedCount]);
+      return { modifiedCount };
+    },
+    async deleteMany(filter) {
+      const ids = new Set(filter._id.$in.map(String));
+      const before = retentionRemaining.length;
+      retentionRemaining = retentionRemaining.filter((item) => !ids.has(String(item._id)));
+      const deletedCount = before - retentionRemaining.length;
+      calls.push([`${name}-delete`, filter, deletedCount]);
+      return { deletedCount };
+    },
+    remaining() {
+      return { raw: rawRemaining.length, retention: retentionRemaining.length };
+    },
+  };
+}
+
 function privacyModels({
   rawEvents = [],
   retiredAttempts = [],
   retiredProgresses = [],
 } = {}) {
   const calls = [];
+  let rawRemaining = [...rawEvents];
   const questionEventModel = {
     find(filter) {
       calls.push(["question-find", filter]);
       const scansRawFields = filter.$or?.some((item) => "question" in item);
-      return emptyQuery(calls, scansRawFields ? rawEvents : []);
+      return emptyQuery(calls, scansRawFields ? rawRemaining : []);
     },
     updateMany: async (...args) => {
       calls.push(["question-update", ...args]);
-      return { modifiedCount: rawEvents.length };
+      if (args[1]?.$unset) {
+        const ids = new Set(args[0]._id.$in.map(String));
+        const before = rawRemaining.length;
+        rawRemaining = rawRemaining.filter((item) => !ids.has(String(item._id)));
+        return { modifiedCount: before - rawRemaining.length };
+      }
+      return { modifiedCount: 0 };
     },
     deleteMany: async (...args) => {
       calls.push(["question-delete", ...args]);
@@ -375,6 +440,138 @@ test("Student privacy apply fails closed with report at retired time limit", asy
   );
 });
 
+test("Student privacy apply drains 150+ raw, orphan, and retired records with one bounded budget", async () => {
+  const calls = [];
+  const records = (prefix) => Array.from({ length: 151 }, (_, index) => ({
+    _id: `${prefix}-${String(index + 1).padStart(3, "0")}`,
+    sessionId: `missing-${prefix}-${index + 1}`,
+  }));
+  const questionEventModel = drainingPrivacyModel(
+    "question",
+    {
+      raw: records("raw").map((item) => ({
+        ...item,
+        question: "legacy raw question",
+        retentionExpiresAt: new Date("2027-01-01T00:00:00Z"),
+      })),
+      retention: records("question-orphan"),
+    },
+    calls,
+  );
+  const activityModel = drainingPrivacyModel(
+    "activity",
+    { retention: records("activity-orphan") },
+    calls,
+  );
+  const models = {
+    questionEventModel,
+    activityModel,
+    sessionModel: {
+      find() {
+        return { select() { return this; }, lean: async () => [] };
+      },
+    },
+    retiredCollections: {
+      studentattempts: retiredCollection("studentattempts", records("attempt"), calls),
+      studentskillprogresses: retiredCollection("studentskillprogresses", records("progress"), calls),
+    },
+  };
+
+  const applied = await migrateStudentPrivacy(models, {
+    mode: "apply",
+    batchSize: 50,
+    maxRetiredRecords: 1000,
+    maxDurationMs: 30_000,
+    now: new Date("2026-07-30T00:00:00Z"),
+  });
+
+  assert.equal(applied.scrubbed, 151);
+  assert.equal(applied.orphansPurged, 302);
+  assert.equal(applied.retiredRawPurged, 302);
+  assert.equal(applied.privacyDrain.status, "completed");
+  assert.equal(applied.privacyDrain.mutated, 755);
+  assert.deepEqual(questionEventModel.remaining(), { raw: 0, retention: 0 });
+  assert.deepEqual(activityModel.remaining(), { raw: 0, retention: 0 });
+  assert.ok(
+    calls
+      .filter(([type]) => type.endsWith("-update") || type.endsWith("-delete"))
+      .every(([, filter]) => (filter._id?.$in?.length || 1) <= 50),
+  );
+
+  const repeated = await migrateStudentPrivacy(models, {
+    mode: "apply",
+    batchSize: 50,
+    maxRetiredRecords: 1000,
+    maxDurationMs: 30_000,
+  });
+  assert.equal(repeated.scrubbed, 0);
+  assert.equal(repeated.orphansPurged, 0);
+  assert.equal(repeated.retiredRawPurged, 0);
+  assert.equal(repeated.privacyDrain.mutated, 0);
+});
+
+test("Student privacy apply fails closed when raw and metadata exceed shared max-total", async () => {
+  const calls = [];
+  const raw = Array.from({ length: 51 }, (_, index) => ({
+    _id: `raw-${index + 1}`,
+    question: "legacy raw question",
+    retentionExpiresAt: new Date("2027-01-01T00:00:00Z"),
+  }));
+  const questionEventModel = drainingPrivacyModel("question", { raw }, calls);
+
+  await assert.rejects(
+    migrateStudentPrivacy(
+      {
+        questionEventModel,
+        activityModel: drainingPrivacyModel("activity", {}, calls),
+        sessionModel: { find: () => ({ select() { return this; }, lean: async () => [] }) },
+        retiredCollections: {
+          studentattempts: retiredCollection("studentattempts", [], calls),
+          studentskillprogresses: retiredCollection("studentskillprogresses", [], calls),
+        },
+      },
+      {
+        mode: "apply",
+        batchSize: 25,
+        maxRetiredRecords: 50,
+        maxDurationMs: 30_000,
+      },
+    ),
+    (error) => {
+      assert.equal(error.code, "STUDENT_PRIVACY_MAX_TOTAL_EXCEEDED");
+      assert.equal(error.report.scrubbed, 50);
+      assert.equal(error.report.privacyDrain.status, "failed");
+      assert.equal(error.report.privacyDrain.reason, "max-total");
+      assert.equal(error.report.privacyDrain.mutated, 50);
+      return true;
+    },
+  );
+  assert.deepEqual(questionEventModel.remaining(), { raw: 1, retention: 0 });
+});
+
+test("Student privacy incomplete mutation report counts records already changed", async () => {
+  const { models } = privacyModels({
+    rawEvents: [{ _id: "raw-1" }, { _id: "raw-2" }],
+  });
+  models.questionEventModel.updateMany = async () => ({ modifiedCount: 1 });
+
+  await assert.rejects(
+    migrateStudentPrivacy(models, {
+      mode: "apply",
+      batchSize: 2,
+      maxRetiredRecords: 10,
+      maxDurationMs: 30_000,
+    }),
+    (error) => {
+      assert.equal(error.code, "STUDENT_PRIVACY_DELETE_INCOMPLETE");
+      assert.equal(error.report.scrubbed, 1);
+      assert.equal(error.report.privacyDrain.mutated, 1);
+      assert.equal(error.report.privacyDrain.status, "failed");
+      return true;
+    },
+  );
+});
+
 test("Student privacy cleanup backfills live metadata and purges bounded orphans", async () => {
   const now = new Date("2026-07-30T00:00:00Z");
   const liveRetention = new Date("2026-07-31T00:00:00Z");
@@ -385,20 +582,29 @@ test("Student privacy cleanup backfills live metadata and purges bounded orphans
     select() { return this; },
     lean: async () => documents,
   });
-  const model = (name, documents) => ({
-    find(filter) {
-      const rawScan = filter.$or?.some((item) => "question" in item);
-      return retentionQuery(rawScan ? [] : documents);
-    },
-    updateMany: async (...args) => {
-      calls.push([`${name}-update`, ...args]);
-      return { modifiedCount: 1 };
-    },
-    deleteMany: async (...args) => {
-      calls.push([`${name}-delete`, ...args]);
-      return { deletedCount: args[0]._id.$in.length };
-    },
-  });
+  const model = (name, documents) => {
+    let remaining = [...documents];
+    return {
+      find(filter) {
+        const rawScan = filter.$or?.some((item) => "question" in item);
+        return retentionQuery(rawScan ? [] : remaining);
+      },
+      updateMany: async (...args) => {
+        calls.push([`${name}-update`, ...args]);
+        const id = String(args[0]._id);
+        const before = remaining.length;
+        remaining = remaining.filter((item) => String(item._id) !== id);
+        return { modifiedCount: before - remaining.length };
+      },
+      deleteMany: async (...args) => {
+        calls.push([`${name}-delete`, ...args]);
+        const ids = new Set(args[0]._id.$in.map(String));
+        const before = remaining.length;
+        remaining = remaining.filter((item) => !ids.has(String(item._id)));
+        return { deletedCount: before - remaining.length };
+      },
+    };
+  };
   const questionEventModel = model("question", [
     { _id: "orphan-question", sessionId: "missing-session" },
     { _id: "expired-question", sessionId: "expired-session", retentionExpiresAt: now },
@@ -514,6 +720,8 @@ test("manual session deletion cascades question and activity metadata first", as
             session_id: String(session._id),
             upload_id: session.converterUploadId,
             raw_upload_deleted: true,
+            local_operation_session_deleted: true,
+            remote_operation_session_deleted: true,
             operation_session_deleted: true,
           };
         },
@@ -567,6 +775,8 @@ test("Student delete converter contract is owner-bound and metadata-only", async
           session_id: String(session._id),
           upload_id: session.converterUploadId,
           raw_upload_deleted: true,
+          local_operation_session_deleted: true,
+          remote_operation_session_deleted: true,
           operation_session_deleted: true,
         },
       };
@@ -576,7 +786,11 @@ test("Student delete converter contract is owner-bound and metadata-only", async
   assert.equal(forwarded.path, `/api/v1/student/sessions/${session._id}/purge`);
   assert.equal(forwarded.method, "DELETE");
   assert.deepEqual(forwarded.body, {});
-  assert.deepEqual(forwarded.extraHeaders, { "x-student-context": token });
+  const cleanupStudentToken = forwarded.extraHeaders["x-student-context"];
+  assert.notEqual(cleanupStudentToken, token);
+  const studentClaims = verifyStudentContextToken(cleanupStudentToken, "analyze");
+  assert.equal(studentClaims.session_id, String(session._id));
+  assert.equal(studentClaims.owner_scope, session.ownerScope);
   const claims = verifyConversionContextToken(forwarded.contextToken);
   assert.equal(claims.operation_session_id, String(session._id));
   assert.equal(claims.conversion_run_id, `student:${session._id}`);
@@ -587,6 +801,8 @@ test("Student delete converter contract is owner-bound and metadata-only", async
     session_id: String(session._id),
     upload_id: session.converterUploadId,
     raw_upload_deleted: true,
+    local_operation_session_deleted: true,
+    remote_operation_session_deleted: true,
     operation_session_deleted: true,
   });
 });
@@ -617,8 +833,8 @@ test("manual Student delete fails closed when converter purge is unavailable", a
   };
   let metadataDeletes = 0;
   StudentFileSession.findOne = async () => session;
-  StudentFileSession.findOneAndUpdate = async () => {
-    session.status = "deleting";
+  StudentFileSession.findOneAndUpdate = async (_filter, update) => {
+    Object.assign(session, update.$set || {});
     return session;
   };
   StudentQuestionEvent.deleteMany = async () => { metadataDeletes += 1; };
@@ -646,14 +862,217 @@ test("manual Student delete fails closed when converter purge is unavailable", a
     assert.deepEqual(response.body.purge, {
       completed: false,
       code: "CONVERTER_UNREACHABLE",
+      pending: true,
+      retryable: true,
+      status: "delete_failed",
     });
-    assert.equal(session.status, "deleting");
+    assert.equal(session.status, "delete_failed");
     assert.equal(metadataDeletes, 0);
   } finally {
     StudentFileSession.findOne = originals.findOne;
     StudentFileSession.findOneAndUpdate = originals.findOneAndUpdate;
     StudentQuestionEvent.deleteMany = originals.questions;
     StudentActivity.deleteMany = originals.activities;
+  }
+});
+
+test("owner retries delete_failed with an expired old context and fresh internal binding", async () => {
+  const session = {
+    _id: "507f1f77bcf86cd799439011",
+    userId: "507f1f77bcf86cd799439012",
+    workspaceId: null,
+    ownerScope: "user:507f1f77bcf86cd799439012",
+    converterUploadId: "student-upload-1",
+    status: "delete_failed",
+    retentionExpiresAt: new Date(Date.now() + 60_000),
+    deleteOne: async () => { session.deleted = true; },
+  };
+  const expiredContext = createStudentContextToken({
+    sessionId: session._id,
+    userId: session.userId,
+    ownerScope: session.ownerScope,
+    allowedScopes: ["analyze"],
+    expiresIn: "-1s",
+    retentionExpiresAt: session.retentionExpiresAt,
+  });
+  const originals = {
+    findOne: StudentFileSession.findOne,
+    findOneAndUpdate: StudentFileSession.findOneAndUpdate,
+    questions: StudentQuestionEvent.deleteMany,
+    activities: StudentActivity.deleteMany,
+  };
+  const updates = [];
+  StudentFileSession.findOne = async () => session;
+  StudentFileSession.findOneAndUpdate = async (filter, update) => {
+    updates.push({ filter, update });
+    if (filter.status !== session.status) return null;
+    Object.assign(session, update.$set || {});
+    return session;
+  };
+  StudentQuestionEvent.deleteMany = async () => ({ deletedCount: 1 });
+  StudentActivity.deleteMany = async () => ({ deletedCount: 1 });
+
+  try {
+    const response = responseRecorder();
+    await deleteStudentSession(
+      {
+        params: { id: session._id },
+        user: { _id: session.userId },
+        headers: { "x-student-context": expiredContext },
+      },
+      response,
+      {
+        purgeOperationSession: async () => ({
+          success: true,
+          session_id: String(session._id),
+          upload_id: session.converterUploadId,
+          raw_upload_deleted: true,
+          local_operation_session_deleted: true,
+          remote_operation_session_deleted: true,
+          operation_session_deleted: true,
+        }),
+      },
+    );
+
+    assert.equal(response.statusCode, 200);
+    assert.equal(session.deleted, true);
+    assert.equal(updates.length, 1);
+    assert.equal(updates[0].filter.status, "delete_failed");
+    assert.equal(updates[0].update.$set.status, "deleting");
+  } finally {
+    StudentFileSession.findOne = originals.findOne;
+    StudentFileSession.findOneAndUpdate = originals.findOneAndUpdate;
+    StudentQuestionEvent.deleteMany = originals.questions;
+    StudentActivity.deleteMany = originals.activities;
+  }
+});
+
+test("concurrent delete_failed retry permits only one purge owner", async () => {
+  const session = {
+    _id: "507f1f77bcf86cd799439011",
+    userId: "507f1f77bcf86cd799439012",
+    workspaceId: null,
+    ownerScope: "user:507f1f77bcf86cd799439012",
+    converterUploadId: "student-upload-1",
+    status: "delete_failed",
+    retentionExpiresAt: new Date(Date.now() + 60_000),
+    deleteOne: async () => {},
+  };
+  const token = createStudentContextToken({
+    sessionId: session._id,
+    userId: session.userId,
+    ownerScope: session.ownerScope,
+    allowedScopes: ["analyze"],
+    retentionExpiresAt: session.retentionExpiresAt,
+  });
+  const originals = {
+    findOne: StudentFileSession.findOne,
+    findOneAndUpdate: StudentFileSession.findOneAndUpdate,
+    questions: StudentQuestionEvent.deleteMany,
+    activities: StudentActivity.deleteMany,
+  };
+  let purgeCalls = 0;
+  let startPurge;
+  let releasePurge;
+  const purgeStarted = new Promise((resolve) => { startPurge = resolve; });
+  const purgeBlocked = new Promise((resolve) => { releasePurge = resolve; });
+  StudentFileSession.findOne = async () => session;
+  StudentFileSession.findOneAndUpdate = async (filter, update) => {
+    const matches = typeof filter.status === "string"
+      ? filter.status === session.status
+      : !filter.status?.$nin?.includes(session.status);
+    if (!matches) return null;
+    Object.assign(session, update.$set || {});
+    return session;
+  };
+  StudentQuestionEvent.deleteMany = async () => ({ deletedCount: 0 });
+  StudentActivity.deleteMany = async () => ({ deletedCount: 0 });
+  const purgeOperationSession = async () => {
+    purgeCalls += 1;
+    if (purgeCalls === 1) {
+      startPurge();
+      await purgeBlocked;
+    }
+    return {
+      success: true,
+      session_id: String(session._id),
+      upload_id: session.converterUploadId,
+      raw_upload_deleted: true,
+      local_operation_session_deleted: true,
+      remote_operation_session_deleted: true,
+      operation_session_deleted: true,
+    };
+  };
+
+  try {
+    const firstResponse = responseRecorder();
+    const first = deleteStudentSession(
+      {
+        params: { id: session._id },
+        user: { _id: session.userId },
+        headers: { "x-student-context": token },
+      },
+      firstResponse,
+      { purgeOperationSession },
+    );
+    await purgeStarted;
+
+    const concurrentResponse = responseRecorder();
+    await deleteStudentSession(
+      {
+        params: { id: session._id },
+        user: { _id: session.userId },
+        headers: { "x-student-context": token },
+      },
+      concurrentResponse,
+      { purgeOperationSession },
+    );
+    assert.equal(concurrentResponse.statusCode, 409);
+    assert.equal(purgeCalls, 1);
+
+    releasePurge();
+    await first;
+    assert.equal(firstResponse.statusCode, 200);
+  } finally {
+    releasePurge();
+    StudentFileSession.findOne = originals.findOne;
+    StudentFileSession.findOneAndUpdate = originals.findOneAndUpdate;
+    StudentQuestionEvent.deleteMany = originals.questions;
+    StudentActivity.deleteMany = originals.activities;
+  }
+});
+
+test("refresh reports delete_failed as retryable without issuing usable context", async () => {
+  const session = {
+    _id: "507f1f77bcf86cd799439011",
+    userId: "507f1f77bcf86cd799439012",
+    workspaceId: null,
+    ownerScope: "user:507f1f77bcf86cd799439012",
+    status: "delete_failed",
+    deleteFailureCode: "CONVERTER_UNREACHABLE",
+    retentionExpiresAt: new Date(Date.now() + 60_000),
+    file: { originalName: "sales.xlsx", sizeBytes: 1, rawRetained: false },
+  };
+  const originalFindOne = StudentFileSession.findOne;
+  StudentFileSession.findOne = async () => session;
+  try {
+    const response = responseRecorder();
+    await refreshStudentContext(
+      { params: { id: session._id }, user: { _id: session.userId }, headers: {} },
+      response,
+    );
+    assert.equal(response.statusCode, 200);
+    assert.equal(response.body.contextToken, null);
+    assert.equal(response.body.session.status, "delete_failed");
+    assert.deepEqual(response.body.purge, {
+      completed: false,
+      pending: true,
+      retryable: true,
+      status: "delete_failed",
+      code: "CONVERTER_UNREACHABLE",
+    });
+  } finally {
+    StudentFileSession.findOne = originalFindOne;
   }
 });
 
@@ -781,6 +1200,8 @@ test("delete racing authorized question and activity writes leaves no orphan", a
             session_id: sessionId,
             upload_id: session.converterUploadId,
             raw_upload_deleted: true,
+            local_operation_session_deleted: true,
+            remote_operation_session_deleted: true,
             operation_session_deleted: true,
           }),
         },

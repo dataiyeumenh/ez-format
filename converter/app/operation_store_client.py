@@ -81,6 +81,14 @@ class NodeOperationStoreClient:
             params={"run_id": run_id},
         )
 
+    def delete_state(self, *, session_id: str, run_id: str) -> dict[str, Any]:
+        self._assert_binding(session_id, run_id)
+        return self._request(
+            "DELETE",
+            f"/converter-sessions/{session_id}/state",
+            params={"run_id": run_id},
+        )
+
     def put_artifact(
         self,
         *,

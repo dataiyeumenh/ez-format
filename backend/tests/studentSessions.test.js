@@ -4,6 +4,7 @@ const jwt = require("jsonwebtoken");
 
 const {
   createStudentContextToken,
+  verifyConversionContextToken,
   verifyStudentContextToken,
 } = require("../services/conversionContextService");
 const { buildOwnerScope } = require("../services/studentSessionService");
@@ -71,6 +72,62 @@ test("student router exposes assistance without grading, attempts, or progress",
       { path: "/sessions/:id/operations/internship-report", methods: ["post"] },
     ],
   );
+});
+
+test("Student analyze preallocates a nonblank converter upload binding", async () => {
+  const session = {
+    _id: "507f1f77bcf86cd799439011",
+    userId: "507f1f77bcf86cd799439012",
+    workspaceId: null,
+    ownerScope: "user:507f1f77bcf86cd799439012",
+    status: "created",
+    converterUploadId: "",
+    targetTemplateId: "bsn_sales",
+    retentionExpiresAt: new Date(Date.now() + 60_000),
+  };
+  const token = createStudentContextToken({
+    sessionId: session._id,
+    userId: session.userId,
+    ownerScope: session.ownerScope,
+    allowedScopes: ["analyze"],
+    retentionExpiresAt: session.retentionExpiresAt,
+  });
+  const originalFindOne = StudentFileSession.findOne;
+  let forwarded;
+  StudentFileSession.findOne = async () => session;
+  const response = {
+    statusCode: 200,
+    body: null,
+    setHeader() {},
+    status(code) { this.statusCode = code; return this; },
+    json(body) { this.body = body; return body; },
+  };
+  try {
+    await studentRouter.analyzeStudentSession(
+      {
+        params: { id: session._id },
+        user: { _id: session.userId },
+        headers: { "x-student-context": token },
+        body: { target_template_id: "bsn_sales" },
+        file: { originalname: "sales.xlsx", buffer: Buffer.from("test") },
+      },
+      response,
+      {
+        forwardMultipartFn: async (request) => {
+          forwarded = request;
+          return { status: 200, headers: {}, data: { success: true } };
+        },
+      },
+    );
+  } finally {
+    StudentFileSession.findOne = originalFindOne;
+  }
+
+  assert.equal(response.statusCode, 200);
+  const claims = verifyConversionContextToken(forwarded.contextToken);
+  assert.match(claims.upload_id, /^[0-9a-f-]{36}$/i);
+  assert.notEqual(claims.upload_id, "");
+  assert.equal(claims.operation_session_id, String(session._id));
 });
 
 test("internal student routes expose assistance without grading or attempt routes", () => {
@@ -570,6 +627,10 @@ test("student session expiry includes elapsed retention and terminal statuses", 
   );
   assert.equal(
     sessionIsExpired({ retentionExpiresAt: new Date("2026-07-17T12:01:00Z"), status: "deleted" }, now),
+    true,
+  );
+  assert.equal(
+    sessionIsExpired({ retentionExpiresAt: new Date("2026-07-17T12:01:00Z"), status: "delete_failed" }, now),
     true,
   );
   assert.equal(

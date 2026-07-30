@@ -24,6 +24,7 @@ STUDENT_METADATA_STATE_CONTRACT = "student_metadata_v1"
 DEFAULT_OPERATION_SESSION_CLEANUP_BATCH_SIZE = 100
 DEFAULT_OPERATION_SESSION_CREATION_GRACE_SECONDS = 300
 _OPERATION_SESSION_DIRECTORY_LOCK = threading.RLock()
+_ACTIVE_OPERATION_SESSION_CREATIONS: set[tuple[str, str]] = set()
 
 
 class OperationStoreError(ValueError):
@@ -127,6 +128,10 @@ def cleanup_expired_operation_sessions(
             if not directory.is_dir() and not directory.is_symlink():
                 continue
             inspected += 1
+            if _creation_registry_key(session_root, directory) in (
+                _ACTIVE_OPERATION_SESSION_CREATIONS
+            ):
+                continue
             expires_at = _local_session_expiry(directory)
             if expires_at is not None and expires_at > current_time:
                 continue
@@ -282,26 +287,92 @@ class OperationStore:
             expires_at=expires_at,
             revisions=[base_revision],
         )
+        cls = type(self)
+        with cls._locks_guard:
+            creation_lock = cls._locks.setdefault(session_id, threading.RLock())
+        creation_lock.acquire()
         if state_contract:
             self._state_contracts[session_id] = state_contract
-        if self._remote_client is None or state_contract == STUDENT_METADATA_STATE_CONTRACT:
-            directory = self._directory(session_id)
-            with _OPERATION_SESSION_DIRECTORY_LOCK:
-                directory.mkdir(parents=True, exist_ok=False)
-                self._atomic_write(
-                    directory / ".creating.json",
-                    {
-                        "expires_at": (
-                            created_at
-                            + timedelta(seconds=_creation_grace_seconds())
-                        ).isoformat()
-                    },
+        persist_local = (
+            self._remote_client is None
+            or state_contract == STUDENT_METADATA_STATE_CONTRACT
+        )
+        directory = self._directory(session_id)
+        staging_directory: Path | None = None
+        creation_key: tuple[str, str] | None = None
+        remote_saved = False
+        try:
+            if persist_local:
+                staging_directory = self.root / (
+                    f".creating-{session_id}-{uuid.uuid4().hex}"
                 )
-            self._atomic_write(directory / "table.json", table_payload)
-        self._save_session(session, table_payload)
-        if self._remote_client is None or state_contract == STUDENT_METADATA_STATE_CONTRACT:
-            (self._directory(session_id) / ".creating.json").unlink(missing_ok=True)
-        return session
+                creation_key = _creation_registry_key(self.root, staging_directory)
+                marker_payload = {
+                    "kind": "operation_session_creation_v1",
+                    "session_id": session_id,
+                    "owner_type": (
+                        "student"
+                        if state_contract == STUDENT_METADATA_STATE_CONTRACT
+                        else "operation"
+                    ),
+                    "state_contract": state_contract or "operation_state_v1",
+                    "retention_expires_at": expires_at.isoformat(),
+                    "expires_at": (
+                        created_at + timedelta(seconds=_creation_grace_seconds())
+                    ).isoformat(),
+                }
+                with _OPERATION_SESSION_DIRECTORY_LOCK:
+                    if directory.exists() or directory.is_symlink():
+                        raise OperationStoreConflictError(
+                            "Operation session đã tồn tại"
+                        )
+                    staging_directory.mkdir(parents=False, exist_ok=False)
+                    _ACTIVE_OPERATION_SESSION_CREATIONS.add(creation_key)
+                    self._atomic_write(
+                        staging_directory / ".creating.json",
+                        marker_payload,
+                    )
+                self._atomic_write(staging_directory / "table.json", table_payload)
+
+            if self._remote_client is not None:
+                self._save_remote_state(session, table_payload)
+                remote_saved = True
+
+            if persist_local:
+                assert staging_directory is not None
+                self._atomic_write(
+                    staging_directory / "session.json",
+                    session.model_dump(mode="json"),
+                )
+                with _OPERATION_SESSION_DIRECTORY_LOCK:
+                    if directory.exists() or directory.is_symlink():
+                        raise OperationStoreConflictError(
+                            "Operation session đã tồn tại"
+                        )
+                    (staging_directory / ".creating.json").unlink(missing_ok=True)
+                    staging_directory.replace(directory)
+                    if creation_key is not None:
+                        _ACTIVE_OPERATION_SESSION_CREATIONS.discard(creation_key)
+            return session
+        except Exception:
+            if remote_saved:
+                self._rollback_remote_creation(session)
+            with _OPERATION_SESSION_DIRECTORY_LOCK:
+                if creation_key is not None:
+                    _ACTIVE_OPERATION_SESSION_CREATIONS.discard(creation_key)
+                if staging_directory is not None and (
+                    staging_directory.exists() or staging_directory.is_symlink()
+                ):
+                    _remove_operation_session_directory(self.root, staging_directory)
+            self._remote_payloads.pop(session_id, None)
+            self._remote_storage_revisions.pop(session_id, None)
+            self._state_contracts.pop(session_id, None)
+            raise
+        finally:
+            if creation_key is not None:
+                with _OPERATION_SESSION_DIRECTORY_LOCK:
+                    _ACTIVE_OPERATION_SESSION_CREATIONS.discard(creation_key)
+            creation_lock.release()
 
     def load_session(self, session_id: str) -> NormalizedSession:
         if self._remote_client is not None:
@@ -849,6 +920,45 @@ class OperationStore:
         self._purge_local_state(session_id)
         return not self._directory(session_id).exists()
 
+    def purge_session_state(self, session_id: str) -> dict[str, bool]:
+        remote_deleted = self._remote_client is None
+        if self._remote_client is not None:
+            run_id = self._remote_run_id
+            try:
+                result = self._remote_client.delete_state(
+                    session_id=session_id,
+                    run_id=run_id,
+                )
+                remote_deleted = bool(
+                    result.get("success") is True
+                    and str(result.get("session_id") or "") == str(session_id)
+                    and str(result.get("run_id") or "") == str(run_id)
+                    and result.get("remote_operation_session_deleted") is True
+                )
+            except Exception:
+                remote_deleted = False
+        try:
+            local_deleted = self.purge_local_session_state(session_id)
+        except (OSError, OperationStoreError):
+            local_deleted = False
+        return {
+            "local_operation_session_deleted": local_deleted,
+            "remote_operation_session_deleted": remote_deleted,
+            "operation_session_deleted": local_deleted and remote_deleted,
+        }
+
+    def _rollback_remote_creation(self, session: NormalizedSession) -> None:
+        if self._remote_client is None:
+            return
+        run_id = self._remote_run_id or self._run_id_from_session(session)
+        try:
+            self._remote_client.delete_state(
+                session_id=session.session_id,
+                run_id=run_id,
+            )
+        except Exception:
+            pass
+
     def has_local_session_state(self, session_id: str) -> bool:
         directory = self._directory(session_id)
         return directory.exists() or directory.is_symlink()
@@ -961,6 +1071,17 @@ def _local_session_expiry(directory: Path) -> datetime | None:
     if not path.is_file():
         path = directory / ".creating.json"
         if not path.is_file():
+            if directory.name.startswith(".creating-"):
+                try:
+                    created_at = datetime.fromtimestamp(
+                        directory.stat().st_mtime,
+                        timezone.utc,
+                    )
+                    return created_at + timedelta(
+                        seconds=_creation_grace_seconds()
+                    )
+                except OSError:
+                    return None
             return None
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
@@ -971,6 +1092,10 @@ def _local_session_expiry(directory: Path) -> datetime | None:
         return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
     except (OSError, ValueError, TypeError, json.JSONDecodeError, AttributeError):
         return None
+
+
+def _creation_registry_key(root: Path, directory: Path) -> tuple[str, str]:
+    return (str(root.resolve()), directory.name)
 
 
 def _creation_grace_seconds() -> int:

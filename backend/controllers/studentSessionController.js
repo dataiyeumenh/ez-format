@@ -329,7 +329,7 @@ function sessionIsOwnedByUser(session, userId) {
 }
 
 function sessionIsExpired(session, now = new Date()) {
-  if (["deleting", "expired", "deleted"].includes(session.status)) return true;
+  if (["deleting", "delete_failed", "expired", "deleted"].includes(session.status)) return true;
   const retentionExpiresAt = new Date(session.retentionExpiresAt).getTime();
   return !Number.isFinite(retentionExpiresAt) || retentionExpiresAt <= now.getTime();
 }
@@ -403,6 +403,8 @@ function assertStudentPurgeCompleted(result, session) {
     String(result?.session_id || "") !== String(session._id) ||
     String(result?.upload_id || "") !== String(session.converterUploadId || "") ||
     result?.raw_upload_deleted !== true ||
+    result?.local_operation_session_deleted !== true ||
+    result?.remote_operation_session_deleted !== true ||
     result?.operation_session_deleted !== true
   ) {
     const error = new Error("Converter purge response không đầy đủ");
@@ -419,6 +421,8 @@ async function purgeStudentOperationSession(req, session, forward = forwardJson)
       session_id: String(session._id),
       upload_id: "",
       raw_upload_deleted: true,
+      local_operation_session_deleted: true,
+      remote_operation_session_deleted: true,
       operation_session_deleted: true,
     };
   }
@@ -433,6 +437,14 @@ async function purgeStudentOperationSession(req, session, forward = forwardJson)
     scopes: ["analyze"],
     expiresIn: "2m",
   });
+  const cleanupStudentToken = createStudentContextToken({
+    sessionId: session._id,
+    userId: session.userId,
+    ownerScope: session.ownerScope,
+    workspaceId: session.workspaceId || null,
+    allowedScopes: ["analyze"],
+    expiresIn: "2m",
+  });
   const response = await forward({
     path: `/api/v1/student/sessions/${encodeURIComponent(String(session._id))}/purge`,
     method: "DELETE",
@@ -440,7 +452,7 @@ async function purgeStudentOperationSession(req, session, forward = forwardJson)
     contextToken,
     requestId: req.requestId || crypto.randomUUID(),
     extraHeaders: {
-      "x-student-context": String(req.headers?.["x-student-context"] || ""),
+      "x-student-context": cleanupStudentToken,
     },
   });
   if (response?.status !== 200) {
@@ -514,26 +526,37 @@ async function deleteStudentSession(
     if (!session) {
       return res.status(404).json({ success: false, message: "Không tìm thấy phiên hỗ trợ" });
     }
-    if (!verifySessionContext(req, session, res)) return undefined;
-    let deletingSession = session;
-    if (session.status !== "deleting") {
-      deletingSession = await StudentFileSession.findOneAndUpdate(
-        {
-          _id: session._id,
-          userId: session.userId,
-          ownerScope: session.ownerScope,
-          workspaceId: session.workspaceId || null,
-          status: { $nin: ["deleting", "expired", "deleted"] },
-        },
-        { $set: { status: "deleting" } },
-        { new: true },
-      );
-      if (!deletingSession) {
-        return res.status(409).json({
-          success: false,
-          message: "Phiên hỗ trợ đang được xoá",
-        });
-      }
+    if (session.status === "deleting") {
+      return res.status(409).json({
+        success: false,
+        message: "Phiên hỗ trợ đang được xoá",
+        purge: { completed: false, pending: true, retryable: false, status: "deleting" },
+      });
+    }
+    if (["expired", "deleted"].includes(session.status)) {
+      return res.status(410).json({ success: false, message: "Phiên hỗ trợ đã hết hạn" });
+    }
+    const retryingFailedDelete = session.status === "delete_failed";
+    if (!retryingFailedDelete && !verifySessionContext(req, session, res)) return undefined;
+    const deletingSession = await StudentFileSession.findOneAndUpdate(
+      {
+        _id: session._id,
+        userId: session.userId,
+        ownerScope: session.ownerScope,
+        workspaceId: session.workspaceId || null,
+        status: retryingFailedDelete
+          ? "delete_failed"
+          : { $nin: ["deleting", "delete_failed", "expired", "deleted"] },
+      },
+      { $set: { status: "deleting" } },
+      { new: true },
+    );
+    if (!deletingSession) {
+      return res.status(409).json({
+        success: false,
+        message: "Phiên hỗ trợ đang được xoá",
+        purge: { completed: false, pending: true, retryable: false, status: "deleting" },
+      });
     }
     const metadataFilter = {
       sessionId: deletingSession._id,
@@ -545,20 +568,46 @@ async function deleteStudentSession(
       const purgeResult = await purgeOperationSession(req, deletingSession);
       assertStudentPurgeCompleted(purgeResult, deletingSession);
     } catch (error) {
-      throw studentPurgeFailure(error);
+      const purgeError = studentPurgeFailure(error);
+      let failedSession = null;
+      try {
+        failedSession = await StudentFileSession.findOneAndUpdate(
+          {
+            _id: deletingSession._id,
+            userId: deletingSession.userId,
+            ownerScope: deletingSession.ownerScope,
+            workspaceId: deletingSession.workspaceId || null,
+            status: "deleting",
+          },
+          {
+            $set: {
+              status: "delete_failed",
+              deleteFailureCode: purgeError.code,
+              deleteFailedAt: new Date(),
+            },
+          },
+          { new: true },
+        );
+      } catch (_stateError) {
+        failedSession = null;
+      }
+      return res.status(503).json({
+        success: false,
+        message: "Không thể xác nhận đã purge dữ liệu Student tại converter",
+        purge: {
+          completed: false,
+          code: purgeError.code,
+          pending: true,
+          retryable: Boolean(failedSession),
+          status: failedSession ? "delete_failed" : "unknown",
+        },
+      });
     }
     await StudentQuestionEvent.deleteMany(metadataFilter);
     await StudentActivity.deleteMany(metadataFilter);
     await deletingSession.deleteOne();
     return res.json({ success: true });
   } catch (error) {
-    if (error?.studentPurgeFailure) {
-      return res.status(503).json({
-        success: false,
-        message: "Không thể xác nhận đã purge dữ liệu Student tại converter",
-        purge: { completed: false, code: error.code },
-      });
-    }
     return res.status(500).json({ success: false, message: "Không thể xoá phiên hỗ trợ", error: error.message });
   }
 }
@@ -568,6 +617,28 @@ async function refreshStudentContext(req, res) {
     const session = await findAccessibleSession(req.params.id, req.user._id);
     if (!session) {
       return res.status(404).json({ success: false, message: "Không tìm thấy phiên hỗ trợ" });
+    }
+    if (session.status === "delete_failed") {
+      return res.json({
+        success: true,
+        session: serializeStudentSession(session),
+        contextToken: null,
+        purge: {
+          completed: false,
+          pending: true,
+          retryable: true,
+          status: "delete_failed",
+          code: String(session.deleteFailureCode || "STUDENT_PURGE_UNAVAILABLE"),
+        },
+      });
+    }
+    if (session.status === "deleting") {
+      return res.status(409).json({
+        success: false,
+        session: serializeStudentSession(session),
+        contextToken: null,
+        purge: { completed: false, pending: true, retryable: false, status: "deleting" },
+      });
     }
     if (sessionIsExpired(session)) {
       return res.status(410).json({ success: false, message: "Phiên hỗ trợ đã hết hạn" });
@@ -677,7 +748,7 @@ async function findActiveInternalSession(claims) {
     ownerScope: claims.owner_scope,
     workspaceId: claims.workspace_id || null,
     retentionExpiresAt: { $gt: new Date() },
-    status: { $nin: ["expired", "deleted", "deleting"] },
+    status: { $nin: ["expired", "deleted", "deleting", "delete_failed"] },
     converterUploadId: { $nin: ["", null] },
   });
 }
@@ -833,7 +904,7 @@ async function recordStudentAnalysisCompleted(req, res) {
       ownerScope: claims.owner_scope,
       workspaceId: claims.workspace_id || null,
       retentionExpiresAt: { $gt: new Date() },
-      status: { $nin: ["expired", "deleted", "deleting"] },
+      status: { $nin: ["expired", "deleted", "deleting", "delete_failed"] },
       $or: [
         { converterUploadId: "" },
         { converterUploadId: payload.converterUploadId },
@@ -951,7 +1022,7 @@ async function recordStudentQuestionEvent(req, res) {
       ownerScope: claims.owner_scope,
       workspaceId: claims.workspace_id || null,
       retentionExpiresAt: { $gt: new Date() },
-      status: { $nin: ["expired", "deleted", "deleting"] },
+      status: { $nin: ["expired", "deleted", "deleting", "delete_failed"] },
       converterUploadId: { $nin: ["", null] },
     });
     if (!session) {

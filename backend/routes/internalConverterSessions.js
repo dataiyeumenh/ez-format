@@ -2,7 +2,11 @@ const express = require("express");
 const crypto = require("node:crypto");
 const { pipeline } = require("node:stream/promises");
 const { verifyConversionContextToken } = require("../services/conversionContextService");
-const { getArtifact, putArtifact } = require("../services/conversionArtifactService");
+const {
+  deleteArtifact,
+  getArtifact,
+  putArtifact,
+} = require("../services/conversionArtifactService");
 
 const router = express.Router();
 const MAX_STATE_BYTES = 2 * 1024 * 1024;
@@ -56,6 +60,26 @@ function binding(claims, sessionId, runId, kind, revision) {
   };
 }
 
+async function deleteOperationState({
+  claims,
+  sessionId,
+  runId,
+  revision,
+  deleteArtifactFn = deleteArtifact,
+}) {
+  try {
+    await deleteArtifactFn(binding(claims, sessionId, runId, "state", revision));
+  } catch (error) {
+    if (![404, 410].includes(error?.statusCode)) throw error;
+  }
+  return {
+    success: true,
+    session_id: sessionId,
+    run_id: runId,
+    remote_operation_session_deleted: true,
+  };
+}
+
 function asyncRoute(handler) {
   return (req, res, next) => Promise.resolve(handler(req, res, next)).catch((error) => {
     if (res.destroyed) return;
@@ -86,6 +110,18 @@ router.get("/:sessionId/state", asyncRoute(async (req, res) => {
   return res.json({ session: found.metadata, state: await readState(found.content) });
 }));
 
+router.delete("/:sessionId/state", asyncRoute(async (req, res) => {
+  const sessionId = String(req.params.sessionId);
+  const runId = String(req.query.run_id || "");
+  const claims = internalContext(req, sessionId, runId);
+  return res.json(await deleteOperationState({
+    claims,
+    sessionId,
+    runId,
+    revision: req.query.revision,
+  }));
+}));
+
 router.put("/:sessionId/artifacts/:kind", asyncRoute(async (req, res) => {
   const sessionId = String(req.params.sessionId);
   const runId = String(req.body?.run_id || "");
@@ -114,3 +150,4 @@ router.get("/:sessionId/artifacts/:kind", asyncRoute(async (req, res) => {
 
 module.exports = router;
 module.exports.asyncRoute = asyncRoute;
+module.exports.deleteOperationState = deleteOperationState;

@@ -2180,27 +2180,37 @@ def purge_student_raw_state(
         ):
             raise OperationStoreError("Student operation state binding không hợp lệ")
 
-    if upload_exists:
-        if not upload_bound:
-            raise OperationStoreError("Student upload marker không hợp lệ")
-        assert_upload_owner(upload_id, student_claims)
-        with _UPLOAD_CACHE_LOCK:
-            shutil.rmtree(upload_dir)
-    if upload_dir.exists():
-        raise OperationStoreError("Không thể purge Student raw upload")
+    raw_upload_deleted = not upload_exists
+    try:
+        if upload_exists:
+            if not upload_bound:
+                raise OperationStoreError("Student upload marker không hợp lệ")
+            assert_upload_owner(upload_id, student_claims)
+            with _UPLOAD_CACHE_LOCK:
+                shutil.rmtree(upload_dir)
+            raw_upload_deleted = not upload_dir.exists()
+    except (OSError, ValueError, OperationStoreError):
+        raw_upload_deleted = False
 
-    operation_session_deleted = (
-        store.purge_local_session_state(session_id) if operation_exists else True
-    )
-    if not operation_session_deleted:
-        raise OperationStoreError("Không thể purge Student operation session")
-    return {
+    operation_purge = store.purge_session_state(session_id)
+    report = {
         "success": True,
         "session_id": session_id,
         "upload_id": upload_id,
-        "raw_upload_deleted": True,
-        "operation_session_deleted": True,
+        "raw_upload_deleted": raw_upload_deleted,
+        **operation_purge,
     }
+    report["success"] = bool(
+        report["raw_upload_deleted"]
+        and report["local_operation_session_deleted"]
+        and report["remote_operation_session_deleted"]
+        and report["operation_session_deleted"]
+    )
+    if not report["success"]:
+        error = OperationStoreError("Student purge không hoàn tất")
+        error.report = report
+        raise error
+    return report
 
 
 def cleanup_expired_uploads(now: float | int | None = None) -> list[str]:

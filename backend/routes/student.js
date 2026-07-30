@@ -1,5 +1,6 @@
 const path = require("node:path");
 const express = require("express");
+const crypto = require("node:crypto");
 const multer = require("multer");
 const requireDb = require("../middleware/requireDb");
 const { protect } = require("../middleware/auth");
@@ -153,7 +154,7 @@ async function trustedSession(req, requiredScope) {
   return { claims, session, token };
 }
 
-function gatewayContext(req, trusted, requiredScope) {
+function gatewayContext(req, trusted, requiredScope, overrides = {}) {
   return createConversionContextToken({
     userId: req.user._id,
     workspaceId: trusted.claims.workspace_id || null,
@@ -161,25 +162,34 @@ function gatewayContext(req, trusted, requiredScope) {
     snapshotSetHash: trusted.claims.snapshot_set_hash || null,
     conversionRunId: `student:${trusted.session._id}`,
     operationSessionId: trusted.session._id,
-    uploadId: trusted.session.converterUploadId || "",
-    targetTemplateId: trusted.session.targetTemplateId || "",
+    uploadId: overrides.uploadId ?? trusted.session.converterUploadId ?? "",
+    targetTemplateId:
+      overrides.targetTemplateId ?? trusted.session.targetTemplateId ?? "",
     scopes: [requiredScope],
   });
 }
 
-async function analyzeStudentSession(req, res) {
+async function analyzeStudentSession(
+  req,
+  res,
+  { forwardMultipartFn = forwardMultipart } = {},
+) {
   const trusted = await trustedSession(req, "analyze");
   const targetTemplateId = String(
     req.body?.target_template_id || trusted.session.targetTemplateId || "",
   ).slice(0, 128);
-  const response = await forwardMultipart({
+  const preallocatedUploadId = crypto.randomUUID();
+  const response = await forwardMultipartFn({
     path: "/api/v1/student/sessions/analyze",
     file: req.file,
     fields: {
       context_token: trusted.token,
       target_template_id: targetTemplateId,
     },
-    contextToken: gatewayContext(req, trusted, "analyze"),
+    contextToken: gatewayContext(req, trusted, "analyze", {
+      uploadId: preallocatedUploadId,
+      targetTemplateId,
+    }),
     requestId: req.requestId,
     extraHeaders: { "x-student-context": trusted.token },
   });
@@ -253,3 +263,4 @@ if (isConverterGatewayUsageReady()) {
 }
 
 module.exports = router;
+module.exports.analyzeStudentSession = analyzeStudentSession;

@@ -260,6 +260,87 @@ def test_anonymized_export_discovers_pii_in_generic_notes_and_variants():
     }
 
 
+def test_anonymized_export_uses_conservative_column_allowlist_for_free_text():
+    workbook = Workbook()
+    worksheet = workbook.active
+    worksheet.title = "Data"
+    headers = [
+        "Ngày hạch toán",
+        "Số tiền",
+        "Tài khoản Nợ",
+        "Mã hàng",
+        "Ghi chú",
+        "Thông tin khác",
+    ]
+    worksheet.append(headers)
+    sensitive_values = [
+        "NGUYEN V A",
+        "TRAN A",
+        "MAI THI LAN",
+        "Đinh Thị Thu Hương",
+        "Trịnh Quốc Dũng",
+        "12 HUE",
+        "123456789",
+        "079203001234",
+        "B1234567",
+    ]
+    for index, sensitive in enumerate(sensitive_values, start=1):
+        worksheet.append(
+            ["2026-07-31", 125000.5, "131", f"SP-{index:02d}", sensitive, sensitive]
+        )
+    stream = BytesIO()
+    workbook.save(stream)
+
+    exported = anonymize_workbook_bytes(
+        filename="student.xlsx",
+        content=stream.getvalue(),
+        session=AnonymizationSession("session-conservative", "secret"),
+        confidential_values={},
+        analyzed_sheet_name="Data",
+        analyzed_header_row_index=0,
+        analyzed_headers=headers,
+    )
+
+    sanitized = load_workbook(BytesIO(exported.content), data_only=False)["Data"]
+    assert sanitized["A2"].value == "2026-07-31"
+    assert sanitized["B2"].value == 125000.5
+    assert sanitized["C2"].value == "131"
+    assert sanitized["D2"].value == "SP-01"
+    exported_text = "\n".join(
+        str(cell.value or "") for row in sanitized.iter_rows() for cell in row
+    ).casefold()
+    assert all(value.casefold() not in exported_text for value in sensitive_values)
+    assert "free_text" in exported.replaced_categories
+
+
+def test_conservative_post_scan_is_independent_from_primary_cell_redaction(
+    monkeypatch,
+):
+    workbook = Workbook()
+    worksheet = workbook.active
+    worksheet.title = "Data"
+    worksheet.append(["Ghi chú"])
+    worksheet.append(["TRAN A"])
+    stream = BytesIO()
+    workbook.save(stream)
+    monkeypatch.setattr(
+        anonymization_module,
+        "_replacement_for_cell",
+        lambda *_args, **_kwargs: None,
+    )
+
+    with pytest.raises(AnonymizationExportError, match="free_text"):
+        anonymize_workbook_bytes(
+            filename="student.xlsx",
+            content=stream.getvalue(),
+            session=AnonymizationSession("session-independent-allowlist", "secret"),
+            confidential_values={},
+            analyzed_sheet_name="Data",
+            analyzed_header_row_index=0,
+            analyzed_headers=["Ghi chú"],
+        )
+
+
 def test_anonymized_export_post_scan_rejects_unredacted_pii_without_inventory():
     workbook = Workbook()
     workbook.active["A1"] = '=HYPERLINK("mailto:private.student@example.com")'
@@ -285,6 +366,11 @@ def test_anonymized_export_post_scan_is_independent_from_primary_discovery(
     stream = BytesIO()
     workbook.save(stream)
     monkeypatch.setattr(anonymization_module, "discover_pii_values", lambda _payload: {})
+    monkeypatch.setattr(
+        anonymization_module,
+        "_replacement_for_cell",
+        lambda *_args, **_kwargs: None,
+    )
 
     with pytest.raises(AnonymizationExportError) as error:
         anonymize_workbook_bytes(
@@ -588,11 +674,12 @@ def test_formula_protection_never_reuses_existing_workbook_text():
     sentinel_like_text = "__EZFORMAT_PROTECTED_FORMULA_0__"
     workbook = Workbook()
     worksheet = workbook.active
-    worksheet["A1"] = "=1+1"
-    worksheet["A2"] = sentinel_like_text
+    worksheet["A1"] = "Số tiền"
+    worksheet["A2"] = "=1+1"
+    worksheet["A3"] = sentinel_like_text
     validation = DataValidation(type="whole", prompt=secret)
     worksheet.add_data_validation(validation)
-    validation.add(worksheet["A2"])
+    validation.add(worksheet["A3"])
     stream = BytesIO()
     workbook.save(stream)
 
@@ -604,8 +691,8 @@ def test_formula_protection_never_reuses_existing_workbook_text():
     )
 
     sanitized = load_workbook(BytesIO(exported.content), data_only=False)
-    assert sanitized.active["A1"].value == "=1+1"
-    assert sanitized.active["A2"].value == sentinel_like_text
+    assert sanitized.active["A2"].value == "=1+1"
+    assert sanitized.active["A3"].value != sentinel_like_text
 
 
 def test_short_confidential_value_never_rewrites_ooxml_markup():

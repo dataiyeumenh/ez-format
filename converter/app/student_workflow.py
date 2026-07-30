@@ -18,6 +18,7 @@ from app.misa_workflow import (
     _read_upload_table,
     analyze_upload,
     preview_mapping,
+    purge_student_raw_state,
     readiness_mapping,
 )
 from app.normalization import normalize_header
@@ -131,10 +132,41 @@ def analyze_student_file(
                 claims=claims,
             )
             sync_payload = _analysis_completed_payload(overview)
+            production_sync_required = operation_context_required()
+            converter_upload_id = str(
+                sync_payload.get("converterUploadId") or ""
+            ).strip()
+            if production_sync_required and converter_upload_id != str(
+                overview.get("upload_id") or ""
+            ).strip():
+                cleanup_completed = _purge_failed_student_analysis(
+                    claims=claims,
+                    overview=overview,
+                    operation_context_token=operation_context_token,
+                )
+                message = "Backend sync thiếu converterUploadId"
+                if cleanup_completed:
+                    message += "; dữ liệu phân tích đã được purge"
+                else:
+                    message += "; purge không hoàn tất"
+                raise StudentWorkflowError(
+                    503,
+                    message,
+                )
             try:
                 record_analysis_completed(context_token, sync_payload)
                 overview["session_sync"] = {"status": "synced", "message": None}
             except StudentSessionClientError as exc:
+                if production_sync_required:
+                    cleanup_completed = _purge_failed_student_analysis(
+                        claims=claims,
+                        overview=overview,
+                        operation_context_token=operation_context_token,
+                    )
+                    message = "Backend Student sync thất bại"
+                    if not cleanup_completed:
+                        message += "; purge không hoàn tất"
+                    raise StudentWorkflowError(503, message) from exc
                 overview["session_sync"] = {
                     "status": "unavailable",
                     "message": str(exc),
@@ -170,10 +202,39 @@ def _student_operation_binding(
     conversion_run_id = str(claims.get("conversion_run_id") or "").strip()
     if not conversion_run_id:
         raise StudentWorkflowError(409, "Student operation context thiếu conversion run")
+    upload_id = str(claims.get("upload_id") or "").strip()
+    if operation_context_required() and not upload_id:
+        raise StudentWorkflowError(409, "Student operation context thiếu upload binding")
     return {
         "operation_session_id": student_claims.session_id,
         "conversion_run_id": conversion_run_id,
+        **({"preallocated_upload_id": upload_id} if upload_id else {}),
     }
+
+
+def _purge_failed_student_analysis(
+    *,
+    claims: StudentContextClaims,
+    overview: dict[str, Any],
+    operation_context_token: str | None,
+) -> bool:
+    upload_id = str(overview.get("upload_id") or "").strip()
+    if not upload_id or not str(operation_context_token or "").strip():
+        return False
+    try:
+        result = purge_student_raw_state(
+            session_id=claims.session_id,
+            student_claims=claims,
+            conversion_context_token=str(operation_context_token),
+        )
+    except (ConversionContextError, ValueError):
+        return False
+    return bool(
+        result.get("raw_upload_deleted") is True
+        and result.get("local_operation_session_deleted") is True
+        and result.get("remote_operation_session_deleted") is True
+        and result.get("operation_session_deleted") is True
+    )
 
 
 def get_student_overview(*, session_id: str, context_token: str) -> dict[str, Any]:
