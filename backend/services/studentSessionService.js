@@ -35,6 +35,10 @@ const RAW_STUDENT_QUESTION_FIELDS = Object.freeze([
   "workbookBytes",
   "content",
 ]);
+const RETIRED_STUDENT_COLLECTION_NAMES = Object.freeze([
+  "studentattempts",
+  "studentskillprogresses",
+]);
 
 function normalizeStudentPrivacyMigrationMode(value) {
   const mode = String(value || "off").trim().toLowerCase();
@@ -67,6 +71,24 @@ async function findBounded(model, filter, batchSize, projection) {
     .limit(batchSize)
     .select(projection)
     .lean();
+}
+
+async function findRetiredCollectionBatch(collection, batchSize) {
+  if (!collection || typeof collection.find !== "function") {
+    throw new Error("Retired Student collection phải hỗ trợ find");
+  }
+  let cursor = collection.find({}, { projection: { _id: 1 } });
+  if (
+    !cursor ||
+    typeof cursor.sort !== "function" ||
+    typeof cursor.limit !== "function" ||
+    typeof cursor.toArray !== "function"
+  ) {
+    throw new Error("Retired Student collection phải hỗ trợ bounded cursor");
+  }
+  cursor = cursor.sort({ _id: 1 });
+  cursor = cursor.limit(batchSize);
+  return cursor.toArray();
 }
 
 async function migrateRetentionMetadata({
@@ -146,7 +168,12 @@ async function migrateRetentionMetadata({
 }
 
 async function migrateStudentPrivacy(
-  { questionEventModel, activityModel, sessionModel } = {},
+  {
+    questionEventModel,
+    activityModel,
+    sessionModel,
+    retiredCollections,
+  } = {},
   { mode: requestedMode = "off", batchSize = 100, now = new Date() } = {},
 ) {
   const mode = normalizeStudentPrivacyMigrationMode(requestedMode);
@@ -157,6 +184,14 @@ async function migrateStudentPrivacy(
     scrubbed: 0,
     backfilled: 0,
     orphansPurged: 0,
+    retiredRawCandidates: 0,
+    retiredRawPurged: 0,
+    retiredCollections: Object.fromEntries(
+      RETIRED_STUDENT_COLLECTION_NAMES.map((name) => [
+        name,
+        { candidates: 0, purged: 0 },
+      ]),
+    ),
   };
   if (mode === "off") return report;
 
@@ -187,6 +222,25 @@ async function migrateStudentPrivacy(
       },
     );
     report.scrubbed = Number(result?.modifiedCount || 0);
+  }
+
+  for (const collectionName of RETIRED_STUDENT_COLLECTION_NAMES) {
+    const collection = retiredCollections?.[collectionName];
+    const candidates = await findRetiredCollectionBatch(collection, limit);
+    const candidateIds = candidates.map((item) => item?._id).filter(Boolean);
+    report.scanned += candidateIds.length;
+    report.retiredRawCandidates += candidateIds.length;
+    report.retiredCollections[collectionName].candidates = candidateIds.length;
+    if (mode !== "apply" || candidateIds.length === 0) continue;
+    if (typeof collection.deleteMany !== "function") {
+      throw new Error("Retired Student collection phải hỗ trợ deleteMany");
+    }
+    const deletion = await collection.deleteMany({
+      _id: { $in: candidateIds },
+    });
+    const purged = Number(deletion?.deletedCount || 0);
+    report.retiredRawPurged += purged;
+    report.retiredCollections[collectionName].purged = purged;
   }
 
   for (const model of [questionEventModel, activityModel]) {

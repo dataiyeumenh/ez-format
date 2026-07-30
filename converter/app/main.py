@@ -90,6 +90,7 @@ from app.operation_store import (
     OperationStoreError,
     OperationStoreExpiredError,
     assert_operation_store_configured,
+    cleanup_expired_operation_sessions,
     operation_context_required,
     unauthenticated_local_operations_enabled,
 )
@@ -163,6 +164,7 @@ def _opportunistic_student_cleanup(*, force: bool = False) -> None:
         _LAST_STUDENT_CLEANUP = now
     cleanup_expired_student_uploads()
     cleanup_expired_uploads()
+    cleanup_expired_operation_sessions()
 
 
 async def _cleanup_student_uploads_at_startup() -> None:

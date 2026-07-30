@@ -177,11 +177,19 @@ app.get("/api/health", (req, res) => {
 
 const PORT = process.env.PORT || 5000;
 
-function loadStudentPrivacyModels() {
+function loadStudentPrivacyModels(connection = mongoose.connection) {
+  const database = connection?.connection?.db || connection?.db;
+  if (!database || typeof database.collection !== "function") {
+    throw new Error("MongoDB connection is required for Student privacy migration");
+  }
   return {
     questionEventModel: require("./models/StudentQuestionEvent"),
     activityModel: require("./models/StudentActivity"),
     sessionModel: require("./models/StudentFileSession"),
+    retiredCollections: {
+      studentattempts: database.collection("studentattempts"),
+      studentskillprogresses: database.collection("studentskillprogresses"),
+    },
   };
 }
 
@@ -264,7 +272,7 @@ function createStartServer({
       }
     }
     if (studentEnabled && privacyMigrationMode !== "off") {
-      const report = await runStudentPrivacyMigration(loadPrivacyModels(), {
+      const report = await runStudentPrivacyMigration(loadPrivacyModels(connection), {
         mode: privacyMigrationMode,
       });
       logger.log(JSON.stringify({

@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 import threading
 import uuid
 from contextlib import contextmanager
@@ -20,6 +21,7 @@ from app.operation_store_client import NodeOperationStoreClient, OperationStoreC
 
 
 STUDENT_METADATA_STATE_CONTRACT = "student_metadata_v1"
+DEFAULT_OPERATION_SESSION_CLEANUP_BATCH_SIZE = 100
 
 
 class OperationStoreError(ValueError):
@@ -87,6 +89,51 @@ def assert_operation_store_configured(*, remote_client: Any | None = None) -> st
 def operation_context_required() -> bool:
     """Return whether conversion state must be backed by a signed Node session."""
     return assert_operation_store_configured() == "node"
+
+
+def cleanup_expired_operation_sessions(
+    root: Path | None = None,
+    *,
+    now: datetime | None = None,
+    batch_size: int | None = None,
+) -> list[str]:
+    configured = os.getenv("OPERATION_SESSION_DIR", "").strip()
+    session_root = root or (
+        Path(configured)
+        if configured
+        else BACKEND_ROOT / ".artifacts" / "operation-sessions"
+    )
+    if not session_root.is_dir():
+        return []
+    configured_limit = batch_size
+    if configured_limit is None:
+        configured_limit = os.getenv(
+            "OPERATION_SESSION_CLEANUP_BATCH_SIZE",
+            str(DEFAULT_OPERATION_SESSION_CLEANUP_BATCH_SIZE),
+        )
+    try:
+        limit = min(max(int(configured_limit), 1), 1000)
+    except (TypeError, ValueError):
+        limit = DEFAULT_OPERATION_SESSION_CLEANUP_BATCH_SIZE
+    current_time = now or datetime.now(timezone.utc)
+    deleted: list[str] = []
+    inspected = 0
+    for directory in sorted(session_root.iterdir(), key=lambda path: path.name):
+        if inspected >= limit:
+            break
+        if not directory.is_dir() and not directory.is_symlink():
+            continue
+        inspected += 1
+        expires_at = _local_session_expiry(directory)
+        if expires_at is not None and expires_at > current_time:
+            continue
+        try:
+            _remove_operation_session_directory(session_root, directory)
+        except OSError:
+            continue
+        if not directory.exists():
+            deleted.append(directory.name)
+    return deleted
 
 
 
@@ -246,10 +293,17 @@ class OperationStore:
             if self._state_contracts.get(session_id) == STUDENT_METADATA_STATE_CONTRACT:
                 cached = self._remote_payloads.get(session_id)
                 if cached is not None:
-                    return cached["session"]
+                    session = cached["session"]
+                    if session.expires_at <= datetime.now(timezone.utc):
+                        self._purge_local_state(session_id)
+                        raise OperationStoreExpiredError("Phiên chuyển đổi đã hết hạn")
+                    return session
             try:
                 session, _ = self._load_remote_state(session_id)
                 return session
+            except OperationStoreExpiredError:
+                self._purge_local_state(session_id)
+                raise
             except OperationStoreClientError as exc:
                 self._raise_remote_error(exc)
         return self._load_local_session(session_id)
@@ -263,6 +317,7 @@ class OperationStore:
         except (OSError, ValueError) as exc:
             raise OperationStoreError("Dữ liệu phiên chuyển đổi không hợp lệ") from exc
         if session.expires_at <= datetime.now(timezone.utc):
+            self._purge_local_state(session_id)
             raise OperationStoreExpiredError("Phiên chuyển đổi đã hết hạn")
         return session
 
@@ -548,6 +603,14 @@ class OperationStore:
     ) -> None:
         if self._remote_client is not None:
             self._save_remote_state(session, table_payload or self._read_table(session.session_id))
+            if (
+                self._state_contracts.get(session.session_id)
+                == STUDENT_METADATA_STATE_CONTRACT
+            ):
+                self._atomic_write(
+                    self._directory(session.session_id) / "session.json",
+                    session.model_dump(mode="json"),
+                )
             return
         payload = session.model_dump(mode="json")
         self._atomic_write(self._directory(session.session_id) / "session.json", payload)
@@ -686,22 +749,68 @@ class OperationStore:
             return ""
         return str(session.revisions[0].context.get("conversion_run_id") or "").strip()
 
-    @staticmethod
     def _validate_remote_state(
-        session_id: str, state: dict[str, Any]
+        self, session_id: str, state: dict[str, Any]
     ) -> tuple[NormalizedSession, dict[str, Any]]:
         raw_session = state.get("session")
         table_payload = state.get("table")
-        if not isinstance(raw_session, dict) or not isinstance(table_payload, dict):
+        contract = state.get("contract")
+        if not isinstance(raw_session, dict):
             raise OperationStoreError("Session state từ Node không hợp lệ")
         try:
-            session = NormalizedSession.model_validate(raw_session)
+            remote_session = NormalizedSession.model_validate(raw_session)
         except ValueError as exc:
             raise OperationStoreError("Session metadata từ Node không hợp lệ") from exc
-        if session.session_id != session_id:
+        if remote_session.session_id != session_id:
             raise OperationStoreError("Session binding từ Node không hợp lệ")
-        if session.expires_at <= datetime.now(timezone.utc):
+        if remote_session.expires_at <= datetime.now(timezone.utc):
             raise OperationStoreExpiredError("Phiên chuyển đổi đã hết hạn")
+        if contract == STUDENT_METADATA_STATE_CONTRACT:
+            self._state_contracts[session_id] = STUDENT_METADATA_STATE_CONTRACT
+            table_metadata = state.get("table_metadata")
+            if not isinstance(table_metadata, dict):
+                raise OperationStoreError("Student table metadata từ Node không hợp lệ")
+            session = self._load_local_session(session_id)
+            table_payload = self._read_local_table(session_id)
+            bound_fields = (
+                "session_id",
+                "upload_id",
+                "user_id",
+                "workspace_id",
+                "owner_scope",
+                "target_template_id",
+                "target_template_version",
+                "active_revision",
+                "state_hash",
+                "raw_sha256",
+                "expires_at",
+            )
+            if any(
+                getattr(session, field) != getattr(remote_session, field)
+                for field in bound_fields
+            ):
+                raise OperationStoreError("Student session metadata binding không hợp lệ")
+            try:
+                remote_row_count = int(table_metadata["row_count"])
+                remote_column_count = int(table_metadata["column_count"])
+                remote_header_row_index = int(table_metadata["header_row_index"])
+            except (KeyError, TypeError, ValueError) as exc:
+                raise OperationStoreError(
+                    "Student table metadata binding không hợp lệ"
+                ) from exc
+            if (
+                remote_row_count != len(table_payload.get("rows") or [])
+                or remote_column_count != len(table_payload.get("headers") or [])
+                or remote_header_row_index
+                != int(table_payload.get("header_row_index") or 0)
+                or bool(table_metadata.get("has_sheet_name"))
+                != bool(table_payload.get("sheet_name"))
+            ):
+                raise OperationStoreError("Student table metadata binding không hợp lệ")
+        else:
+            session = remote_session
+            if not isinstance(table_payload, dict):
+                raise OperationStoreError("Session state từ Node không hợp lệ")
         if not isinstance(table_payload.get("headers"), list) or not isinstance(
             table_payload.get("rows"), list
         ):
@@ -711,6 +820,14 @@ class OperationStore:
         if current.state_hash != session.state_hash or computed != session.state_hash:
             raise OperationStoreError("Session state hash không hợp lệ")
         return session, table_payload
+
+    def _purge_local_state(self, session_id: str) -> None:
+        self._remote_payloads.pop(session_id, None)
+        self._remote_storage_revisions.pop(session_id, None)
+        self._state_contracts.pop(session_id, None)
+        directory = self._directory(session_id)
+        if directory.exists() or directory.is_symlink():
+            _remove_operation_session_directory(self.root, directory)
 
     @staticmethod
     def _raise_remote_error(exc: OperationStoreClientError) -> None:
@@ -810,6 +927,30 @@ def _file_lock(path: Path) -> Iterator[None]:
                 yield
             finally:
                 fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+def _local_session_expiry(directory: Path) -> datetime | None:
+    path = directory / "session.json"
+    if not path.is_file():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        raw_value = payload.get("expires_at")
+        if isinstance(raw_value, (int, float)):
+            return datetime.fromtimestamp(raw_value, timezone.utc)
+        parsed = datetime.fromisoformat(str(raw_value or "").replace("Z", "+00:00"))
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+    except (OSError, ValueError, TypeError, json.JSONDecodeError, AttributeError):
+        return None
+
+
+def _remove_operation_session_directory(root: Path, directory: Path) -> None:
+    if directory.parent.resolve() != root.resolve():
+        raise OperationStoreError("Operation session cleanup path không hợp lệ")
+    if directory.is_symlink():
+        directory.unlink(missing_ok=True)
+        return
+    shutil.rmtree(directory)
 
 
 def _state_hash(

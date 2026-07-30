@@ -216,6 +216,9 @@ def test_anonymized_export_discovers_pii_in_generic_notes_and_variants():
     worksheet.append(
         ["Đối tác: Công ty TNHH Bí Mật; MST: 0312345678; địa chỉ: 12 Đường Riêng"]
     )
+    worksheet.append(["Nguyễn Văn An"])
+    worksheet.append(["079203001234"])
+    worksheet.append(["12 Đường Nguyễn Trãi, Phường Bến Thành, Quận 1"])
     stream = BytesIO()
     workbook.save(stream)
 
@@ -238,8 +241,13 @@ def test_anonymized_export_discovers_pii_in_generic_notes_and_variants():
     assert "công ty tnhh bí mật" not in exported_text
     assert "0312345678" not in exported_text
     assert "12 đường riêng" not in exported_text
+    assert "nguyễn văn an" not in exported_text
+    assert "079203001234" not in exported_text
+    assert "12 đường nguyễn trãi" not in exported_text
     assert set(exported.replaced_categories) >= {
         "company",
+        "counterparty",
+        "document_number",
         "tax_code",
         "address",
         "email",
@@ -258,6 +266,53 @@ def test_anonymized_export_post_scan_rejects_unredacted_pii_without_inventory():
             filename="student.xlsx",
             content=stream.getvalue(),
             session=AnonymizationSession("session-independent-post-scan", "secret"),
+            confidential_values={},
+        )
+
+
+def test_anonymized_export_post_scan_is_independent_from_primary_discovery(
+    monkeypatch,
+):
+    workbook = Workbook()
+    workbook.active["A1"] = "Nguyễn Văn An - 079203001234 - 12 Đường Nguyễn Trãi"
+    stream = BytesIO()
+    workbook.save(stream)
+    monkeypatch.setattr(anonymization_module, "discover_pii_values", lambda _payload: {})
+
+    with pytest.raises(AnonymizationExportError) as error:
+        anonymize_workbook_bytes(
+            filename="student.xlsx",
+            content=stream.getvalue(),
+            session=AnonymizationSession("session-independent-recognizer", "secret"),
+            confidential_values={},
+        )
+
+    assert set(error.value.matched_categories) >= {
+        "counterparty",
+        "document_number",
+        "address",
+    }
+
+
+def test_anonymized_export_fails_closed_when_independent_post_scan_fails(
+    monkeypatch,
+):
+    workbook = Workbook()
+    workbook.active["A1"] = "safe"
+    stream = BytesIO()
+    workbook.save(stream)
+    monkeypatch.setattr(
+        anonymization_module,
+        "_scan_export_pii_independently",
+        lambda _payload: (_ for _ in ()).throw(RuntimeError("scanner unavailable")),
+        raising=False,
+    )
+
+    with pytest.raises(AnonymizationUnsupportedLayerError, match="pii_post_scan"):
+        anonymize_workbook_bytes(
+            filename="student.xlsx",
+            content=stream.getvalue(),
+            session=AnonymizationSession("session-fail-closed-post-scan", "secret"),
             confidential_values={},
         )
 

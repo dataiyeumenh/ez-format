@@ -42,7 +42,15 @@ const studentFileSessionSchema = new mongoose.Schema(
     },
     status: {
       type: String,
-      enum: ["created", "analyzed", "in_review", "exported", "expired", "deleted"],
+      enum: [
+        "created",
+        "analyzed",
+        "in_review",
+        "exported",
+        "deleting",
+        "expired",
+        "deleted",
+      ],
       default: "created",
       index: true,
     },

@@ -146,12 +146,15 @@ test("internal question event is ask-scope and owner bounded", async () => {
         outcome: "supported",
       },
     });
-    assert.equal(findCalls.length, 1);
+    assert.equal(findCalls.length, 2);
     assert.equal(String(findCalls[0]._id), session._id);
     assert.equal(String(findCalls[0].userId), session.userId);
     assert.equal(findCalls[0].ownerScope, session.ownerScope);
     assert.equal(findCalls[0].workspaceId, null);
-    assert.deepEqual(findCalls[0].status, { $nin: ["expired", "deleted"] });
+    assert.deepEqual(findCalls[0].status, {
+      $nin: ["expired", "deleted", "deleting"],
+    });
+    assert.deepEqual(findCalls[1].status, findCalls[0].status);
     assert.equal(createCalls.length, 1);
     assert.deepEqual(createCalls[0], {
       sessionId: session._id,

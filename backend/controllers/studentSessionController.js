@@ -327,7 +327,7 @@ function sessionIsOwnedByUser(session, userId) {
 }
 
 function sessionIsExpired(session, now = new Date()) {
-  if (["expired", "deleted"].includes(session.status)) return true;
+  if (["deleting", "expired", "deleted"].includes(session.status)) return true;
   const retentionExpiresAt = new Date(session.retentionExpiresAt).getTime();
   return !Number.isFinite(retentionExpiresAt) || retentionExpiresAt <= now.getTime();
 }
@@ -447,15 +447,35 @@ async function deleteStudentSession(req, res) {
       return res.status(404).json({ success: false, message: "Không tìm thấy phiên hỗ trợ" });
     }
     if (!verifySessionContext(req, session, res)) return undefined;
+    let deletingSession = session;
+    if (session.status !== "deleting") {
+      deletingSession = await StudentFileSession.findOneAndUpdate(
+        {
+          _id: session._id,
+          userId: session.userId,
+          ownerScope: session.ownerScope,
+          workspaceId: session.workspaceId || null,
+          status: { $nin: ["deleting", "expired", "deleted"] },
+        },
+        { $set: { status: "deleting" } },
+        { new: true },
+      );
+      if (!deletingSession) {
+        return res.status(409).json({
+          success: false,
+          message: "Phiên hỗ trợ đang được xoá",
+        });
+      }
+    }
     const metadataFilter = {
-      sessionId: session._id,
-      userId: session.userId,
-      ownerScope: session.ownerScope,
-      workspaceId: session.workspaceId || null,
+      sessionId: deletingSession._id,
+      userId: deletingSession.userId,
+      ownerScope: deletingSession.ownerScope,
+      workspaceId: deletingSession.workspaceId || null,
     };
     await StudentQuestionEvent.deleteMany(metadataFilter);
     await StudentActivity.deleteMany(metadataFilter);
-    await session.deleteOne();
+    await deletingSession.deleteOne();
     return res.json({ success: true });
   } catch (error) {
     return res.status(500).json({ success: false, message: "Không thể xoá phiên hỗ trợ", error: error.message });
@@ -576,9 +596,18 @@ async function findActiveInternalSession(claims) {
     ownerScope: claims.owner_scope,
     workspaceId: claims.workspace_id || null,
     retentionExpiresAt: { $gt: new Date() },
-    status: { $nin: ["expired", "deleted"] },
+    status: { $nin: ["expired", "deleted", "deleting"] },
     converterUploadId: { $nin: ["", null] },
   });
+}
+
+async function discardMetadataWriteIfSessionClosed(claims, model, record) {
+  if (await findActiveInternalSession(claims)) return false;
+  await model.deleteOne({
+    _id: record._id,
+    sessionId: claims.session_id,
+  });
+  return true;
 }
 
 async function recordStudentActivity(req, res) {
@@ -602,6 +631,18 @@ async function recordStudentActivity(req, res) {
       retentionExpiresAt: session.retentionExpiresAt,
       ...payload,
     });
+    if (
+      await discardMetadataWriteIfSessionClosed(
+        claims,
+        StudentActivity,
+        activity,
+      )
+    ) {
+      return res.status(409).json({
+        success: false,
+        message: "Phiên hỗ trợ đã đóng trong khi ghi nhận activity",
+      });
+    }
     return res.status(201).json({ success: true, activity: serializeStudentActivity(activity) });
   } catch (error) {
     return res.status(500).json({
@@ -711,7 +752,7 @@ async function recordStudentAnalysisCompleted(req, res) {
       ownerScope: claims.owner_scope,
       workspaceId: claims.workspace_id || null,
       retentionExpiresAt: { $gt: new Date() },
-      status: { $nin: ["expired", "deleted"] },
+      status: { $nin: ["expired", "deleted", "deleting"] },
       $or: [
         { converterUploadId: "" },
         { converterUploadId: payload.converterUploadId },
@@ -829,7 +870,7 @@ async function recordStudentQuestionEvent(req, res) {
       ownerScope: claims.owner_scope,
       workspaceId: claims.workspace_id || null,
       retentionExpiresAt: { $gt: new Date() },
-      status: { $nin: ["expired", "deleted"] },
+      status: { $nin: ["expired", "deleted", "deleting"] },
       converterUploadId: { $nin: ["", null] },
     });
     if (!session) {
@@ -851,6 +892,18 @@ async function recordStudentQuestionEvent(req, res) {
       outcome: payload.outcome,
       retentionExpiresAt: session.retentionExpiresAt,
     });
+    if (
+      await discardMetadataWriteIfSessionClosed(
+        claims,
+        StudentQuestionEvent,
+        event,
+      )
+    ) {
+      return res.status(409).json({
+        success: false,
+        message: "Phiên hỗ trợ đã đóng trong khi ghi nhận câu hỏi",
+      });
+    }
     return res.status(202).json({
       success: true,
       event: {

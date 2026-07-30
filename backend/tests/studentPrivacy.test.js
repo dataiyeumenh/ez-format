@@ -4,12 +4,17 @@ const test = require("node:test");
 const StudentActivity = require("../models/StudentActivity");
 const StudentFileSession = require("../models/StudentFileSession");
 const StudentQuestionEvent = require("../models/StudentQuestionEvent");
-const { deleteStudentSession } = require("../controllers/studentSessionController");
+const {
+  deleteStudentSession,
+  recordStudentActivity,
+  recordStudentQuestionEvent,
+} = require("../controllers/studentSessionController");
 const { createStudentContextToken } = require("../services/conversionContextService");
 const { createStartServer } = require("../server");
 const {
   migrateStudentPrivacy,
   normalizeStudentPrivacyMigrationMode,
+  hashStudentQuestion,
 } = require("../services/studentSessionService");
 
 process.env.CONVERSION_CONTEXT_SECRET = "student-privacy-test-secret";
@@ -47,7 +52,40 @@ function emptyQuery(calls, documents = []) {
   };
 }
 
-function privacyModels({ rawEvents = [] } = {}) {
+function retiredCollection(name, documents, calls) {
+  let remaining = [...documents];
+  return {
+    find(filter, options) {
+      calls.push([`${name}-find`, filter, options]);
+      let limit = remaining.length;
+      return {
+        sort(value) {
+          calls.push([`${name}-sort`, value]);
+          return this;
+        },
+        limit(value) {
+          calls.push([`${name}-limit`, value]);
+          limit = value;
+          return this;
+        },
+        toArray: async () => remaining.slice(0, limit),
+      };
+    },
+    async deleteMany(filter) {
+      calls.push([`${name}-delete`, filter]);
+      const ids = new Set(filter._id.$in.map(String));
+      const before = remaining.length;
+      remaining = remaining.filter((item) => !ids.has(String(item._id)));
+      return { deletedCount: before - remaining.length };
+    },
+  };
+}
+
+function privacyModels({
+  rawEvents = [],
+  retiredAttempts = [],
+  retiredProgresses = [],
+} = {}) {
   const calls = [];
   const questionEventModel = {
     find(filter) {
@@ -84,7 +122,26 @@ function privacyModels({ rawEvents = [] } = {}) {
       return emptyQuery(calls);
     },
   };
-  return { models: { questionEventModel, activityModel, sessionModel }, calls };
+  return {
+    models: {
+      questionEventModel,
+      activityModel,
+      sessionModel,
+      retiredCollections: {
+        studentattempts: retiredCollection(
+          "studentattempts",
+          retiredAttempts,
+          calls,
+        ),
+        studentskillprogresses: retiredCollection(
+          "studentskillprogresses",
+          retiredProgresses,
+          calls,
+        ),
+      },
+    },
+    calls,
+  };
 }
 
 test("Student privacy migration defaults off and touches no model", async () => {
@@ -111,6 +168,12 @@ test("Student privacy migration defaults off and touches no model", async () => 
     scrubbed: 0,
     backfilled: 0,
     orphansPurged: 0,
+    retiredRawCandidates: 0,
+    retiredRawPurged: 0,
+    retiredCollections: {
+      studentattempts: { candidates: 0, purged: 0 },
+      studentskillprogresses: { candidates: 0, purged: 0 },
+    },
   });
 });
 
@@ -153,6 +216,59 @@ test("Student privacy apply scrubs one bounded batch and is idempotent", async (
   const secondModels = privacyModels().models;
   const second = await migrateStudentPrivacy(secondModels, { mode: "apply", batchSize: 1 });
   assert.equal(second.scrubbed, 0);
+});
+
+test("Student privacy migration counts and purges retired raw collections", async () => {
+  const { models, calls } = privacyModels({
+    retiredAttempts: [{ _id: "attempt-1" }],
+    retiredProgresses: [{ _id: "progress-1" }],
+  });
+
+  const dryRun = await migrateStudentPrivacy(models, {
+    mode: "dry-run",
+    batchSize: 1,
+  });
+  assert.equal(dryRun.retiredRawCandidates, 2);
+  assert.equal(dryRun.retiredRawPurged, 0);
+  assert.deepEqual(dryRun.retiredCollections, {
+    studentattempts: { candidates: 1, purged: 0 },
+    studentskillprogresses: { candidates: 1, purged: 0 },
+  });
+  assert.equal(calls.some(([type]) => type.endsWith("-delete")), false);
+  assert.deepEqual(
+    calls.filter(([type]) => type.endsWith("-limit")).map(([, value]) => value),
+    [1, 1],
+  );
+
+  const applied = await migrateStudentPrivacy(models, {
+    mode: "apply",
+    batchSize: 1,
+  });
+  assert.equal(applied.retiredRawCandidates, 2);
+  assert.equal(applied.retiredRawPurged, 2);
+  assert.deepEqual(applied.retiredCollections, {
+    studentattempts: { candidates: 1, purged: 1 },
+    studentskillprogresses: { candidates: 1, purged: 1 },
+  });
+  assert.deepEqual(
+    calls.find(([type]) => type === "studentattempts-delete")[1],
+    { _id: { $in: ["attempt-1"] } },
+  );
+  assert.deepEqual(
+    calls.find(([type]) => type === "studentskillprogresses-delete")[1],
+    { _id: { $in: ["progress-1"] } },
+  );
+
+  const repeated = await migrateStudentPrivacy(models, {
+    mode: "apply",
+    batchSize: 1,
+  });
+  assert.equal(repeated.retiredRawCandidates, 0);
+  assert.equal(repeated.retiredRawPurged, 0);
+  assert.deepEqual(repeated.retiredCollections, {
+    studentattempts: { candidates: 0, purged: 0 },
+    studentskillprogresses: { candidates: 0, purged: 0 },
+  });
 });
 
 test("Student privacy cleanup backfills live metadata and purges bounded orphans", async () => {
@@ -199,7 +315,19 @@ test("Student privacy cleanup backfills live metadata and purges bounded orphans
   };
 
   const report = await migrateStudentPrivacy(
-    { questionEventModel, activityModel, sessionModel },
+    {
+      questionEventModel,
+      activityModel,
+      sessionModel,
+      retiredCollections: {
+        studentattempts: retiredCollection("studentattempts", [], calls),
+        studentskillprogresses: retiredCollection(
+          "studentskillprogresses",
+          [],
+          calls,
+        ),
+      },
+    },
     { mode: "apply", batchSize: 2, now },
   );
 
@@ -244,10 +372,17 @@ test("manual session deletion cascades question and activity metadata first", as
   const order = [];
   const originals = {
     findOne: StudentFileSession.findOne,
+    findOneAndUpdate: StudentFileSession.findOneAndUpdate,
     questions: StudentQuestionEvent.deleteMany,
     activities: StudentActivity.deleteMany,
   };
   StudentFileSession.findOne = async () => session;
+  StudentFileSession.findOneAndUpdate = async (_filter, update) => {
+    assert.deepEqual(update, { $set: { status: "deleting" } });
+    order.push("session-deleting");
+    session.status = "deleting";
+    return session;
+  };
   StudentQuestionEvent.deleteMany = async () => {
     order.push("questions");
     return { deletedCount: 1 };
@@ -268,11 +403,156 @@ test("manual session deletion cascades question and activity metadata first", as
       response,
     );
     assert.equal(response.statusCode, 200);
-    assert.deepEqual(order, ["questions", "activities", "session"]);
+    assert.deepEqual(order, [
+      "session-deleting",
+      "questions",
+      "activities",
+      "session",
+    ]);
   } finally {
     StudentFileSession.findOne = originals.findOne;
+    StudentFileSession.findOneAndUpdate = originals.findOneAndUpdate;
     StudentQuestionEvent.deleteMany = originals.questions;
     StudentActivity.deleteMany = originals.activities;
+  }
+});
+
+test("delete racing authorized question and activity writes leaves no orphan", async () => {
+  process.env.CONVERTER_SERVICE_TOKEN = "converter-service-secret";
+  const sessionId = "507f1f77bcf86cd799439011";
+  const userId = "507f1f77bcf86cd799439012";
+  const retentionExpiresAt = new Date(Date.now() + 60_000);
+  const token = createStudentContextToken({
+    sessionId,
+    userId,
+    ownerScope: `user:${userId}`,
+    allowedScopes: ["analyze", "ask", "accounting_map"],
+    retentionExpiresAt,
+  });
+  const cases = [
+    {
+      name: "question",
+      handler: recordStudentQuestionEvent,
+      model: StudentQuestionEvent,
+      body: {
+        event: "question_answered",
+        questionHash: hashStudentQuestion("Có bao nhiêu hóa đơn?"),
+        questionLength: "Có bao nhiêu hóa đơn?".length,
+        category: "count_documents",
+        operation: "ask",
+        answerType: "deterministic_file_query",
+        evidenceIds: [],
+        evidenceCount: 0,
+        outcome: "supported",
+      },
+    },
+    {
+      name: "activity",
+      handler: recordStudentActivity,
+      model: StudentActivity,
+      body: {
+        eventType: "accounting_map_reviewed",
+        evidenceCount: 0,
+        containsRawValues: false,
+      },
+    },
+  ];
+
+  for (const item of cases) {
+    let parentExists = true;
+    let releaseInsert;
+    let signalInsert;
+    const insertBlocked = new Promise((resolve) => { releaseInsert = resolve; });
+    const insertStarted = new Promise((resolve) => { signalInsert = resolve; });
+    const orphans = new Set();
+    const session = {
+      _id: sessionId,
+      userId,
+      workspaceId: null,
+      ownerScope: `user:${userId}`,
+      converterUploadId: "upload-1",
+      status: "analyzed",
+      retentionExpiresAt,
+      deleteOne: async () => { parentExists = false; },
+    };
+    const originals = {
+      findOne: StudentFileSession.findOne,
+      findOneAndUpdate: StudentFileSession.findOneAndUpdate,
+      questionCreate: StudentQuestionEvent.create,
+      questionDeleteMany: StudentQuestionEvent.deleteMany,
+      questionDeleteOne: StudentQuestionEvent.deleteOne,
+      activityCreate: StudentActivity.create,
+      activityDeleteMany: StudentActivity.deleteMany,
+      activityDeleteOne: StudentActivity.deleteOne,
+    };
+    StudentFileSession.findOne = async (filter) => (
+      filter.status && !parentExists ? null : session
+    );
+    StudentFileSession.findOneAndUpdate = async () => {
+      session.status = "deleting";
+      return session;
+    };
+    item.model.create = async (payload) => {
+      signalInsert();
+      await insertBlocked;
+      const id = `${item.name}-event`;
+      orphans.add(id);
+      return { _id: id, createdAt: new Date(0), ...payload };
+    };
+    item.model.deleteOne = async (filter) => {
+      orphans.delete(String(filter._id));
+      return { deletedCount: 1 };
+    };
+    StudentQuestionEvent.deleteMany = async () => {
+      if (item.model === StudentQuestionEvent) orphans.clear();
+      return { deletedCount: 0 };
+    };
+    StudentActivity.deleteMany = async () => {
+      if (item.model === StudentActivity) orphans.clear();
+      return { deletedCount: 0 };
+    };
+
+    try {
+      const writeResponse = responseRecorder();
+      const write = item.handler(
+        {
+          params: { id: sessionId },
+          headers: {
+            "x-converter-service-token": "converter-service-secret",
+            "x-student-context": token,
+          },
+          body: item.body,
+        },
+        writeResponse,
+      );
+      await insertStarted;
+
+      const deleteResponse = responseRecorder();
+      await deleteStudentSession(
+        {
+          params: { id: sessionId },
+          user: { _id: userId },
+          headers: { "x-student-context": token },
+        },
+        deleteResponse,
+      );
+      assert.equal(deleteResponse.statusCode, 200);
+      releaseInsert();
+      await write;
+
+      assert.equal(writeResponse.statusCode, 409);
+      assert.equal(orphans.size, 0);
+    } finally {
+      releaseInsert();
+      StudentFileSession.findOne = originals.findOne;
+      StudentFileSession.findOneAndUpdate = originals.findOneAndUpdate;
+      StudentQuestionEvent.create = originals.questionCreate;
+      StudentQuestionEvent.deleteMany = originals.questionDeleteMany;
+      StudentQuestionEvent.deleteOne = originals.questionDeleteOne;
+      StudentActivity.create = originals.activityCreate;
+      StudentActivity.deleteMany = originals.activityDeleteMany;
+      StudentActivity.deleteOne = originals.activityDeleteOne;
+    }
   }
 });
 

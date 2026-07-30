@@ -5,6 +5,7 @@ import hashlib
 import hmac
 import json
 import time
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import openpyxl
@@ -13,7 +14,12 @@ from fastapi.testclient import TestClient
 
 from app.excel_io import InputTable
 from app.main import app
-from app.operation_store import OperationStore
+from app.operation_store import (
+    STUDENT_METADATA_STATE_CONTRACT,
+    OperationStore,
+    OperationStoreExpiredError,
+    cleanup_expired_operation_sessions,
+)
 
 
 client = TestClient(app)
@@ -165,6 +171,185 @@ def test_local_operation_session_requires_explicit_dev_flag(tmp_path, monkeypatc
     )
 
     assert response.status_code == 401
+
+
+def _create_test_operation_session(store, *, session_id=None, ttl_seconds=3600):
+    return store.create_session(
+        session_id=session_id,
+        upload_id="student-upload",
+        owner_scope="user:user-1",
+        user_id="user-1",
+        workspace_id=None,
+        target_template_id="bsn_sales",
+        target_template_version="v1",
+        source_signature={"hash": "source-hash"},
+        table=InputTable(
+            headers=["Họ tên", "CCCD"],
+            rows=[{"Họ tên": "Nguyễn Văn An", "CCCD": "079203001234"}],
+        ),
+        raw_sha256="raw-hash",
+        conversion_run_id=(f"student:{session_id}" if session_id else None),
+        ttl_seconds=ttl_seconds,
+        state_contract=(STUDENT_METADATA_STATE_CONTRACT if session_id else None),
+    )
+
+
+def test_expired_local_operation_session_rejects_and_purges_raw_table(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv("OPERATION_STORE_PROVIDER", "local")
+    monkeypatch.setenv("NODE_ENV", "test")
+    monkeypatch.setenv("OPERATION_STORE_ALLOW_LOCAL", "true")
+    monkeypatch.setenv("CONVERTER_SERVICE_TOKEN", "converter-service-secret")
+    store = OperationStore(root=tmp_path / "sessions")
+    session = _create_test_operation_session(store, ttl_seconds=-1)
+    session_dir = store.root / session.session_id
+    assert (session_dir / "table.json").is_file()
+
+    with pytest.raises(OperationStoreExpiredError):
+        store.load_session(session.session_id)
+
+    assert not session_dir.exists()
+
+
+def test_student_metadata_cache_rejects_expiry_and_purges_local_raw_state(
+    tmp_path,
+):
+    session_id = "student-session-expired"
+
+    class RemoteStore:
+        def __init__(self):
+            self.run_id = f"student:{session_id}"
+            self.session_id = session_id
+
+        @staticmethod
+        def put_state(**payload):
+            return {"session": {"revision": payload["revision"]}}
+
+    store = OperationStore(root=tmp_path / "sessions", remote_client=RemoteStore())
+    session = _create_test_operation_session(
+        store,
+        session_id=session_id,
+        ttl_seconds=-1,
+    )
+    session_dir = store.root / session.session_id
+    assert (session_dir / "table.json").is_file()
+
+    with pytest.raises(OperationStoreExpiredError):
+        store.load_session(session.session_id)
+
+    assert not session_dir.exists()
+    assert session.session_id not in store._remote_payloads
+
+
+def test_student_metadata_operation_session_survives_process_restart(
+    tmp_path,
+):
+    session_id = "student-session-restart"
+    captured = {}
+
+    class RemoteStore:
+        def __init__(self):
+            self.run_id = f"student:{session_id}"
+            self.session_id = session_id
+
+        @staticmethod
+        def put_state(**payload):
+            captured.update(payload)
+            return {"session": {"revision": payload["revision"]}}
+
+        @staticmethod
+        def get_state(**_payload):
+            return {
+                "state": captured["state"],
+                "session": {"revision": captured["revision"]},
+            }
+
+    root = tmp_path / "sessions"
+    first_store = OperationStore(
+        root=root,
+        remote_client=RemoteStore(),
+        conversion_run_id=f"student:{session_id}",
+    )
+    created = _create_test_operation_session(
+        first_store,
+        session_id=session_id,
+    )
+
+    restarted_store = OperationStore(
+        root=root,
+        remote_client=RemoteStore(),
+        conversion_run_id=f"student:{session_id}",
+    )
+    materialized = restarted_store.materialize_table(created.session_id)
+
+    assert materialized.headers == ["Họ tên", "CCCD"]
+    assert materialized.rows == [
+        {"Họ tên": "Nguyễn Văn An", "CCCD": "079203001234"}
+    ]
+    assert "table" not in captured["state"]
+    assert "table_metadata" in captured["state"]
+
+
+def test_operation_session_sweeper_is_bounded_and_restart_safe(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv("OPERATION_STORE_PROVIDER", "local")
+    monkeypatch.setenv("NODE_ENV", "test")
+    monkeypatch.setenv("OPERATION_STORE_ALLOW_LOCAL", "true")
+    monkeypatch.setenv("CONVERTER_SERVICE_TOKEN", "converter-service-secret")
+    store = OperationStore(root=tmp_path / "sessions")
+    expired = [
+        _create_test_operation_session(store, ttl_seconds=-1),
+        _create_test_operation_session(store, ttl_seconds=-1),
+    ]
+
+    first = cleanup_expired_operation_sessions(
+        root=store.root,
+        now=datetime.now(timezone.utc),
+        batch_size=1,
+    )
+    assert len(first) == 1
+    assert sum((store.root / item.session_id).exists() for item in expired) == 1
+
+    second = cleanup_expired_operation_sessions(
+        root=store.root,
+        now=datetime.now(timezone.utc),
+        batch_size=1,
+    )
+    assert len(second) == 1
+    assert all(not (store.root / item.session_id).exists() for item in expired)
+
+
+def test_student_startup_cleanup_wires_operation_session_sweeper(monkeypatch):
+    import app.main as main_module
+
+    calls = []
+    monkeypatch.setattr(
+        main_module,
+        "cleanup_expired_student_uploads",
+        lambda: calls.append("student-uploads"),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "cleanup_expired_uploads",
+        lambda: calls.append("converter-uploads"),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "cleanup_expired_operation_sessions",
+        lambda: calls.append("operation-sessions"),
+    )
+
+    main_module._opportunistic_student_cleanup(force=True)
+
+    assert calls == [
+        "student-uploads",
+        "converter-uploads",
+        "operation-sessions",
+    ]
 
 
 def _workbook(path):

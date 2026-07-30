@@ -98,6 +98,81 @@ _PII_PATTERNS = {
     ),
 }
 
+_VIETNAMESE_NAME_PATTERN = re.compile(
+    r"(?<!\w)((?:Nguyễn|Trần|Lê|Phạm|Hoàng|Huỳnh|Phan|Vũ|Võ|Đặng|"
+    r"Bùi|Đỗ|Hồ|Ngô|Dương|Lý)"
+    r"(?:\s+[A-ZÀÁÂÃÈÉÊÌÍÒÓÔÕÙÚĂĐĨŨƠƯẠ-Ỵ][a-zàáâãèéêìíòóôõùúăđĩũơưạ-ỵ]+){1,4})"
+    r"(?!\w)"
+)
+_VIETNAMESE_ADDRESS_PATTERN = re.compile(
+    r"(?<!\w)(\d{1,5}(?:[/-]\d{1,5})?\s+"
+    r"(?:đường|duong|phố|pho|ngõ|ngo|hẻm|hem|ấp|ap|thôn|thon)"
+    r"\s+[^;|\n]{2,160})",
+    re.IGNORECASE,
+)
+_CCCD_PATTERN = re.compile(r"(?<!\d)(\d{12})(?!\d)")
+
+# Deliberately separate from primary discovery. Export validation must still
+# detect PII when discovery or replacement inventory regresses.
+_POST_SCAN_PII_PATTERNS = (
+    (
+        "company",
+        re.compile(
+            r"(?:c[oô]ng\s*ty|cong\s*ty|cty|doanh\s*nghi[eệ]p|doanh\s*nghiep)"
+            r"\s+[^;,|\n]{2,120}",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "counterparty",
+        re.compile(
+            r"(?<!\w)(?:Nguyễn|Trần|Lê|Phạm|Hoàng|Huỳnh|Phan|Vũ|Võ|Đặng|"
+            r"Bùi|Đỗ|Hồ|Ngô|Dương|Lý)"
+            r"(?:\s+[A-ZÀÁÂÃÈÉÊÌÍÒÓÔÕÙÚĂĐĨŨƠƯẠ-Ỵ][a-zàáâãèéêìíòóôõùúăđĩũơưạ-ỵ]+){1,4}"
+            r"(?!\w)",
+        ),
+    ),
+    (
+        "tax_code",
+        re.compile(
+            r"(?:m[aã]\s*s[oố]\s*thu[eế]|ma\s+so\s+thue|mst|tax\s*code)"
+            r"\s*[:#-]?\s*\d{10}(?:-\d{3})?",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "address",
+        re.compile(
+            r"(?:[dđ][iị]a\s*ch[iỉ]|dia\s*chi|address)\s*[:#-]\s*[^;|\n]{4,180}"
+            r"|(?<!\w)\d{1,5}(?:[/-]\d{1,5})?\s+"
+            r"(?:đường|duong|phố|pho|ngõ|ngo|hẻm|hem|ấp|ap|thôn|thon)"
+            r"\s+[^;|\n]{2,160}",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "email",
+        re.compile(
+            r"(?<![\w.+-])[A-Z0-9.!#$%&'*+/=?^_`{|}~-]+@"
+            r"[A-Z0-9](?:[A-Z0-9.-]{0,251}[A-Z0-9])?\.[A-Z]{2,63}(?![\w.-])",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "phone",
+        re.compile(r"(?<!\d)(?:\+?84|0)(?:[\s().-]*\d){8,10}(?!\d)"),
+    ),
+    (
+        "bank_account",
+        re.compile(
+            r"(?:s[oố]\s*t[aà]i\s*kho[aả]n|so\s+tai\s+khoan|stk|bank\s*account)"
+            r"\s*[:#-]?\s*\d(?:[\s.-]*\d){5,18}",
+            re.IGNORECASE,
+        ),
+    ),
+    ("document_number", re.compile(r"(?<!\d)\d{12}(?!\d)")),
+)
+
 
 class AnonymizationExportError(ValueError):
     """Raised when a generated workbook still contains confidential content."""
@@ -197,11 +272,20 @@ def discover_pii_values(payload: Any) -> dict[str, tuple[str, ...]]:
     """Discover high-confidence PII tokens without relying on column names."""
     discovered: dict[str, list[str]] = {}
     seen: dict[str, set[str]] = {}
+    patterns = (
+        *tuple(_PII_PATTERNS.items()),
+        ("counterparty", _VIETNAMESE_NAME_PATTERN),
+        ("address", _VIETNAMESE_ADDRESS_PATTERN),
+        ("document_number", _CCCD_PATTERN),
+    )
     for candidate in _iter_text_values(payload):
         text = str(candidate or "")
-        for category, pattern in _PII_PATTERNS.items():
+        for category, pattern in patterns:
             for match in pattern.finditer(text):
-                value = match.group(1) if match.lastindex else match.group(0)
+                value = next(
+                    (group for group in match.groups() if group is not None),
+                    match.group(0),
+                )
                 value = value.strip().rstrip(".,;:")
                 if not value or _is_anonymized_token(text, match.start(), category, value):
                     continue
@@ -216,6 +300,33 @@ def discover_pii_values(payload: Any) -> dict[str, tuple[str, ...]]:
                 category_seen.add(canonical)
                 discovered.setdefault(category, []).append(value)
     return {category: tuple(values) for category, values in discovered.items()}
+
+
+def _scan_export_pii_independently(payload: Any) -> tuple[str, ...]:
+    matches: set[str] = set()
+    for candidate in _iter_text_values(payload):
+        text = str(candidate or "")
+        for category, pattern in _POST_SCAN_PII_PATTERNS:
+            if category in matches:
+                continue
+            for match in pattern.finditer(text):
+                value = match.group(0)
+                if category == "email" and value.casefold().endswith("@example.invalid"):
+                    continue
+                prefix = text[max(0, match.start() - 16) : match.start()].upper()
+                if category == "address" and "ADDRESS-" in value.upper():
+                    continue
+                generated_prefixes = {
+                    "phone": ("PHONE-", "TAX-", "BANK-", "DOC-"),
+                    "document_number": ("DOC-",),
+                }.get(category, ())
+                if any(prefix.endswith(marker) for marker in generated_prefixes):
+                    continue
+                matches.add(category)
+                break
+    return tuple(
+        category for category in ANONYMIZATION_CATEGORIES if category in matches
+    )
 
 
 def _is_anonymized_token(
@@ -282,14 +393,17 @@ def anonymize_workbook_bytes(
     if extension == ".xlsx":
         _validate_xlsx_archive(content)
     source_values = _workbook_values(content, extension)
+    discovered_values = discover_pii_values(source_values)
     all_confidential_values = _merge_confidential_values(
         confidential_values,
-        discover_pii_values(source_values),
+        discovered_values,
     )
     active_values = _active_confidential_values(
         all_confidential_values,
         full_document_numbers=full_document_numbers,
     )
+    if discovered_values.get("document_number"):
+        active_values["document_number"] = discovered_values["document_number"]
     if extension == ".xlsx":
         exported, replaced_categories, replaced_layers = _anonymize_xlsx(
             content,
@@ -303,14 +417,12 @@ def anonymize_workbook_bytes(
     else:
         raise AnonymizationUnsupportedLayerError("xls_metadata_layers")
 
-    matches = scan_confidential_values(
-        _workbook_values(exported, extension), active_values
-    )
-    independent_matches = tuple(
-        category
-        for category in ANONYMIZATION_CATEGORIES
-        if category in discover_pii_values(_workbook_values(exported, extension))
-    )
+    exported_values = _workbook_values(exported, extension)
+    matches = scan_confidential_values(exported_values, active_values)
+    try:
+        independent_matches = _scan_export_pii_independently(exported_values)
+    except Exception as exc:
+        raise AnonymizationUnsupportedLayerError("pii_post_scan") from exc
     failed_categories = tuple(dict.fromkeys((*matches, *independent_matches)))
     if failed_categories:
         raise AnonymizationExportError(failed_categories)
@@ -745,14 +857,22 @@ def _replace_all_known_text(
 ) -> tuple[str, set[str]]:
     text = str(value or "")
     matched_categories: set[str] = set()
-    for category in ANONYMIZATION_CATEGORIES:
-        for original in confidential_values.get(category, ()):
-            source = str(original or "").strip()
-            if source and _contains_confidential(text, source):
-                text = _replace_confidential(
-                    text, source, session.replace(category, source)
-                )
-                matched_categories.add(category)
+    candidates = sorted(
+        (
+            (category, str(original or "").strip())
+            for category in ANONYMIZATION_CATEGORIES
+            for original in confidential_values.get(category, ())
+            if str(original or "").strip()
+        ),
+        key=lambda item: len(item[1]),
+        reverse=True,
+    )
+    for category, source in candidates:
+        if _contains_confidential(text, source):
+            text = _replace_confidential(
+                text, source, session.replace(category, source)
+            )
+            matched_categories.add(category)
     return text, matched_categories
 
 
