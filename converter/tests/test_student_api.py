@@ -21,7 +21,7 @@ from openpyxl.workbook.defined_name import DefinedName
 from app import main as main_module
 from app import student_store, student_workflow
 from app.main import app, clear_student_rate_limits
-from app.misa_workflow import _read_metadata, _write_metadata
+from app.misa_workflow import _read_metadata, _write_metadata, save_upload
 from app.student_anonymization import _workbook_values, scan_confidential_values
 from app.student_context import verify_student_context
 from app.student_session_client import (
@@ -30,7 +30,7 @@ from app.student_session_client import (
     record_analysis_completed,
     record_question_event,
 )
-from app.student_store import find_student_upload_id
+from app.student_store import find_student_upload_id, student_upload_retention_seconds
 
 
 TEST_SERVICE_TOKEN = "converter-service-token-for-student-tests"
@@ -408,7 +408,12 @@ def test_student_analyze_uses_node_binding_with_metadata_only_remote_state(
 
 @pytest.mark.parametrize(
     "failure_mode",
-    ["sync_error", "missing_upload_id", "missing_upload_id_purge_partial"],
+    [
+        "sync_error",
+        "missing_upload_id",
+        "missing_upload_id_purge_partial",
+        "post_save_value_error",
+    ],
 )
 def test_production_student_analysis_fails_with_truthful_cleanup_status(
     student_api,
@@ -439,12 +444,17 @@ def test_production_student_analysis_fails_with_truthful_cleanup_status(
             }
 
         @staticmethod
-        def delete_state(**payload):
+        def delete_session_artifacts(**payload):
             deleted_remote.append(payload)
             return {
                 "success": True,
                 "session_id": payload["session_id"],
                 "run_id": payload["run_id"],
+                "purge_scope": "all_artifacts",
+                "remaining_metadata": (
+                    1 if failure_mode == "missing_upload_id_purge_partial" else 0
+                ),
+                "remaining_bytes": 0,
                 "remote_operation_session_deleted": (
                     failure_mode != "missing_upload_id_purge_partial"
                 ),
@@ -465,7 +475,7 @@ def test_production_student_analysis_fails_with_truthful_cleanup_status(
                 student_workflow.StudentSessionClientError("backend unavailable")
             ),
         )
-    else:
+    elif failure_mode.startswith("missing_upload_id"):
         original_payload = student_workflow._analysis_completed_payload
         monkeypatch.setattr(
             student_workflow,
@@ -474,6 +484,14 @@ def test_production_student_analysis_fails_with_truthful_cleanup_status(
                 **original_payload(overview),
                 "converterUploadId": "",
             },
+        )
+    else:
+        monkeypatch.setattr(
+            student_workflow,
+            "_build_current_overview",
+            lambda **_kwargs: (_ for _ in ()).throw(
+                ValueError("post-save overview validation failed")
+            ),
         )
 
     response = client.post(
@@ -495,7 +513,8 @@ def test_production_student_analysis_fails_with_truthful_cleanup_status(
         },
     )
 
-    assert response.status_code == 503, response.text
+    expected_status = 400 if failure_mode == "post_save_value_error" else 503
+    assert response.status_code == expected_status, response.text
     if failure_mode == "missing_upload_id_purge_partial":
         assert "purge không hoàn tất" in response.json()["detail"]
         assert "đã được purge" not in response.json()["detail"]
@@ -535,12 +554,15 @@ def test_student_purge_contract_removes_raw_upload_and_operation_session(
             }
 
         @staticmethod
-        def delete_state(**payload):
+        def delete_session_artifacts(**payload):
             remote_deletes.append(payload)
             return {
                 "success": True,
                 "session_id": payload["session_id"],
                 "run_id": payload["run_id"],
+                "purge_scope": "all_artifacts",
+                "remaining_metadata": 0,
+                "remaining_bytes": 0,
                 "remote_operation_session_deleted": True,
             }
 
@@ -795,7 +817,6 @@ def test_concurrent_student_analyze_allows_exactly_one_active_upload(
 ):
     _, _ = student_api
     token = _student_token()
-    original_analyze_upload = student_workflow.analyze_upload
     first_entered = Event()
     release_first = Event()
     call_lock = Lock()
@@ -809,13 +830,41 @@ def test_concurrent_student_analyze_allows_exactly_one_active_upload(
         if current_call == 1:
             first_entered.set()
             assert release_first.wait(timeout=5)
-        return original_analyze_upload(**kwargs)
+        claims = verify_student_context(kwargs["student_context_token"], "analyze")
+        upload_id, _ = save_upload(
+            kwargs["filename"],
+            kwargs["content"],
+            student_claims=claims,
+            student_ttl_seconds=student_upload_retention_seconds(),
+        )
+        return {"upload_id": upload_id}
+
+    def fast_overview(*, upload_id, **_kwargs):
+        return {
+            "upload_id": upload_id,
+            "target_template_id": "bsn_sales",
+            "detected": {"source_signature_hash": "test-signature"},
+            "student_summary": {
+                "session_id": "507f1f77bcf86cd799439011",
+                "data_row_count": 0,
+                "document_count": 0,
+                "recognized_columns": 0,
+                "unresolved_columns": 0,
+                "mapping_counts": {},
+                "issue_counts": {},
+                "master_data_status": "not_configured",
+                "explanation_count": 0,
+            },
+            "student_state_hash": "test-state",
+            "readiness": {"status": "ready"},
+        }
 
     monkeypatch.setattr(
         student_workflow,
         "analyze_upload",
         controlled_analyze_upload,
     )
+    monkeypatch.setattr(student_workflow, "_build_current_overview", fast_overview)
 
     with _test_client() as first_client, _test_client() as second_client:
         with ThreadPoolExecutor(max_workers=2) as executor:
@@ -1652,8 +1701,9 @@ def test_internship_report_requires_verified_activity_ids_and_safe_approved_note
     )
     assert response.status_code == 200
     assert response.headers["content-type"].startswith("text/markdown")
-    assert "Completed a deterministic reconciliation review." in response.text
-    assert "Reviewed with the supervisor." in response.text
+    assert "Completed a deterministic reconciliation review." not in response.text
+    assert "Reviewed with the supervisor." not in response.text
+    assert "TEXT-" in response.text
     assert "Khách A" not in response.text
 
 

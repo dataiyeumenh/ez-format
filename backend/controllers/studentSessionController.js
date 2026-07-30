@@ -18,6 +18,8 @@ const {
 } = require("../services/studentSessionService");
 
 const DEFAULT_RETENTION_MS = 24 * 60 * 60 * 1000;
+const DEFAULT_DELETE_STALE_MS = 5 * 60 * 1000;
+const DEFAULT_DELETE_SWEEP_INTERVAL_MS = 60 * 1000;
 const UNSAFE_METADATA_KEYS = new Set([
   "rawrows",
   "rows",
@@ -397,6 +399,14 @@ function studentPurgeFailure(cause) {
   return error;
 }
 
+function studentDeletionFailure(cause) {
+  if (cause?.studentPurgeFailure) return cause;
+  const error = new Error("Student deletion chưa hoàn tất");
+  error.code = String(cause?.code || "STUDENT_DELETE_FAILED").slice(0, 80);
+  error.statusCode = 503;
+  return error;
+}
+
 function assertStudentPurgeCompleted(result, session) {
   if (
     result?.success !== true ||
@@ -416,15 +426,9 @@ function assertStudentPurgeCompleted(result, session) {
 
 async function purgeStudentOperationSession(req, session, forward = forwardJson) {
   if (!session.converterUploadId) {
-    return {
-      success: true,
-      session_id: String(session._id),
-      upload_id: "",
-      raw_upload_deleted: true,
-      local_operation_session_deleted: true,
-      remote_operation_session_deleted: true,
-      operation_session_deleted: true,
-    };
+    const error = new Error("Student session thiếu converter upload binding để purge");
+    error.code = "STUDENT_UPLOAD_BINDING_MISSING";
+    throw error;
   }
   const contextToken = createConversionContextToken({
     userId: session.userId,
@@ -516,17 +520,99 @@ async function getStudentSession(req, res) {
   }
 }
 
+function configuredDeleteStaleMs(env = process.env) {
+  const parsed = Number(env.STUDENT_DELETE_STALE_MS || DEFAULT_DELETE_STALE_MS);
+  return Number.isFinite(parsed) ? Math.min(Math.max(parsed, 30_000), 24 * 60 * 60 * 1000) : DEFAULT_DELETE_STALE_MS;
+}
+
+function staleDeleteTimestamp(session) {
+  const value = session.deleteStartedAt || session.updatedAt;
+  const timestamp = new Date(value || 0).getTime();
+  return Number.isFinite(timestamp) ? timestamp : 0;
+}
+
+function studentDeleteIsStale(session, now = new Date()) {
+  return session.status === "deleting" &&
+    staleDeleteTimestamp(session) <= now.getTime() - configuredDeleteStaleMs();
+}
+
+function studentMetadataFilter(session) {
+  return {
+    sessionId: session._id,
+    userId: session.userId,
+    ownerScope: session.ownerScope,
+    workspaceId: session.workspaceId || null,
+  };
+}
+
+function studentSessionIdentity(session) {
+  return {
+    _id: session._id,
+    userId: session.userId,
+    ownerScope: session.ownerScope,
+    workspaceId: session.workspaceId || null,
+  };
+}
+
+async function markStudentDeleteFailed(
+  session,
+  cause,
+  { sessionModel = StudentFileSession, now = () => new Date() } = {},
+) {
+  const failure = studentDeletionFailure(cause);
+  const failedSession = await sessionModel.findOneAndUpdate(
+    { ...studentSessionIdentity(session), status: "deleting" },
+    {
+      $set: {
+        status: "delete_failed",
+        deleteFailureCode: failure.code,
+        deleteFailedAt: now(),
+      },
+    },
+    { new: true },
+  );
+  return { failedSession, failure };
+}
+
+async function completeStudentDeletion(
+  req,
+  session,
+  {
+    purgeOperationSession = purgeStudentOperationSession,
+    sessionModel = StudentFileSession,
+    questionModel = StudentQuestionEvent,
+    activityModel = StudentActivity,
+  } = {},
+) {
+  try {
+    const purgeResult = await purgeOperationSession(req, session);
+    assertStudentPurgeCompleted(purgeResult, session);
+  } catch (error) {
+    throw studentPurgeFailure(error);
+  }
+  const metadataFilter = studentMetadataFilter(session);
+  await questionModel.deleteMany(metadataFilter);
+  await activityModel.deleteMany(metadataFilter);
+  if (typeof session.deleteOne === "function") await session.deleteOne();
+  else await sessionModel.deleteOne({ ...studentSessionIdentity(session), status: "deleting" });
+}
+
 async function deleteStudentSession(
   req,
   res,
-  { purgeOperationSession = purgeStudentOperationSession } = {},
+  {
+    purgeOperationSession = purgeStudentOperationSession,
+    now = () => new Date(),
+  } = {},
 ) {
   try {
     const session = await findAccessibleSession(req.params.id, req.user._id);
     if (!session) {
       return res.status(404).json({ success: false, message: "Không tìm thấy phiên hỗ trợ" });
     }
-    if (session.status === "deleting") {
+    const currentTime = now();
+    const retryingStaleDelete = studentDeleteIsStale(session, currentTime);
+    if (session.status === "deleting" && !retryingStaleDelete) {
       return res.status(409).json({
         success: false,
         message: "Phiên hỗ trợ đang được xoá",
@@ -537,18 +623,29 @@ async function deleteStudentSession(
       return res.status(410).json({ success: false, message: "Phiên hỗ trợ đã hết hạn" });
     }
     const retryingFailedDelete = session.status === "delete_failed";
-    if (!retryingFailedDelete && !verifySessionContext(req, session, res)) return undefined;
+    if (!retryingFailedDelete && !retryingStaleDelete && !verifySessionContext(req, session, res)) {
+      return undefined;
+    }
+    const statusFilter = retryingFailedDelete
+      ? { status: "delete_failed" }
+      : retryingStaleDelete
+        ? {
+            status: "deleting",
+            [session.deleteStartedAt ? "deleteStartedAt" : "updatedAt"]: {
+              $lte: new Date(currentTime.getTime() - configuredDeleteStaleMs()),
+            },
+          }
+        : { status: { $nin: ["deleting", "delete_failed", "expired", "deleted"] } };
     const deletingSession = await StudentFileSession.findOneAndUpdate(
+      { ...studentSessionIdentity(session), ...statusFilter },
       {
-        _id: session._id,
-        userId: session.userId,
-        ownerScope: session.ownerScope,
-        workspaceId: session.workspaceId || null,
-        status: retryingFailedDelete
-          ? "delete_failed"
-          : { $nin: ["deleting", "delete_failed", "expired", "deleted"] },
+        $set: {
+          status: "deleting",
+          deleteStartedAt: currentTime,
+          deleteFailureCode: "",
+          deleteFailedAt: null,
+        },
       },
-      { $set: { status: "deleting" } },
       { new: true },
     );
     if (!deletingSession) {
@@ -558,54 +655,28 @@ async function deleteStudentSession(
         purge: { completed: false, pending: true, retryable: false, status: "deleting" },
       });
     }
-    const metadataFilter = {
-      sessionId: deletingSession._id,
-      userId: deletingSession.userId,
-      ownerScope: deletingSession.ownerScope,
-      workspaceId: deletingSession.workspaceId || null,
-    };
     try {
-      const purgeResult = await purgeOperationSession(req, deletingSession);
-      assertStudentPurgeCompleted(purgeResult, deletingSession);
+      await completeStudentDeletion(req, deletingSession, { purgeOperationSession });
     } catch (error) {
-      const purgeError = studentPurgeFailure(error);
       let failedSession = null;
+      let failure = studentDeletionFailure(error);
       try {
-        failedSession = await StudentFileSession.findOneAndUpdate(
-          {
-            _id: deletingSession._id,
-            userId: deletingSession.userId,
-            ownerScope: deletingSession.ownerScope,
-            workspaceId: deletingSession.workspaceId || null,
-            status: "deleting",
-          },
-          {
-            $set: {
-              status: "delete_failed",
-              deleteFailureCode: purgeError.code,
-              deleteFailedAt: new Date(),
-            },
-          },
-          { new: true },
-        );
+        ({ failedSession, failure } = await markStudentDeleteFailed(deletingSession, error, { now }));
       } catch (_stateError) {
         failedSession = null;
       }
       return res.status(503).json({
         success: false,
-        message: "Không thể xác nhận đã purge dữ liệu Student tại converter",
+        message: "Không thể hoàn tất xoá dữ liệu Student",
         purge: {
           completed: false,
-          code: purgeError.code,
+          code: failure.code,
           pending: true,
           retryable: Boolean(failedSession),
           status: failedSession ? "delete_failed" : "unknown",
         },
       });
     }
-    await StudentQuestionEvent.deleteMany(metadataFilter);
-    await StudentActivity.deleteMany(metadataFilter);
-    await deletingSession.deleteOne();
     return res.json({ success: true });
   } catch (error) {
     return res.status(500).json({ success: false, message: "Không thể xoá phiên hỗ trợ", error: error.message });
@@ -633,6 +704,20 @@ async function refreshStudentContext(req, res) {
       });
     }
     if (session.status === "deleting") {
+      if (studentDeleteIsStale(session)) {
+        return res.json({
+          success: true,
+          session: serializeStudentSession(session),
+          contextToken: null,
+          purge: {
+            completed: false,
+            pending: true,
+            retryable: true,
+            status: "deleting",
+            code: "STUDENT_DELETE_STALE",
+          },
+        });
+      }
       return res.status(409).json({
         success: false,
         session: serializeStudentSession(session),
@@ -1154,6 +1239,95 @@ async function checkStudentSessionActive(req, res) {
   }
 }
 
+async function sweepStaleStudentDeletions({
+  now = () => new Date(),
+  limit = 25,
+  sessionModel = StudentFileSession,
+  questionModel = StudentQuestionEvent,
+  activityModel = StudentActivity,
+  purgeOperationSession = purgeStudentOperationSession,
+} = {}) {
+  const boundedLimit = Math.min(Math.max(Math.floor(Number(limit) || 25), 1), 100);
+  const currentTime = now();
+  const cutoff = new Date(currentTime.getTime() - configuredDeleteStaleMs());
+  const candidates = await sessionModel.find({
+    $or: [
+      { status: "deleting", deleteStartedAt: { $lte: cutoff } },
+      { status: "deleting", deleteStartedAt: null, updatedAt: { $lte: cutoff } },
+      { status: "delete_failed", deleteFailedAt: { $lte: cutoff } },
+    ],
+  }).sort({ deleteFailedAt: 1, deleteStartedAt: 1, updatedAt: 1 })
+    .limit(boundedLimit)
+    .select("_id status")
+    .lean();
+  const report = { scanned: candidates.length, deleted: 0, failed: 0 };
+  for (const candidate of candidates) {
+    const session = await sessionModel.findOneAndUpdate(
+      {
+        _id: candidate._id,
+        $or: [
+          { status: "deleting", deleteStartedAt: { $lte: cutoff } },
+          { status: "deleting", deleteStartedAt: null, updatedAt: { $lte: cutoff } },
+          { status: "delete_failed", deleteFailedAt: { $lte: cutoff } },
+        ],
+      },
+      {
+        $set: {
+          status: "deleting",
+          deleteStartedAt: currentTime,
+          deleteFailureCode: "",
+          deleteFailedAt: null,
+        },
+      },
+      { new: true },
+    );
+    if (!session) continue;
+    try {
+      await completeStudentDeletion(
+        { requestId: crypto.randomUUID(), headers: {} },
+        session,
+        { purgeOperationSession, sessionModel, questionModel, activityModel },
+      );
+      report.deleted += 1;
+    } catch (error) {
+      report.failed += 1;
+      try {
+        await markStudentDeleteFailed(session, error, { sessionModel, now });
+      } catch {
+        // The next bounded pass can reclaim the stale deleting row.
+      }
+    }
+  }
+  return report;
+}
+
+function startStudentDeletionSweeper({
+  sweep = sweepStaleStudentDeletions,
+  intervalMs = Number(process.env.STUDENT_DELETE_SWEEP_INTERVAL_MS || DEFAULT_DELETE_SWEEP_INTERVAL_MS),
+  setIntervalImpl = setInterval,
+  clearIntervalImpl = clearInterval,
+  logger = console,
+} = {}) {
+  const boundedInterval = Math.min(Math.max(Number(intervalMs) || DEFAULT_DELETE_SWEEP_INTERVAL_MS, 30_000), 60 * 60 * 1000);
+  let running = false;
+  const run = async () => {
+    if (running) return null;
+    running = true;
+    try {
+      return await sweep();
+    } catch (error) {
+      logger.error(`[STUDENT_DELETE_SWEEP] failed code=${String(error?.code || "STUDENT_DELETE_SWEEP_FAILED").slice(0, 80)}`);
+      return null;
+    } finally {
+      running = false;
+    }
+  };
+  const ready = run();
+  const timer = setIntervalImpl(run, boundedInterval);
+  timer?.unref?.();
+  return { ready, stop: () => clearIntervalImpl(timer) };
+}
+
 module.exports = {
   checkStudentSessionActive,
   cleanAnalysisCompletedPayload,
@@ -1175,6 +1349,8 @@ module.exports = {
   serializeStudentSession,
   sessionIsExpired,
   sessionIsOwnedByUser,
+  startStudentDeletionSweeper,
   studentContextMatchesSession,
   studentContextScopesFromFlags,
+  sweepStaleStudentDeletions,
 };

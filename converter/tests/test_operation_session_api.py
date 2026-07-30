@@ -115,7 +115,7 @@ def test_health_capabilities_are_fixed_booleans():
     assert payload["capabilities"]["operations"] is True
 
 
-def test_node_operation_store_client_deletes_bound_remote_state(monkeypatch):
+def test_node_operation_store_client_purges_all_bound_remote_artifacts(monkeypatch):
     from app.operation_store_client import NodeOperationStoreClient
 
     client = object.__new__(NodeOperationStoreClient)
@@ -132,18 +132,21 @@ def test_node_operation_store_client_deletes_bound_remote_state(monkeypatch):
             "success": True,
             "session_id": "session-1",
             "run_id": "student:session-1",
+            "purge_scope": "all_artifacts",
+            "remaining_metadata": 0,
+            "remaining_bytes": 0,
             "remote_operation_session_deleted": True,
         },
     )
 
-    result = client.delete_state(
+    result = client.delete_session_artifacts(
         session_id="session-1",
         run_id="student:session-1",
     )
 
     assert captured == {
         "method": "DELETE",
-        "path": "/converter-sessions/session-1/state",
+        "path": "/converter-sessions/session-1/artifacts",
         "params": {"run_id": "student:session-1"},
     }
     assert result["remote_operation_session_deleted"] is True
@@ -517,11 +520,14 @@ def test_student_operation_purge_removes_local_state_but_fails_closed_on_remote_
             return {"session": {"revision": payload["revision"]}}
 
         @staticmethod
-        def delete_state(**payload):
+        def delete_session_artifacts(**payload):
             return {
                 "success": True,
                 "session_id": payload["session_id"],
                 "run_id": payload["run_id"],
+                "purge_scope": "all_artifacts",
+                "remaining_metadata": 1,
+                "remaining_bytes": 0,
                 "remote_operation_session_deleted": False,
             }
 

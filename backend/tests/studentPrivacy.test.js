@@ -10,6 +10,7 @@ const {
   recordStudentActivity,
   recordStudentQuestionEvent,
   refreshStudentContext,
+  sweepStaleStudentDeletions,
 } = require("../controllers/studentSessionController");
 const {
   createStudentContextToken,
@@ -689,7 +690,10 @@ test("manual session deletion cascades question and activity metadata first", as
   };
   StudentFileSession.findOne = async () => session;
   StudentFileSession.findOneAndUpdate = async (_filter, update) => {
-    assert.deepEqual(update, { $set: { status: "deleting" } });
+    assert.equal(update.$set.status, "deleting");
+    assert.ok(update.$set.deleteStartedAt instanceof Date);
+    assert.equal(update.$set.deleteFailureCode, "");
+    assert.equal(update.$set.deleteFailedAt, null);
     order.push("session-deleting");
     session.status = "deleting";
     return session;
@@ -807,6 +811,28 @@ test("Student delete converter contract is owner-bound and metadata-only", async
   });
 });
 
+test("Student purge never fabricates success without converterUploadId", async () => {
+  let forwarded = false;
+  await assert.rejects(
+    purgeStudentOperationSession(
+      { requestId: "student-delete-request" },
+      {
+        _id: "507f1f77bcf86cd799439011",
+        userId: "507f1f77bcf86cd799439012",
+        workspaceId: null,
+        ownerScope: "user:507f1f77bcf86cd799439012",
+        converterUploadId: "",
+        targetTemplateId: "bsn_sales",
+      },
+      async () => {
+        forwarded = true;
+      },
+    ),
+    (error) => error.code === "STUDENT_UPLOAD_BINDING_MISSING",
+  );
+  assert.equal(forwarded, false);
+});
+
 test("manual Student delete fails closed when converter purge is unavailable", async () => {
   const session = {
     _id: "507f1f77bcf86cd799439011",
@@ -868,6 +894,134 @@ test("manual Student delete fails closed when converter purge is unavailable", a
     });
     assert.equal(session.status, "delete_failed");
     assert.equal(metadataDeletes, 0);
+  } finally {
+    StudentFileSession.findOne = originals.findOne;
+    StudentFileSession.findOneAndUpdate = originals.findOneAndUpdate;
+    StudentQuestionEvent.deleteMany = originals.questions;
+    StudentActivity.deleteMany = originals.activities;
+  }
+});
+
+test("Student delete marks delete_failed when metadata deletion fails after purge", async () => {
+  const session = {
+    _id: "507f1f77bcf86cd799439011",
+    userId: "507f1f77bcf86cd799439012",
+    workspaceId: null,
+    ownerScope: "user:507f1f77bcf86cd799439012",
+    converterUploadId: "student-upload-1",
+    status: "analyzed",
+    retentionExpiresAt: new Date(Date.now() + 60_000),
+    deleteOne: async () => { throw new Error("parent must remain retryable"); },
+  };
+  const token = createStudentContextToken({
+    sessionId: session._id,
+    userId: session.userId,
+    ownerScope: session.ownerScope,
+    allowedScopes: ["analyze"],
+    retentionExpiresAt: session.retentionExpiresAt,
+  });
+  const originals = {
+    findOne: StudentFileSession.findOne,
+    findOneAndUpdate: StudentFileSession.findOneAndUpdate,
+    questions: StudentQuestionEvent.deleteMany,
+    activities: StudentActivity.deleteMany,
+  };
+  StudentFileSession.findOne = async () => session;
+  StudentFileSession.findOneAndUpdate = async (_filter, update) => {
+    Object.assign(session, update.$set || {});
+    return session;
+  };
+  StudentQuestionEvent.deleteMany = async () => ({ deletedCount: 1 });
+  StudentActivity.deleteMany = async () => {
+    throw new Error("activity metadata unavailable");
+  };
+
+  try {
+    const response = responseRecorder();
+    await deleteStudentSession(
+      {
+        params: { id: session._id },
+        user: { _id: session.userId },
+        headers: { "x-student-context": token },
+      },
+      response,
+      {
+        purgeOperationSession: async () => ({
+          success: true,
+          session_id: String(session._id),
+          upload_id: session.converterUploadId,
+          raw_upload_deleted: true,
+          local_operation_session_deleted: true,
+          remote_operation_session_deleted: true,
+          operation_session_deleted: true,
+        }),
+      },
+    );
+
+    assert.equal(response.statusCode, 503);
+    assert.equal(response.body.purge.pending, true);
+    assert.equal(response.body.purge.retryable, true);
+    assert.equal(response.body.purge.status, "delete_failed");
+    assert.equal(response.body.purge.code, "STUDENT_DELETE_FAILED");
+    assert.equal(session.status, "delete_failed");
+  } finally {
+    StudentFileSession.findOne = originals.findOne;
+    StudentFileSession.findOneAndUpdate = originals.findOneAndUpdate;
+    StudentQuestionEvent.deleteMany = originals.questions;
+    StudentActivity.deleteMany = originals.activities;
+  }
+});
+
+test("owner can retry a stale deleting session with fresh internal cleanup", async () => {
+  const now = new Date();
+  const session = {
+    _id: "507f1f77bcf86cd799439011",
+    userId: "507f1f77bcf86cd799439012",
+    workspaceId: null,
+    ownerScope: "user:507f1f77bcf86cd799439012",
+    converterUploadId: "student-upload-1",
+    status: "deleting",
+    deleteStartedAt: new Date(now.getTime() - 10 * 60_000),
+    retentionExpiresAt: new Date(now.getTime() + 60_000),
+    deleteOne: async () => { session.deleted = true; },
+  };
+  const originals = {
+    findOne: StudentFileSession.findOne,
+    findOneAndUpdate: StudentFileSession.findOneAndUpdate,
+    questions: StudentQuestionEvent.deleteMany,
+    activities: StudentActivity.deleteMany,
+  };
+  StudentFileSession.findOne = async () => session;
+  StudentFileSession.findOneAndUpdate = async (filter, update) => {
+    assert.equal(filter.status, "deleting");
+    assert.ok(filter.deleteStartedAt.$lte instanceof Date);
+    Object.assign(session, update.$set || {});
+    return session;
+  };
+  StudentQuestionEvent.deleteMany = async () => ({ deletedCount: 0 });
+  StudentActivity.deleteMany = async () => ({ deletedCount: 0 });
+
+  try {
+    const response = responseRecorder();
+    await deleteStudentSession(
+      { params: { id: session._id }, user: { _id: session.userId }, headers: {} },
+      response,
+      {
+        now: () => now,
+        purgeOperationSession: async () => ({
+          success: true,
+          session_id: String(session._id),
+          upload_id: session.converterUploadId,
+          raw_upload_deleted: true,
+          local_operation_session_deleted: true,
+          remote_operation_session_deleted: true,
+          operation_session_deleted: true,
+        }),
+      },
+    );
+
+    assert.equal(response.statusCode, 200);
+    assert.equal(session.deleted, true);
   } finally {
     StudentFileSession.findOne = originals.findOne;
     StudentFileSession.findOneAndUpdate = originals.findOneAndUpdate;
@@ -1076,6 +1230,98 @@ test("refresh reports delete_failed as retryable without issuing usable context"
   }
 });
 
+test("refresh truthfully reports stale deleting as retryable without context", async () => {
+  const session = {
+    _id: "507f1f77bcf86cd799439011",
+    userId: "507f1f77bcf86cd799439012",
+    workspaceId: null,
+    ownerScope: "user:507f1f77bcf86cd799439012",
+    status: "deleting",
+    deleteStartedAt: new Date(Date.now() - 10 * 60_000),
+    retentionExpiresAt: new Date(Date.now() + 60_000),
+    file: { originalName: "sales.xlsx", sizeBytes: 1, rawRetained: false },
+  };
+  const originalFindOne = StudentFileSession.findOne;
+  StudentFileSession.findOne = async () => session;
+  try {
+    const response = responseRecorder();
+    await refreshStudentContext(
+      { params: { id: session._id }, user: { _id: session.userId }, headers: {} },
+      response,
+    );
+    assert.equal(response.statusCode, 200);
+    assert.equal(response.body.contextToken, null);
+    assert.deepEqual(response.body.purge, {
+      completed: false,
+      pending: true,
+      retryable: true,
+      status: "deleting",
+      code: "STUDENT_DELETE_STALE",
+    });
+  } finally {
+    StudentFileSession.findOne = originalFindOne;
+  }
+});
+
+test("bounded Student deletion sweeper retries stale jobs with fresh cleanup", async () => {
+  const now = new Date("2026-07-31T00:10:00.000Z");
+  const session = {
+    _id: "507f1f77bcf86cd799439011",
+    userId: "507f1f77bcf86cd799439012",
+    workspaceId: null,
+    ownerScope: "user:507f1f77bcf86cd799439012",
+    converterUploadId: "student-upload-1",
+    targetTemplateId: "bsn_sales",
+    status: "deleting",
+    deleteStartedAt: new Date("2026-07-31T00:00:00.000Z"),
+  };
+  let queryLimit;
+  let parentDeletes = 0;
+  const sessionModel = {
+    find() {
+      return {
+        sort() { return this; },
+        limit(value) { queryLimit = value; return this; },
+        select() { return this; },
+        lean: async () => [{ _id: session._id, status: session.status }],
+      };
+    },
+    async findOneAndUpdate(_filter, update) {
+      Object.assign(session, update.$set || {});
+      return session;
+    },
+    async deleteOne() {
+      parentDeletes += 1;
+      return { deletedCount: 1 };
+    },
+  };
+  let purgeCalls = 0;
+  const report = await sweepStaleStudentDeletions({
+    now: () => now,
+    limit: 2,
+    sessionModel,
+    questionModel: { deleteMany: async () => ({ deletedCount: 0 }) },
+    activityModel: { deleteMany: async () => ({ deletedCount: 0 }) },
+    purgeOperationSession: async (_req, deletingSession) => {
+      purgeCalls += 1;
+      return {
+        success: true,
+        session_id: String(deletingSession._id),
+        upload_id: deletingSession.converterUploadId,
+        raw_upload_deleted: true,
+        local_operation_session_deleted: true,
+        remote_operation_session_deleted: true,
+        operation_session_deleted: true,
+      };
+    },
+  });
+
+  assert.equal(queryLimit, 2);
+  assert.equal(purgeCalls, 1);
+  assert.equal(parentDeletes, 1);
+  assert.deepEqual(report, { scanned: 1, deleted: 1, failed: 0 });
+});
+
 test("delete racing authorized question and activity writes leaves no orphan", async () => {
   process.env.CONVERTER_SERVICE_TOKEN = "converter-service-secret";
   const sessionId = "507f1f77bcf86cd799439011";
@@ -1233,9 +1479,31 @@ function startupOptions(overrides = {}) {
     migrateMappingProfilesV2: async () => ({ skipped: true }),
     listen: () => ({ once() {} }),
     logger: { error() {}, log() {} },
+    startStudentDeletionSweeper: () => null,
     ...overrides,
   };
 }
+
+test("Student startup wires stale deletion retry sweeper only when enabled", async () => {
+  let starts = 0;
+  await createStartServer(startupOptions({
+    studentEnabled: true,
+    startStudentDeletionSweeper: () => {
+      starts += 1;
+      return { stop() {} };
+    },
+  }))();
+  assert.equal(starts, 1);
+
+  await createStartServer(startupOptions({
+    studentEnabled: false,
+    startStudentDeletionSweeper: () => {
+      starts += 1;
+      return { stop() {} };
+    },
+  }))();
+  assert.equal(starts, 1);
+});
 
 test("feature-off startup performs zero Student migration or model loading", async () => {
   const previousMode = process.env.STUDENT_PRIVACY_MIGRATION_MODE;

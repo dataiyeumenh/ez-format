@@ -925,7 +925,7 @@ class OperationStore:
         if self._remote_client is not None:
             run_id = self._remote_run_id
             try:
-                result = self._remote_client.delete_state(
+                result = self._remote_client.delete_session_artifacts(
                     session_id=session_id,
                     run_id=run_id,
                 )
@@ -933,6 +933,9 @@ class OperationStore:
                     result.get("success") is True
                     and str(result.get("session_id") or "") == str(session_id)
                     and str(result.get("run_id") or "") == str(run_id)
+                    and result.get("purge_scope") == "all_artifacts"
+                    and result.get("remaining_metadata") == 0
+                    and result.get("remaining_bytes") == 0
                     and result.get("remote_operation_session_deleted") is True
                 )
             except Exception:
@@ -952,7 +955,7 @@ class OperationStore:
             return
         run_id = self._remote_run_id or self._run_id_from_session(session)
         try:
-            self._remote_client.delete_state(
+            self._remote_client.delete_session_artifacts(
                 session_id=session.session_id,
                 run_id=run_id,
             )

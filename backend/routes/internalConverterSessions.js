@@ -3,8 +3,8 @@ const crypto = require("node:crypto");
 const { pipeline } = require("node:stream/promises");
 const { verifyConversionContextToken } = require("../services/conversionContextService");
 const {
-  deleteArtifact,
   getArtifact,
+  purgeSessionArtifacts,
   putArtifact,
 } = require("../services/conversionArtifactService");
 
@@ -60,25 +60,47 @@ function binding(claims, sessionId, runId, kind, revision) {
   };
 }
 
-async function deleteOperationState({
+function operationBinding(claims, sessionId, runId) {
+  const { kind: _kind, revision: _revision, ...operation } = binding(
+    claims,
+    sessionId,
+    runId,
+    "state",
+  );
+  return operation;
+}
+
+async function deleteOperationArtifacts({
   claims,
   sessionId,
   runId,
-  revision,
-  deleteArtifactFn = deleteArtifact,
+  purgeArtifactsFn = purgeSessionArtifacts,
 }) {
-  try {
-    await deleteArtifactFn(binding(claims, sessionId, runId, "state", revision));
-  } catch (error) {
-    if (![404, 410].includes(error?.statusCode)) throw error;
+  const result = await purgeArtifactsFn(operationBinding(claims, sessionId, runId));
+  if (
+    result?.success !== true ||
+    result?.purgeScope !== "all_artifacts" ||
+    result?.remainingMetadata !== 0 ||
+    result?.remainingBytes !== 0
+  ) {
+    const error = new Error("Operation artifact purge did not prove zero remaining data");
+    error.statusCode = 503;
+    error.code = "OPERATION_ARTIFACT_PURGE_INCOMPLETE";
+    throw error;
   }
   return {
     success: true,
     session_id: sessionId,
     run_id: runId,
+    purge_scope: "all_artifacts",
+    deleted_artifacts: Number(result.deletedArtifacts || 0),
+    remaining_metadata: 0,
+    remaining_bytes: 0,
     remote_operation_session_deleted: true,
   };
 }
+
+const deleteOperationState = deleteOperationArtifacts;
 
 function asyncRoute(handler) {
   return (req, res, next) => Promise.resolve(handler(req, res, next)).catch((error) => {
@@ -118,8 +140,14 @@ router.delete("/:sessionId/state", asyncRoute(async (req, res) => {
     claims,
     sessionId,
     runId,
-    revision: req.query.revision,
   }));
+}));
+
+router.delete("/:sessionId/artifacts", asyncRoute(async (req, res) => {
+  const sessionId = String(req.params.sessionId);
+  const runId = String(req.query.run_id || "");
+  const claims = internalContext(req, sessionId, runId);
+  return res.json(await deleteOperationArtifacts({ claims, sessionId, runId }));
 }));
 
 router.put("/:sessionId/artifacts/:kind", asyncRoute(async (req, res) => {
@@ -150,4 +178,5 @@ router.get("/:sessionId/artifacts/:kind", asyncRoute(async (req, res) => {
 
 module.exports = router;
 module.exports.asyncRoute = asyncRoute;
+module.exports.deleteOperationArtifacts = deleteOperationArtifacts;
 module.exports.deleteOperationState = deleteOperationState;

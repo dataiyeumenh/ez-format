@@ -64,7 +64,13 @@ class MongoGridFsArtifactStorageAdapter {
     const upload = this.bucket.openUploadStream("temporary", {
       metadata: {
         ownerScope: String(metadata.ownerScope || "").trim(),
+        userId: String(metadata.userId || "").trim(),
+        sessionId: String(metadata.sessionId || "").trim(),
         runId: String(metadata.runId || "").trim(),
+        uploadId: String(metadata.uploadId || "").trim(),
+        targetTemplateId: String(metadata.targetTemplateId || "").trim(),
+        kind: String(metadata.kind || "").trim(),
+        revision: Number(metadata.revision),
         mime: String(metadata.mime || metadata.contentType || "application/octet-stream").trim(),
         createdAt: this.now(),
       },
@@ -158,6 +164,18 @@ class MongoGridFsArtifactStorageAdapter {
       if (error?.code === "ENOENT" || error?.code === 26) return { deleted: false };
       throw artifactError(503, "GridFS artifact delete failed", "GRIDFS_DELETE_FAILED");
     }
+  }
+
+  async findArtifactsByBinding(binding, { limit = 100 } = {}) {
+    if (typeof this.bucket.find !== "function") {
+      throw artifactError(503, "GridFS artifact verification is unavailable", "GRIDFS_VERIFY_FAILED");
+    }
+    const boundedLimit = Math.min(Math.max(Number(limit) || 100, 1), 1000);
+    const files = await this.bucket.find({
+      "metadata.ownerScope": String(binding.ownerScope || "").trim(),
+      "metadata.runId": String(binding.runId || "").trim(),
+    }).limit(boundedLimit).toArray();
+    return files.map((file) => ({ objectId: file._id }));
   }
 
   async _findFile(objectId) {

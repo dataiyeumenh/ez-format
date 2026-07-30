@@ -4,7 +4,12 @@ from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Any
 
-from app.student_anonymization import scan_confidential_values
+from app.student_anonymization import (
+    AnonymizationSession,
+    sanitize_conservative_value,
+    scan_confidential_values,
+    scan_export_pii_independently,
+)
 
 
 class ReportValidationError(ValueError):
@@ -28,20 +33,34 @@ def build_internship_markdown_report(
     activity_ids: Iterable[str],
     approved_notes: Iterable[str],
     confidential_values: Mapping[str, Iterable[Any]],
+    anonymization_session: AnonymizationSession,
 ) -> str:
-    """Render a report solely from trusted activities and explicitly approved notes."""
-    selected_activities = _select_verified_activities(
-        signed_session_metadata,
-        activity_ids,
+    """Render a scanner-gated report from verified, conservatively sanitized inputs."""
+    selected_activities = _sanitize_activities(
+        _select_verified_activities(signed_session_metadata, activity_ids),
+        anonymization_session,
+        confidential_values,
     )
-    metadata = _safe_file_metadata(file_metadata)
-    notes = _approved_notes(approved_notes)
+    metadata = _sanitize_file_metadata(
+        _safe_file_metadata(file_metadata),
+        anonymization_session,
+        confidential_values,
+    )
+    notes = [
+        _sanitize_report_text(
+            note,
+            anonymization_session,
+            confidential_values,
+        )
+        for note in _approved_notes(approved_notes)
+    ]
     render_payload = {
         "file_metadata": metadata,
         "activities": selected_activities,
         "approved_notes": notes,
     }
     _reject_confidential_values(render_payload, confidential_values)
+    _reject_independent_pii(render_payload)
 
     lines = ["# Internship Handoff Report", "", "## File metadata"]
     lines.extend(f"- {label}: {_markdown_text(value)}" for label, value in metadata.items())
@@ -85,6 +104,7 @@ def build_internship_markdown_report(
     )
     report = "\n".join(lines) + "\n"
     _reject_confidential_values(report, confidential_values)
+    _reject_independent_pii(report)
     return report
 
 
@@ -176,6 +196,70 @@ def _approved_notes(notes: Iterable[str]) -> list[str]:
     return approved
 
 
+def _sanitize_activities(
+    activities: Iterable[Mapping[str, Any]],
+    session: AnonymizationSession,
+    confidential_values: Mapping[str, Iterable[Any]],
+) -> list[dict[str, Any]]:
+    sanitized = []
+    for activity in activities:
+        sanitized.append(
+            {
+                **activity,
+                "event_type": _sanitize_report_text(
+                    activity["event_type"], session, confidential_values, policy="code"
+                ),
+                "skill": _sanitize_report_text(
+                    activity["skill"], session, confidential_values, policy="code"
+                ),
+                "summary": _sanitize_report_text(
+                    activity["summary"], session, confidential_values
+                ),
+                "resolved_issues": [
+                    _sanitize_report_text(issue, session, confidential_values)
+                    for issue in activity["resolved_issues"]
+                ],
+            }
+        )
+    return sanitized
+
+
+def _sanitize_file_metadata(
+    metadata: Mapping[str, str],
+    session: AnonymizationSession,
+    confidential_values: Mapping[str, Iterable[Any]],
+) -> dict[str, str]:
+    numeric_labels = {"Worksheet count", "Row count"}
+    return {
+        label: str(
+            _sanitize_report_text(
+                value,
+                session,
+                confidential_values,
+                policy="number" if label in numeric_labels else "code",
+            )
+        )
+        for label, value in metadata.items()
+    }
+
+
+def _sanitize_report_text(
+    value: Any,
+    session: AnonymizationSession,
+    confidential_values: Mapping[str, Iterable[Any]],
+    *,
+    policy: str = "free_text",
+) -> str:
+    return str(
+        sanitize_conservative_value(
+            value,
+            session,
+            confidential_values,
+            policy=policy,
+        )
+    )
+
+
 def _skill_summary(activities: Iterable[Mapping[str, Any]]) -> dict[str, tuple[int, int]]:
     summary: dict[str, tuple[int, int]] = {}
     for activity in activities:
@@ -193,6 +277,17 @@ def _reject_confidential_values(
     if matches:
         raise ReportValidationError(
             "report contains confidential values in: " + ", ".join(matches)
+        )
+
+
+def _reject_independent_pii(payload: Any) -> None:
+    try:
+        matches = scan_export_pii_independently(payload)
+    except Exception as exc:
+        raise ReportValidationError("report privacy post-scan failed closed") from exc
+    if matches:
+        raise ReportValidationError(
+            "report privacy post-scan detected: " + ", ".join(matches)
         )
 
 

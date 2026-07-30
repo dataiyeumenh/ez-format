@@ -49,6 +49,22 @@ function repository() {
         .filter((item) => item.status === "deletion_pending" || (item.status === "available" && item.expiresAt <= now))
         .slice(0, limit);
     },
+    async findSessionArtifacts(binding, { limit }) {
+      return documents.filter(
+        (item) =>
+          item.ownerScope === binding.ownerScope &&
+          item.userId === binding.userId &&
+          item.sessionId === binding.sessionId &&
+          item.runId === binding.runId &&
+          item.uploadId === binding.uploadId &&
+          item.targetTemplateId === binding.targetTemplateId,
+      ).slice(0, limit);
+    },
+    async deleteMetadata(objectId) {
+      const index = documents.findIndex((item) => item.gridFsObjectId === objectId);
+      if (index >= 0) documents.splice(index, 1);
+      return { deletedCount: index >= 0 ? 1 : 0 };
+    },
     async createTombstone(metadata) {
       tombstones.push(metadata);
       return metadata;
@@ -58,6 +74,7 @@ function repository() {
 
 function storage() {
   const objects = new Map();
+  const bindings = new Map();
   let id = 1;
   return {
     objects,
@@ -65,6 +82,7 @@ function storage() {
     async putArtifact(input) {
       const objectId = `object-${id++}`;
       objects.set(objectId, Buffer.from(input.bytes));
+      bindings.set(objectId, { ...(input.metadata || {}) });
       return {
         objectId,
         sha256: require("node:crypto").createHash("sha256").update(input.bytes).digest("hex"),
@@ -78,7 +96,16 @@ function storage() {
     async deleteArtifact({ objectId }) {
       if (this.failDeletes) throw new Error("delete failed");
       objects.delete(objectId);
+      bindings.delete(objectId);
       return { deleted: true };
+    },
+    async findArtifactsByBinding(binding) {
+      return [...bindings.entries()]
+        .filter(([, metadata]) =>
+          metadata.ownerScope === binding.ownerScope &&
+          metadata.runId === binding.runId
+        )
+        .map(([objectId]) => ({ objectId }));
     },
   };
 }
@@ -161,6 +188,43 @@ const binding = {
   expiresAt: new Date(Date.now() + 60_000),
   contentType: "application/octet-stream",
 };
+
+test("all-artifact purge removes every revision, kind, metadata row, and byte", async () => {
+  const repo = repository();
+  const backend = storage();
+  const service = createConversionArtifactService({ repository: repo, storageAdapter: backend });
+  await service.putArtifact({ ...binding, kind: "state", content: Buffer.from("state-1") });
+  await service.putArtifact({ ...binding, kind: "state", revision: 2, content: Buffer.from("state-2") });
+  await service.putArtifact({ ...binding, kind: "output", content: Buffer.from("output-1") });
+  await service.putArtifact({ ...binding, kind: "upload", content: Buffer.from("upload-1") });
+
+  const result = await service.purgeSessionArtifacts(binding);
+
+  assert.deepEqual(result, {
+    success: true,
+    purgeScope: "all_artifacts",
+    deletedArtifacts: 4,
+    remainingMetadata: 0,
+    remainingBytes: 0,
+  });
+  assert.equal(repo.documents.length, 0);
+  assert.equal(backend.objects.size, 0);
+});
+
+test("all-artifact purge fails closed when byte deletion is pending", async () => {
+  const repo = repository();
+  const backend = storage();
+  const service = createConversionArtifactService({ repository: repo, storageAdapter: backend });
+  await service.putArtifact({ ...binding, kind: "state", content: Buffer.from("state") });
+  backend.failDeletes = true;
+
+  await assert.rejects(
+    service.purgeSessionArtifacts(binding),
+    (error) => error.code === "ARTIFACT_PURGE_INCOMPLETE" && error.statusCode === 503,
+  );
+  assert.equal(repo.documents.length, 1);
+  assert.equal(backend.objects.size, 1);
+});
 
 test("artifact service binds metadata, validates checksum, and compensates storage on metadata failure", async () => {
   const repo = repository();

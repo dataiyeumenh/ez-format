@@ -66,6 +66,21 @@ function createMongooseArtifactRepository(Model = ConversionArtifact) {
       }).sort({ purgeAt: 1, expiresAt: 1 }).limit(limit);
       return documents.map(plain);
     },
+    async findSessionArtifacts(binding, { limit }) {
+      const documents = await Model.find({
+        tombstoneOnly: false,
+        ownerScope: binding.ownerScope,
+        userId: binding.userId,
+        sessionId: binding.sessionId,
+        runId: binding.runId,
+        uploadId: binding.uploadId,
+        targetTemplateId: binding.targetTemplateId,
+      }).sort({ _id: 1 }).limit(limit);
+      return documents.map(plain);
+    },
+    async deleteMetadata(gridFsObjectId) {
+      return Model.deleteOne({ gridFsObjectId, tombstoneOnly: false });
+    },
   };
 }
 
@@ -82,6 +97,15 @@ function normalizeBinding(input) {
   };
   if (!ARTIFACT_KINDS.has(binding.kind)) throw storageError(400, "Artifact kind is invalid", "INVALID_ARTIFACT_KIND");
   if (binding.revision != null && (!Number.isSafeInteger(binding.revision) || binding.revision < 1)) throw storageError(400, "Artifact revision is invalid", "INVALID_ARTIFACT_REVISION");
+  return binding;
+}
+
+function normalizeSessionBinding(input) {
+  const { kind: _kind, revision: _revision, ...binding } = normalizeBinding({
+    ...input,
+    kind: "state",
+    revision: null,
+  });
   return binding;
 }
 
@@ -103,6 +127,8 @@ function createConversionArtifactService({
   now = () => new Date(),
   maxBytes = configuredMaxBytes(),
   tombstoneRetentionMs = DEFAULT_TOMBSTONE_RETENTION_MS,
+  purgeBatchSize = 100,
+  purgeMaxArtifacts = 10_000,
 } = {}) {
   if (!storageAdapter) throw new Error("MongoDB/GridFS artifact adapter is required");
 
@@ -157,7 +183,12 @@ function createConversionArtifactService({
     try {
       uploaded = await storageAdapter.putArtifact({
         bytes: input.bytes || input.content,
-        metadata: { ownerScope: binding.ownerScope, runId: binding.runId, mime: input.mime || input.contentType, sha256: expectedSha256, sizeBytes: input.sizeBytes },
+        metadata: {
+          ...binding,
+          mime: input.mime || input.contentType,
+          sha256: expectedSha256,
+          sizeBytes: input.sizeBytes,
+        },
       });
     } catch (error) {
       if (error?.orphanedArtifact) await createCleanupTombstone(error.orphanedArtifact, expiresAt);
@@ -263,6 +294,88 @@ function createConversionArtifactService({
     }
   }
 
+  function purgeIncomplete(message, cause) {
+    const error = storageError(503, message, "ARTIFACT_PURGE_INCOMPLETE");
+    if (cause) error.cause = cause;
+    return error;
+  }
+
+  async function verifiedByteMatches(binding, limit) {
+    if (typeof storageAdapter.findArtifactsByBinding !== "function") {
+      throw purgeIncomplete("Artifact byte verification is unavailable");
+    }
+    const matches = await storageAdapter.findArtifactsByBinding(binding, { limit });
+    if (!Array.isArray(matches)) {
+      throw purgeIncomplete("Artifact byte verification returned an invalid result");
+    }
+    return matches;
+  }
+
+  async function purgeSessionArtifacts(input) {
+    const binding = normalizeSessionBinding(input);
+    const batchSize = Math.min(Math.max(Number(purgeBatchSize) || 100, 1), 1000);
+    const maxArtifacts = Math.min(Math.max(Number(purgeMaxArtifacts) || 10_000, 1), 100_000);
+    let deletedArtifacts = 0;
+    try {
+      while (true) {
+        const artifacts = await repository.findSessionArtifacts(binding, { limit: batchSize });
+        if (!Array.isArray(artifacts)) {
+          throw purgeIncomplete("Artifact metadata verification returned an invalid result");
+        }
+        if (artifacts.length === 0) break;
+        if (deletedArtifacts + artifacts.length > maxArtifacts) {
+          throw purgeIncomplete("Artifact purge exceeded the bounded maximum");
+        }
+        for (const metadata of artifacts) {
+          assertBinding(metadata, { ...binding, kind: metadata.kind, revision: metadata.revision });
+          await markDeletionPending(metadata);
+          await storageAdapter.deleteArtifact({ objectId: metadata.gridFsObjectId });
+          if (await storageAdapter.getArtifact({ objectId: metadata.gridFsObjectId })) {
+            throw purgeIncomplete("Artifact bytes remain after deletion");
+          }
+          const removed = await repository.deleteMetadata(metadata.gridFsObjectId);
+          if (Number(removed?.deletedCount || 0) !== 1) {
+            throw purgeIncomplete("Artifact metadata remains after deletion");
+          }
+          deletedArtifacts += 1;
+        }
+      }
+
+      let remainingBytes = await verifiedByteMatches(binding, batchSize);
+      while (remainingBytes.length > 0) {
+        if (deletedArtifacts + remainingBytes.length > maxArtifacts) {
+          throw purgeIncomplete("Artifact byte purge exceeded the bounded maximum");
+        }
+        for (const artifact of remainingBytes) {
+          const objectId = artifact?.objectId ?? artifact?._id;
+          if (objectId == null) throw purgeIncomplete("Artifact byte match has no object ID");
+          await storageAdapter.deleteArtifact({ objectId });
+          if (await storageAdapter.getArtifact({ objectId })) {
+            throw purgeIncomplete("Unlinked artifact bytes remain after deletion");
+          }
+          deletedArtifacts += 1;
+        }
+        remainingBytes = await verifiedByteMatches(binding, batchSize);
+      }
+
+      const remainingMetadata = await repository.findSessionArtifacts(binding, { limit: 1 });
+      const finalBytes = await verifiedByteMatches(binding, 1);
+      if (remainingMetadata.length || finalBytes.length) {
+        throw purgeIncomplete("Operation artifact purge could not prove zero remaining data");
+      }
+      return {
+        success: true,
+        purgeScope: "all_artifacts",
+        deletedArtifacts,
+        remainingMetadata: 0,
+        remainingBytes: 0,
+      };
+    } catch (error) {
+      if (error?.code === "ARTIFACT_PURGE_INCOMPLETE") throw error;
+      throw purgeIncomplete("Operation artifact purge did not complete", error);
+    }
+  }
+
   async function sweepExpiredArtifacts({ limit = 100 } = {}) {
     const candidates = await repository.findExpired({ now: now(), limit: Math.min(Math.max(Number(limit) || 100, 1), 1000) });
     let deleted = 0;
@@ -287,7 +400,13 @@ function createConversionArtifactService({
     return { scanned: candidates.length, deleted, pending, failures };
   }
 
-  return { putArtifact, getArtifact, deleteArtifact, sweepExpiredArtifacts };
+  return {
+    putArtifact,
+    getArtifact,
+    deleteArtifact,
+    purgeSessionArtifacts,
+    sweepExpiredArtifacts,
+  };
 }
 
 let defaultService;
@@ -361,6 +480,7 @@ module.exports = {
   deleteArtifact: (...args) => activeService().deleteArtifact(...args),
   ensureConversionArtifactIndexes,
   getArtifact: (...args) => activeService().getArtifact(...args),
+  purgeSessionArtifacts: (...args) => activeService().purgeSessionArtifacts(...args),
   putArtifact: (...args) => activeService().putArtifact(...args),
   startConversionArtifactSweeper,
   sweepExpiredArtifacts: (...args) => activeService().sweepExpiredArtifacts(...args),

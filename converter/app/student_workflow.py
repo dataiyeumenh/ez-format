@@ -111,62 +111,42 @@ def analyze_student_file(
     claims = _student_claims(context_token, "analyze")
     _student_claims(context_token, "explain")
     operation_binding = _student_operation_binding(claims, operation_context_token)
+    cleanup_upload_id = str(operation_binding.get("preallocated_upload_id") or "")
+    production_sync_required = operation_context_required()
     try:
         with claim_student_analysis(claims):
             assert_no_student_upload_for_session(claims)
-            try:
-                analyzed = analyze_upload(
-                    filename=filename,
-                    content=content,
-                    requested_target_template_id=target_template_id,
-                    student_context_token=context_token,
-                    operation_context_token=operation_context_token,
-                    **operation_binding,
-                )
-            except ValueError as exc:
-                raise StudentWorkflowError(400, str(exc)) from exc
+            analyzed = analyze_upload(
+                filename=filename,
+                content=content,
+                requested_target_template_id=target_template_id,
+                student_context_token=context_token,
+                operation_context_token=operation_context_token,
+                **operation_binding,
+            )
+            cleanup_upload_id = str(analyzed.get("upload_id") or cleanup_upload_id)
 
             overview = _build_current_overview(
-                upload_id=str(analyzed["upload_id"]),
+                upload_id=cleanup_upload_id,
                 token=context_token,
                 claims=claims,
             )
             sync_payload = _analysis_completed_payload(overview)
-            production_sync_required = operation_context_required()
             converter_upload_id = str(
                 sync_payload.get("converterUploadId") or ""
             ).strip()
             if production_sync_required and converter_upload_id != str(
                 overview.get("upload_id") or ""
             ).strip():
-                cleanup_completed = _purge_failed_student_analysis(
-                    claims=claims,
-                    overview=overview,
-                    operation_context_token=operation_context_token,
-                )
-                message = "Backend sync thiếu converterUploadId"
-                if cleanup_completed:
-                    message += "; dữ liệu phân tích đã được purge"
-                else:
-                    message += "; purge không hoàn tất"
-                raise StudentWorkflowError(
-                    503,
-                    message,
-                )
+                raise StudentWorkflowError(503, "Backend sync thiếu converterUploadId")
             try:
                 record_analysis_completed(context_token, sync_payload)
                 overview["session_sync"] = {"status": "synced", "message": None}
             except StudentSessionClientError as exc:
                 if production_sync_required:
-                    cleanup_completed = _purge_failed_student_analysis(
-                        claims=claims,
-                        overview=overview,
-                        operation_context_token=operation_context_token,
-                    )
-                    message = "Backend Student sync thất bại"
-                    if not cleanup_completed:
-                        message += "; purge không hoàn tất"
-                    raise StudentWorkflowError(503, message) from exc
+                    raise StudentWorkflowError(
+                        503, "Backend Student sync thất bại"
+                    ) from exc
                 overview["session_sync"] = {
                     "status": "unavailable",
                     "message": str(exc),
@@ -174,6 +154,28 @@ def analyze_student_file(
             return overview
     except StudentUploadConflictError as exc:
         raise StudentWorkflowError(409, str(exc)) from exc
+    except Exception as exc:
+        cleanup_completed = _purge_failed_student_analysis(
+            claims=claims,
+            upload_id=cleanup_upload_id,
+            operation_context_token=operation_context_token,
+        )
+        cleanup_status = (
+            "; dữ liệu phân tích đã được purge"
+            if cleanup_completed
+            else "; purge không hoàn tất"
+        )
+        if isinstance(exc, StudentWorkflowError):
+            raise StudentWorkflowError(
+                exc.status_code,
+                f"{exc}{cleanup_status}",
+            ) from exc
+        if isinstance(exc, ValueError):
+            raise StudentWorkflowError(400, f"{exc}{cleanup_status}") from exc
+        raise StudentWorkflowError(
+            500,
+            f"Student analysis thất bại{cleanup_status}",
+        ) from exc
 
 
 def _student_operation_binding(
@@ -215,10 +217,10 @@ def _student_operation_binding(
 def _purge_failed_student_analysis(
     *,
     claims: StudentContextClaims,
-    overview: dict[str, Any],
+    upload_id: str,
     operation_context_token: str | None,
 ) -> bool:
-    upload_id = str(overview.get("upload_id") or "").strip()
+    upload_id = str(upload_id or "").strip()
     if not upload_id or not str(operation_context_token or "").strip():
         return False
     try:
@@ -230,7 +232,9 @@ def _purge_failed_student_analysis(
     except (ConversionContextError, ValueError):
         return False
     return bool(
-        result.get("raw_upload_deleted") is True
+        result.get("success") is True
+        and str(result.get("upload_id") or "") == upload_id
+        and result.get("raw_upload_deleted") is True
         and result.get("local_operation_session_deleted") is True
         and result.get("remote_operation_session_deleted") is True
         and result.get("operation_session_deleted") is True
@@ -470,6 +474,10 @@ def build_student_internship_report(
             activity_ids=activity_ids,
             approved_notes=approved_notes,
             confidential_values=_student_confidential_values(table),
+            anonymization_session=AnonymizationSession(
+                normalized_session_id,
+                _student_anonymization_secret(),
+            ),
         )
     except StudentSessionClientError as exc:
         raise StudentWorkflowError(exc.status_code, str(exc)) from exc

@@ -116,7 +116,7 @@ _VIETNAMESE_ADDRESS_PATTERN = re.compile(
     r"(?!\w)"
 )
 _CCCD_PATTERN = re.compile(r"(?<!\d)(\d{12})(?!\d)")
-_STRICT_IDENTIFIER_PATTERN = re.compile(r"\d{9}|\d{12}")
+_STRICT_IDENTIFIER_PATTERN = re.compile(r"\d{9,12}")
 _PASSPORT_PATTERN = re.compile(r"[A-Z][0-9]{7,8}", re.IGNORECASE)
 _SAFE_CODE_PATTERN = re.compile(r"[A-Z0-9][A-Z0-9._/-]{0,39}", re.IGNORECASE)
 _SAFE_NUMBER_PATTERN = re.compile(r"[-+]?(?:\d{1,3}(?:[.,]\d{3})+|\d+)(?:[.,]\d+)?")
@@ -252,7 +252,10 @@ _POST_SCAN_PII_PATTERNS = (
             re.IGNORECASE,
         ),
     ),
-    ("document_number", re.compile(r"(?<!\d)\d{12}(?!\d)")),
+    (
+        "document_number",
+        re.compile(r"(?<![A-Z0-9])(?:\d{9,12}|[A-Z][0-9]{7,8})(?![A-Z0-9])", re.IGNORECASE),
+    ),
 )
 
 
@@ -322,6 +325,28 @@ class AnonymizationSession:
         return self._replacements[cache_key]
 
     anonymize = replace
+
+
+def sanitize_conservative_value(
+    value: Any,
+    session: AnonymizationSession,
+    confidential_values: Mapping[str, Iterable[Any]],
+    *,
+    policy: str = "free_text",
+) -> Any:
+    """Apply the workbook export allowlist to one non-header value."""
+    replacement = _replacement_for_cell(
+        value,
+        session,
+        confidential_values,
+        column_policy=policy,
+    )
+    return value if replacement is None else replacement[0]
+
+
+def scan_export_pii_independently(payload: Any) -> tuple[str, ...]:
+    """Run the export PII recognizer without primary redaction dependencies."""
+    return _scan_export_pii_independently(payload)
 
 
 def scan_confidential_values(
@@ -577,7 +602,7 @@ def _scan_export_cells_independently(
     safe_code = re.compile(r"[A-Z0-9][A-Z0-9._/-]{0,39}", re.IGNORECASE)
     safe_number = re.compile(r"[-+]?(?:\d{1,3}(?:[.,]\d{3})+|\d+)(?:[.,]\d+)?")
     safe_formula = re.compile(r"=[A-Z0-9_$:.,()+\-*/\s]+", re.IGNORECASE)
-    sensitive_id = re.compile(r"(?:\d{9}|\d{12}|[A-Z][0-9]{7,8})", re.IGNORECASE)
+    sensitive_id = re.compile(r"(?:\d{9,12}|[A-Z][0-9]{7,8})", re.IGNORECASE)
     safe_dates = (
         re.compile(r"\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01])"),
         re.compile(r"(?:0[1-9]|[12]\d|3[01])[/.-](?:0[1-9]|1[0-2])[/.-]\d{4}"),
@@ -1195,6 +1220,8 @@ def _replacement_for_cell(
             category for category in ANONYMIZATION_CATEGORIES if category in categories
         )
         return session.replace(first_category, str(value)), categories
+    if _looks_sensitive_identifier(value):
+        return session.replace("document_number", str(value)), {"document_number"}
     if _is_strict_accounting_value(value, column_policy):
         return None
     return session.replace("free_text", str(value)), {"free_text"}

@@ -313,6 +313,46 @@ def test_anonymized_export_uses_conservative_column_allowlist_for_free_text():
     assert "free_text" in exported.replaced_categories
 
 
+def test_numeric_safe_columns_still_redact_numeric_and_string_identifiers():
+    workbook = Workbook()
+    worksheet = workbook.active
+    worksheet.title = "Data"
+    headers = ["Số tiền", "Số lượng", "Mã hàng"]
+    worksheet.append(headers)
+    sensitive_values = [
+        123456789,
+        "123456789",
+        1234567890,
+        "1234567890",
+        12345678901,
+        "12345678901",
+        123456789012,
+        "123456789012",
+        "B1234567",
+    ]
+    for index, value in enumerate(sensitive_values):
+        worksheet.append([value, value, value if isinstance(value, str) else f"SP-{index}"])
+    stream = BytesIO()
+    workbook.save(stream)
+
+    exported = anonymize_workbook_bytes(
+        filename="student.xlsx",
+        content=stream.getvalue(),
+        session=AnonymizationSession("session-numeric-identifiers", "secret"),
+        confidential_values={},
+        analyzed_sheet_name="Data",
+        analyzed_header_row_index=0,
+        analyzed_headers=headers,
+    )
+
+    sanitized = load_workbook(BytesIO(exported.content), data_only=False)["Data"]
+    exported_text = "\n".join(
+        str(cell.value or "") for row in sanitized.iter_rows() for cell in row
+    )
+    assert all(str(value) not in exported_text for value in sensitive_values)
+    assert "document_number" in exported.replaced_categories
+
+
 def test_conservative_post_scan_is_independent_from_primary_cell_redaction(
     monkeypatch,
 ):

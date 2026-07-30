@@ -47,6 +47,9 @@ const {
   migrateStudentPrivacy,
   normalizeStudentPrivacyMigrationMode,
 } = require("./services/studentSessionService");
+const {
+  startStudentDeletionSweeper,
+} = require("./controllers/studentSessionController");
 
 require("dotenv").config();
 
@@ -206,6 +209,7 @@ function createStartServer({
   ensureRepairIndexes = ensureMisaImportRepairIndexes,
   startArtifactSweeper = startConversionArtifactSweeper,
   startRepairSweeper = startMisaImportRepairSweeper,
+  startStudentDeletionSweeper: startStudentDeleteSweeper = startStudentDeletionSweeper,
   listen = app.listen.bind(app),
   logger = console,
 } = {}) {
@@ -295,6 +299,9 @@ function createStartServer({
     const artifactSweeper = converterGatewayUsageReady
       ? startArtifactSweeper()
       : null;
+    const studentDeletionSweeper = studentEnabled
+      ? startStudentDeleteSweeper()
+      : null;
     const server = listen(PORT, () => {
       logger.log(`Server running on port ${PORT}`);
     });
@@ -304,6 +311,7 @@ function createStartServer({
     server.once("close", () => {
       artifactSweeper?.stop();
       repairSweeper?.stop();
+      studentDeletionSweeper?.stop();
     });
     return server;
   };

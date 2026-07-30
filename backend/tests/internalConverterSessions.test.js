@@ -64,9 +64,9 @@ test("asyncRoute does not write JSON after a mid-response source error", async (
   assert.equal(delegated, false);
 });
 
-test("remote operation-state delete is owner-bound and returns a verified contract", async () => {
+test("remote operation-session purge is owner-bound and verifies all artifacts are gone", async () => {
   let deletedBinding;
-  const result = await router.deleteOperationState({
+  const result = await router.deleteOperationArtifacts({
     claims: {
       owner_scope: "user:user-1",
       user_id: "user-1",
@@ -75,9 +75,15 @@ test("remote operation-state delete is owner-bound and returns a verified contra
     },
     sessionId: "session-1",
     runId: "student:session-1",
-    deleteArtifactFn: async (input) => {
+    purgeArtifactsFn: async (input) => {
       deletedBinding = input;
-      return { deleted: true };
+      return {
+        success: true,
+        purgeScope: "all_artifacts",
+        deletedArtifacts: 4,
+        remainingMetadata: 0,
+        remainingBytes: 0,
+      };
     },
   });
 
@@ -88,20 +94,22 @@ test("remote operation-state delete is owner-bound and returns a verified contra
     runId: "student:session-1",
     uploadId: "upload-1",
     targetTemplateId: "bsn_sales",
-    kind: "state",
-    revision: undefined,
   });
   assert.deepEqual(result, {
     success: true,
     session_id: "session-1",
     run_id: "student:session-1",
+    purge_scope: "all_artifacts",
+    deleted_artifacts: 4,
+    remaining_metadata: 0,
+    remaining_bytes: 0,
     remote_operation_session_deleted: true,
   });
 });
 
-test("remote operation-state delete fails closed when artifact deletion fails", async () => {
+test("remote operation-session purge fails closed on 404 without zero proof", async () => {
   await assert.rejects(
-    router.deleteOperationState({
+    router.deleteOperationArtifacts({
       claims: {
         owner_scope: "user:user-1",
         user_id: "user-1",
@@ -110,10 +118,35 @@ test("remote operation-state delete fails closed when artifact deletion fails", 
       },
       sessionId: "session-1",
       runId: "student:session-1",
-      deleteArtifactFn: async () => {
-        throw new Error("delete failed");
+      purgeArtifactsFn: async () => {
+        const error = new Error("artifact not found");
+        error.statusCode = 404;
+        throw error;
       },
     }),
-    /delete failed/,
+    /artifact not found/,
+  );
+});
+
+test("remote operation-session purge rejects deletion_pending or nonzero residue", async () => {
+  await assert.rejects(
+    router.deleteOperationArtifacts({
+      claims: {
+        owner_scope: "user:user-1",
+        user_id: "user-1",
+        upload_id: "upload-1",
+        target_template_id: "bsn_sales",
+      },
+      sessionId: "session-1",
+      runId: "student:session-1",
+      purgeArtifactsFn: async () => ({
+        success: false,
+        purgeScope: "all_artifacts",
+        status: "deletion_pending",
+        remainingMetadata: 1,
+        remainingBytes: 1,
+      }),
+    }),
+    (error) => error.code === "OPERATION_ARTIFACT_PURGE_INCOMPLETE" && error.statusCode === 503,
   );
 });
