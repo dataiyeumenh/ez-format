@@ -6,13 +6,19 @@ Captured before feature integration on 2026-07-30 from the unchanged main baseli
 
 ## Gate
 
-Command:
+Release-mode command (fail-closed; requires replica MongoDB, real GridFS, and live gateway evidence):
 
 ```powershell
 npm run qa:main-integration
 ```
 
-The gate runs, in order, backend `node --test`, converter `python -m pytest -q --tb=short`, frontend `npm test`, `npm run lint`, and `npm run build`. It stops at the first failure.
+Local code-only/incomplete command (explicitly non-release):
+
+```powershell
+npm run qa:main-integration:local-incomplete
+```
+
+Both modes run, in order, backend `node --test`, converter `python -m pytest -q --tb=short`, frontend `npm test`, `npm run lint`, and `npm run build`. Release mode stops before the matrix with nonzero status when mandatory external evidence is absent. Local incomplete mode records exact skips and never certifies production readiness.
 
 ## Results
 
@@ -56,8 +62,8 @@ Pre-existing failures: none.
 - Coupon settlement now reserves `usageCount` with a conditional `$expr` update, checks `limitPerUser` in the same transaction, then creates the unique payment usage. Paid and zero-total settlements share this path; duplicate payment snapshots remain idempotent.
 - Coupon coverage adds unit global/per-user limit regressions plus replica-set concurrent paid-global and zero-total-per-user tests. Local run: real replica-set URI unavailable, so 7 replica tests were explicitly skipped; no replica result is reported as passed.
 - Payment UI coupon editing clears `appliedCoupon`; rendered contract coverage now has 2 passing tests.
-- `REQUIRE_REPLICA_TESTS=1` is independent of PayOS secrets. Only `qa:release` and the `release-gate` CI job enforce the replica URI; `qa:main-integration` is non-release local/full QA and may report explicit replica skips. Local `qa:main-contracts` skips when the release flag is absent.
-- Focused result: backend 20/20 pass; frontend payment contract 2/2 pass. Latest `npm run qa:main-contracts`: backend 64 pass, 0 fail, 9 explicit replica skips; frontend 2/2 pass. `qa:main-integration` remains the non-release local/full QA flow.
+- `REQUIRE_REPLICA_TESTS=1` is independent of PayOS secrets. Release `qa:main-integration` enforces replica, GridFS, and live gateway evidence; `qa:main-integration:local-incomplete` may report explicit skips. Local `qa:main-contracts` skips when the release flag is absent.
+- Focused result: backend 20/20 pass; frontend payment contract 2/2 pass. Latest `npm run qa:main-contracts`: backend 64 pass, 0 fail, 9 explicit replica skips; frontend 2/2 pass.
 
 ## Task 8 Review Findings Closure (2026-07-30)
 

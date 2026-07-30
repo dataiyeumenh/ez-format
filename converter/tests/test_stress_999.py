@@ -35,8 +35,8 @@ ARTIFACT_DIR = ROOT / ".artifacts" / "stress-999"
 client = TestClient(app)
 
 
-@pytest.fixture(autouse=True)
-def _allow_legacy_row_export(monkeypatch):
+@pytest.fixture
+def legacy_row_export_enabled(monkeypatch):
     monkeypatch.setenv("ALLOW_LEGACY_ROW_EXPORT", "true")
 
 
@@ -48,7 +48,7 @@ def matrix_report_path() -> Path:
 
 @pytest.mark.parametrize("case_id,profile,conversion_type", matrix_cases())
 def test_matrix_auto_detect_validate_preview_export_convert(
-    tmp_path, case_id: str, profile, conversion_type: str
+    tmp_path, case_id: str, profile, conversion_type: str, legacy_row_export_enabled
 ):
     path = tmp_path / f"{case_id}.xlsx"
     write_profile_workbook(

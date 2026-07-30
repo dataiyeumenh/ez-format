@@ -1,6 +1,24 @@
+param(
+    [ValidateSet("Release", "LocalIncomplete")]
+    [string]$Mode = "Release"
+)
+
 $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent $PSScriptRoot
 $KnownDiffNoise = @()
+$StatusScript = Join-Path $PSScriptRoot "qa-main-integration-status.ps1"
+
+& $StatusScript -Mode $Mode
+if ($LASTEXITCODE -ne 0) {
+    exit $LASTEXITCODE
+}
+
+if ($Mode -eq "Release") {
+    $env:REQUIRE_REPLICA_TESTS = "1"
+} else {
+    # Local incomplete mode may document real-Mongo skips instead of certifying them.
+    $env:REQUIRE_REPLICA_TESTS = ""
+}
 
 function Invoke-QaStep {
     param(
@@ -40,7 +58,7 @@ function Invoke-CleanScan {
     Write-Output "[QA] ${Name}: clean"
 }
 
-Write-Output "[QA] Main integration release gate"
+Write-Output "[QA] Main integration gate mode: $Mode"
 Write-Output "[QA] Worktree: $Root"
 
 if ([string]::IsNullOrWhiteSpace($env:PAYMENT_REPLICA_SET_TEST_URI)) {

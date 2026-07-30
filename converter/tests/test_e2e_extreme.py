@@ -6,6 +6,7 @@ validate → preview → export roundtrip + direct convert download.
 from __future__ import annotations
 
 import json
+import os
 from io import BytesIO
 from pathlib import Path
 
@@ -23,9 +24,21 @@ SAMPLES = ROOT / "fixtures" / "samples"
 client = TestClient(app)
 
 
-@pytest.fixture(autouse=True)
-def _allow_legacy_row_export(monkeypatch):
+@pytest.fixture
+def legacy_row_export_enabled(monkeypatch):
     monkeypatch.setenv("ALLOW_LEGACY_ROW_EXPORT", "true")
+
+
+def test_legacy_row_export_defaults_fail_closed():
+    assert os.getenv("ALLOW_LEGACY_ROW_EXPORT") is None
+    response = client.post(
+        "/api/v1/conversions/export",
+        json={"conversion_type": "bsn_sales", "rows": []},
+    )
+    assert response.status_code == 403
+    assert response.json()["detail"] == (
+        "Legacy client-row export is disabled unless explicitly enabled."
+    )
 
 SALES_HEADERS = [
     "Mã hóa đơn",
@@ -85,14 +98,14 @@ def test_health_and_conversion_types_catalog():
     assert ids == set(CONVERSION_TYPES.keys())
 
 
-def test_raw_sales_sample_full_journey_all_sales_types(tmp_path):
+def test_raw_sales_sample_full_journey_all_sales_types(tmp_path, legacy_row_export_enabled):
     path = SAMPLES / "raw_sales_sample.xlsx"
     assert path.exists(), "missing fixtures/samples/raw_sales_sample.xlsx"
     for ct in ("bsn_sales", "sales_goods", "sales_service"):
         _journey_for_file(path, ct, tmp_path)
 
 
-def test_e2e_validate_preview_export_roundtrip_all_types(tmp_path):
+def test_e2e_validate_preview_export_roundtrip_all_types(tmp_path, legacy_row_export_enabled):
     for conversion_type in CONVERSION_TYPES:
         input_path = _kind_path(conversion_type, tmp_path)
         _journey_for_file(input_path, conversion_type, tmp_path)
@@ -118,7 +131,7 @@ def test_e2e_direct_convert_download_all_types(tmp_path):
         assert len(response.content) > 1000
 
 
-def test_purchase_common_headers_validate_preview_export(tmp_path):
+def test_purchase_common_headers_validate_preview_export(tmp_path, legacy_row_export_enabled):
     """Real-world headers: Số PN, Ngày nhập (not only formal MISA names)."""
     path = tmp_path / "purchase_pn.xlsx"
     _write_purchase_xlsx_common(path)
