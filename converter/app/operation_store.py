@@ -121,26 +121,29 @@ def cleanup_expired_operation_sessions(
     current_time = now or datetime.now(timezone.utc)
     deleted: list[str] = []
     inspected = 0
-    with _OPERATION_SESSION_DIRECTORY_LOCK:
-        for directory in sorted(session_root.iterdir(), key=lambda path: path.name):
-            if inspected >= limit:
-                break
-            if not directory.is_dir() and not directory.is_symlink():
-                continue
-            inspected += 1
+    for directory in sorted(session_root.iterdir(), key=lambda path: path.name):
+        if inspected >= limit:
+            break
+        if not directory.is_dir() and not directory.is_symlink():
+            continue
+        inspected += 1
+        with _OPERATION_SESSION_DIRECTORY_LOCK:
             if _creation_registry_key(session_root, directory) in (
                 _ACTIVE_OPERATION_SESSION_CREATIONS
             ):
                 continue
-            expires_at = _local_session_expiry(directory)
-            if expires_at is not None and expires_at > current_time:
-                continue
-            try:
-                _remove_operation_session_directory(session_root, directory)
-            except OSError:
-                continue
-            if not directory.exists():
-                deleted.append(directory.name)
+        expires_at = _local_session_expiry(directory)
+        if expires_at is not None and expires_at > current_time:
+            continue
+        try:
+            removed = _coordinated_remove_expired_directory(
+                session_root,
+                directory,
+            )
+        except (OSError, OperationStoreError):
+            continue
+        if removed:
+            deleted.append(directory.name)
     return deleted
 
 
@@ -148,6 +151,7 @@ def cleanup_expired_operation_sessions(
 class OperationStore:
     _locks: dict[str, threading.RLock] = {}
     _locks_guard = threading.Lock()
+    _lease_depths = threading.local()
 
     def __init__(
         self,
@@ -172,6 +176,8 @@ class OperationStore:
             else BACKEND_ROOT / ".artifacts" / "operation-sessions"
         )
         self.root.mkdir(parents=True, exist_ok=True)
+        self._lifecycle_root = self.root.parent / f".{self.root.name}-lifecycle"
+        self._lifecycle_root.mkdir(parents=True, exist_ok=True)
         self._remote_client = remote_client
         self._remote_run_id = str(conversion_run_id or "").strip()
         self._remote_payloads: dict[str, dict[str, Any]] = {}
@@ -290,6 +296,8 @@ class OperationStore:
         cls = type(self)
         with cls._locks_guard:
             creation_lock = cls._locks.setdefault(session_id, threading.RLock())
+        write_lease = self._write_lease(session_id, initialize=True)
+        write_lease.__enter__()
         creation_lock.acquire()
         if state_contract:
             self._state_contracts[session_id] = state_contract
@@ -355,8 +363,9 @@ class OperationStore:
                         _ACTIVE_OPERATION_SESSION_CREATIONS.discard(creation_key)
             return session
         except Exception:
-            if remote_saved:
-                self._rollback_remote_creation(session)
+            rollback_complete = True
+            if self._remote_client is not None and staging_directory is not None:
+                rollback_complete = self._rollback_remote_creation(session)
             with _OPERATION_SESSION_DIRECTORY_LOCK:
                 if creation_key is not None:
                     _ACTIVE_OPERATION_SESSION_CREATIONS.discard(creation_key)
@@ -367,20 +376,31 @@ class OperationStore:
             self._remote_payloads.pop(session_id, None)
             self._remote_storage_revisions.pop(session_id, None)
             self._state_contracts.pop(session_id, None)
+            if staging_directory is not None:
+                self._write_lifecycle_state(
+                    session_id,
+                    "purged" if rollback_complete else "purging",
+                )
             raise
         finally:
             if creation_key is not None:
                 with _OPERATION_SESSION_DIRECTORY_LOCK:
                     _ACTIVE_OPERATION_SESSION_CREATIONS.discard(creation_key)
             creation_lock.release()
+            write_lease.__exit__(None, None, None)
 
     def load_session(self, session_id: str) -> NormalizedSession:
+        with self._write_lease(session_id):
+            return self._load_session_with_active_fence(session_id)
+
+    def _load_session_with_active_fence(self, session_id: str) -> NormalizedSession:
         if self._remote_client is not None:
             if self._state_contracts.get(session_id) == STUDENT_METADATA_STATE_CONTRACT:
                 cached = self._remote_payloads.get(session_id)
                 if cached is not None:
                     session = cached["session"]
                     if session.expires_at <= datetime.now(timezone.utc):
+                        self._write_lifecycle_state(session_id, "purging")
                         self._purge_local_state(session_id)
                         raise OperationStoreExpiredError("Phiên chuyển đổi đã hết hạn")
                     return session
@@ -388,9 +408,13 @@ class OperationStore:
                 session, _ = self._load_remote_state(session_id)
                 return session
             except OperationStoreExpiredError:
+                self._write_lifecycle_state(session_id, "purging")
                 self._purge_local_state(session_id)
                 raise
             except OperationStoreClientError as exc:
+                if exc.status_code == 410:
+                    self._write_lifecycle_state(session_id, "purging")
+                    self._purge_local_state(session_id)
                 self._raise_remote_error(exc)
         return self._load_local_session(session_id)
 
@@ -403,7 +427,9 @@ class OperationStore:
         except (OSError, ValueError) as exc:
             raise OperationStoreError("Dữ liệu phiên chuyển đổi không hợp lệ") from exc
         if session.expires_at <= datetime.now(timezone.utc):
+            self._write_lifecycle_state(session_id, "purging")
             self._purge_local_state(session_id)
+            self._write_lifecycle_state(session_id, "purged")
             raise OperationStoreExpiredError("Phiên chuyển đổi đã hết hạn")
         return session
 
@@ -607,24 +633,25 @@ class OperationStore:
         content: bytes,
         content_type: str,
     ) -> dict[str, Any] | None:
-        session = self.load_session(session_id)
-        if self._remote_client is None:
-            return None
-        run_id = self._remote_run_id or self._run_id_from_session(session)
-        try:
-            return self._remote_client.put_artifact(
-                session_id=session_id,
-                run_id=run_id,
-                kind=kind,
-                revision=revision,
-                content=content,
-                content_type=content_type,
-                expires_at=session.expires_at,
-            )
-        except OperationStoreClientError as exc:
-            self._raise_remote_error(exc)
-        except Exception as exc:
-            raise OperationStoreError("Không lưu được artifact vào Node") from exc
+        with self._write_lease(session_id):
+            session = self.load_session(session_id)
+            if self._remote_client is None:
+                return None
+            run_id = self._remote_run_id or self._run_id_from_session(session)
+            try:
+                return self._remote_client.put_artifact(
+                    session_id=session_id,
+                    run_id=run_id,
+                    kind=kind,
+                    revision=revision,
+                    content=content,
+                    content_type=content_type,
+                    expires_at=session.expires_at,
+                )
+            except OperationStoreClientError as exc:
+                self._raise_remote_error(exc)
+            except Exception as exc:
+                raise OperationStoreError("Không lưu được artifact vào Node") from exc
 
     def get_artifact(
         self,
@@ -915,52 +942,73 @@ class OperationStore:
         with _OPERATION_SESSION_DIRECTORY_LOCK:
             if directory.exists() or directory.is_symlink():
                 _remove_operation_session_directory(self.root, directory)
+            staging_prefix = f".creating-{session_id}-"
+            for candidate in self.root.iterdir():
+                if candidate.name.startswith(staging_prefix) and (
+                    candidate.is_dir() or candidate.is_symlink()
+                ):
+                    _remove_operation_session_directory(self.root, candidate)
 
     def purge_local_session_state(self, session_id: str) -> bool:
         self._purge_local_state(session_id)
         return not self._directory(session_id).exists()
 
     def purge_session_state(self, session_id: str) -> dict[str, bool]:
-        remote_deleted = self._remote_client is None
-        if self._remote_client is not None:
-            run_id = self._remote_run_id
+        with self._purge_fence(session_id):
+            remote_deleted = self._remote_client is None
+            if self._remote_client is not None:
+                run_id = self._remote_run_id
+                try:
+                    result = self._remote_client.delete_session_artifacts(
+                        session_id=session_id,
+                        run_id=run_id,
+                    )
+                    remote_deleted = bool(
+                        result.get("success") is True
+                        and str(result.get("session_id") or "") == str(session_id)
+                        and str(result.get("run_id") or "") == str(run_id)
+                        and result.get("purge_scope") == "all_artifacts"
+                        and result.get("remaining_metadata") == 0
+                        and result.get("remaining_bytes") == 0
+                        and result.get("remote_operation_session_deleted") is True
+                    )
+                except Exception:
+                    remote_deleted = False
             try:
-                result = self._remote_client.delete_session_artifacts(
-                    session_id=session_id,
-                    run_id=run_id,
-                )
-                remote_deleted = bool(
-                    result.get("success") is True
-                    and str(result.get("session_id") or "") == str(session_id)
-                    and str(result.get("run_id") or "") == str(run_id)
-                    and result.get("purge_scope") == "all_artifacts"
-                    and result.get("remaining_metadata") == 0
-                    and result.get("remaining_bytes") == 0
-                    and result.get("remote_operation_session_deleted") is True
-                )
-            except Exception:
-                remote_deleted = False
-        try:
-            local_deleted = self.purge_local_session_state(session_id)
-        except (OSError, OperationStoreError):
-            local_deleted = False
-        return {
-            "local_operation_session_deleted": local_deleted,
-            "remote_operation_session_deleted": remote_deleted,
-            "operation_session_deleted": local_deleted and remote_deleted,
-        }
+                local_deleted = self.purge_local_session_state(session_id)
+            except (OSError, OperationStoreError):
+                local_deleted = False
+            completed = local_deleted and remote_deleted
+            if completed:
+                self._write_lifecycle_state(session_id, "purged")
+            return {
+                "local_operation_session_deleted": local_deleted,
+                "remote_operation_session_deleted": remote_deleted,
+                "operation_session_deleted": completed,
+            }
 
-    def _rollback_remote_creation(self, session: NormalizedSession) -> None:
+    def _rollback_remote_creation(self, session: NormalizedSession) -> bool:
         if self._remote_client is None:
-            return
+            return True
         run_id = self._remote_run_id or self._run_id_from_session(session)
         try:
-            self._remote_client.delete_session_artifacts(
+            result = self._remote_client.delete_session_artifacts(
                 session_id=session.session_id,
                 run_id=run_id,
             )
         except Exception:
-            pass
+            return False
+        if not isinstance(result, dict):
+            return False
+        return bool(
+            result.get("success") is True
+            and str(result.get("session_id") or "") == session.session_id
+            and str(result.get("run_id") or "") == run_id
+            and result.get("purge_scope") == "all_artifacts"
+            and result.get("remaining_metadata") == 0
+            and result.get("remaining_bytes") == 0
+            and result.get("remote_operation_session_deleted") is True
+        )
 
     def has_local_session_state(self, session_id: str) -> bool:
         directory = self._directory(session_id)
@@ -1010,13 +1058,106 @@ class OperationStore:
 
     @contextmanager
     def _lock(self, session_id: str) -> Iterator[None]:
+        with self._write_lease(session_id):
+            yield
+
+    @contextmanager
+    def _write_lease(
+        self,
+        session_id: str,
+        *,
+        initialize: bool = False,
+    ) -> Iterator[None]:
         cls = type(self)
         with cls._locks_guard:
             thread_lock = cls._locks.setdefault(session_id, threading.RLock())
         with thread_lock:
-            lock_path = self._directory(session_id) / ".session.lock"
-            with _file_lock(lock_path):
+            key = (str(self._lifecycle_root.resolve()), str(session_id))
+            depths = getattr(cls._lease_depths, "values", {})
+            if depths.get(key, 0) > 0:
+                lifecycle = self._read_lifecycle_state(session_id)
+                if lifecycle is None or lifecycle.get("status") != "active":
+                    raise OperationStoreError(
+                        "Operation session is purging or purged"
+                    )
+                depths[key] += 1
+                cls._lease_depths.values = depths
+                try:
+                    yield
+                finally:
+                    depths[key] -= 1
+                    if depths[key] == 0:
+                        depths.pop(key, None)
+                return
+            with _file_lock(self._lifecycle_lock_path(session_id)):
+                lifecycle = self._read_lifecycle_state(session_id)
+                if lifecycle is None:
+                    if (
+                        not initialize
+                        and self._remote_client is None
+                        and not self._directory(session_id).exists()
+                    ):
+                        raise OperationStoreError("Phiên chuyển đổi không tồn tại")
+                    self._write_lifecycle_state(session_id, "active")
+                    lifecycle = {"status": "active"}
+                if lifecycle.get("status") != "active":
+                    raise OperationStoreError(
+                        "Operation session is purging or purged"
+                    )
+                depths[key] = 1
+                cls._lease_depths.values = depths
+                try:
+                    yield
+                finally:
+                    depths.pop(key, None)
+
+    @contextmanager
+    def _purge_fence(self, session_id: str) -> Iterator[None]:
+        cls = type(self)
+        with cls._locks_guard:
+            thread_lock = cls._locks.setdefault(session_id, threading.RLock())
+        with thread_lock:
+            with _file_lock(self._lifecycle_lock_path(session_id)):
+                lifecycle = self._read_lifecycle_state(session_id)
+                if lifecycle is None or lifecycle.get("status") == "active":
+                    self._write_lifecycle_state(session_id, "purging")
                 yield
+
+    def _assert_lifecycle_active(self, session_id: str) -> None:
+        lifecycle = self._read_lifecycle_state(session_id)
+        if lifecycle is not None and lifecycle.get("status") != "active":
+            raise OperationStoreError("Operation session is purging or purged")
+
+    def _lifecycle_lock_path(self, session_id: str) -> Path:
+        return self._lifecycle_root / f"{self._directory(session_id).name}.lock"
+
+    def _lifecycle_state_path(self, session_id: str) -> Path:
+        return self._lifecycle_root / f"{self._directory(session_id).name}.json"
+
+    def _read_lifecycle_state(self, session_id: str) -> dict[str, Any] | None:
+        path = self._lifecycle_state_path(session_id)
+        if not path.is_file():
+            return None
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise OperationStoreError("Operation lifecycle fence không hợp lệ") from exc
+        if payload.get("status") not in {"active", "purging", "purged"}:
+            raise OperationStoreError("Operation lifecycle fence không hợp lệ")
+        return payload
+
+    def _write_lifecycle_state(self, session_id: str, status: str) -> None:
+        if status not in {"active", "purging", "purged"}:
+            raise OperationStoreError("Operation lifecycle fence không hợp lệ")
+        self._atomic_write(
+            self._lifecycle_state_path(session_id),
+            {
+                "schema_version": 1,
+                "session_id": session_id,
+                "status": status,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            },
+        )
 
     @staticmethod
     def _atomic_write(path: Path, payload: dict[str, Any]) -> None:
@@ -1121,6 +1262,69 @@ def _remove_operation_session_directory(root: Path, directory: Path) -> None:
         directory.unlink(missing_ok=True)
         return
     shutil.rmtree(directory)
+
+
+def _coordinated_remove_expired_directory(root: Path, directory: Path) -> bool:
+    session_id = directory.name
+    marker = directory / ".creating.json"
+    if marker.is_file():
+        try:
+            session_id = str(
+                json.loads(marker.read_text(encoding="utf-8")).get("session_id") or ""
+            ).strip()
+        except (OSError, json.JSONDecodeError):
+            return False
+    if not session_id or any(
+        not (character.isalnum() or character in {"-", "_"})
+        for character in session_id
+    ):
+        with _OPERATION_SESSION_DIRECTORY_LOCK:
+            _remove_operation_session_directory(root, directory)
+        return not directory.exists()
+
+    lifecycle_root = root.parent / f".{root.name}-lifecycle"
+    lifecycle_root.mkdir(parents=True, exist_ok=True)
+    lifecycle_path = lifecycle_root / f"{session_id}.json"
+    lock_path = lifecycle_root / f"{session_id}.lock"
+    with OperationStore._locks_guard:
+        thread_lock = OperationStore._locks.setdefault(session_id, threading.RLock())
+    with thread_lock:
+        with _file_lock(lock_path):
+            if lifecycle_path.is_file():
+                try:
+                    lifecycle = json.loads(lifecycle_path.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError) as exc:
+                    raise OperationStoreError(
+                        "Operation lifecycle fence không hợp lệ"
+                    ) from exc
+                if lifecycle.get("status") not in {"active", "purging", "purged"}:
+                    raise OperationStoreError(
+                        "Operation lifecycle fence không hợp lệ"
+                    )
+            OperationStore._atomic_write(
+                lifecycle_path,
+                {
+                    "schema_version": 1,
+                    "session_id": session_id,
+                    "status": "purging",
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                },
+            )
+            with _OPERATION_SESSION_DIRECTORY_LOCK:
+                if directory.exists() or directory.is_symlink():
+                    _remove_operation_session_directory(root, directory)
+            if directory.exists() or directory.is_symlink():
+                return False
+            OperationStore._atomic_write(
+                lifecycle_path,
+                {
+                    "schema_version": 1,
+                    "session_id": session_id,
+                    "status": "purged",
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                },
+            )
+            return True
 
 
 def _state_hash(

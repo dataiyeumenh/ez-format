@@ -42,7 +42,6 @@ const studentActivitySchema = new mongoose.Schema(
       type: Date,
       required: true,
       immutable: true,
-      expires: 0,
     },
   },
   { timestamps: true },

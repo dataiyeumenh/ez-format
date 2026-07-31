@@ -29,6 +29,7 @@ from app.student_anonymization import (
     AnonymizationUnsupportedLayerError,
     anonymize_workbook_bytes,
     scan_confidential_values,
+    scan_export_pii_independently,
 )
 from app.student_workflow import (
     _student_anonymization_secret,
@@ -379,6 +380,21 @@ def test_conservative_post_scan_is_independent_from_primary_cell_redaction(
             analyzed_header_row_index=0,
             analyzed_headers=["Ghi chú"],
         )
+
+
+def test_generated_pseudonym_phones_are_exempt_but_raw_phones_are_detected():
+    session = AnonymizationSession("session-phone-token", "secret")
+    generated = [
+        session.replace("phone", "0901234567"),
+        session.replace("tax_code", "0312345678"),
+        session.replace("bank_account", "090123456789"),
+        session.replace("document_number", "079203001234"),
+    ]
+
+    assert scan_export_pii_independently(generated) == ()
+    assert "phone" in scan_export_pii_independently(
+        ["0901234567", "+84 901 234 567"]
+    )
 
 
 def test_anonymized_export_post_scan_rejects_unredacted_pii_without_inventory():

@@ -171,10 +171,21 @@ class MongoGridFsArtifactStorageAdapter {
       throw artifactError(503, "GridFS artifact verification is unavailable", "GRIDFS_VERIFY_FAILED");
     }
     const boundedLimit = Math.min(Math.max(Number(limit) || 100, 1), 1000);
-    const files = await this.bucket.find({
-      "metadata.ownerScope": String(binding.ownerScope || "").trim(),
-      "metadata.runId": String(binding.runId || "").trim(),
-    }).limit(boundedLimit).toArray();
+    const fields = ["ownerScope", "userId", "sessionId", "uploadId", "runId", "targetTemplateId"];
+    if (fields.some((field) => !String(binding[field] || "").trim())) {
+      throw artifactError(400, "GridFS artifact binding is incomplete", "INVALID_ARTIFACT_BINDING");
+    }
+    const query = Object.fromEntries(
+      fields
+        .filter((field) => binding[field] != null)
+        .map((field) => [`metadata.${field}`, String(binding[field]).trim()]),
+    );
+    for (const field of ["kind", "revision"]) {
+      if (binding[field] != null && String(binding[field]).trim() !== "") {
+        query[`metadata.${field}`] = field === "revision" ? Number(binding[field]) : String(binding[field]).trim();
+      }
+    }
+    const files = await this.bucket.find(query).limit(boundedLimit).toArray();
     return files.map((file) => ({ objectId: file._id }));
   }
 

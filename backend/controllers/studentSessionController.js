@@ -20,6 +20,7 @@ const {
 const DEFAULT_RETENTION_MS = 24 * 60 * 60 * 1000;
 const DEFAULT_DELETE_STALE_MS = 5 * 60 * 1000;
 const DEFAULT_DELETE_SWEEP_INTERVAL_MS = 60 * 1000;
+const DEFAULT_DELETED_TOMBSTONE_MS = 7 * 24 * 60 * 60 * 1000;
 const UNSAFE_METADATA_KEYS = new Set([
   "rawrows",
   "rows",
@@ -129,9 +130,9 @@ function cleanStudentSessionPayload(body = {}) {
       contentHash: cleanString(file.contentHash, 256),
       rawRetained: false,
     },
-    converterUploadId: cleanString(body.converterUploadId, 128),
+    converterUploadId: "",
     targetTemplateId: cleanString(body.targetTemplateId, 128),
-    sourceSignatureHash: cleanString(body.sourceSignatureHash, 256),
+    sourceSignatureHash: "",
   };
   const workspaceId = cleanString(body.workspaceId, 64);
   if (workspaceId) payload.workspaceId = workspaceId;
@@ -561,13 +562,14 @@ async function markStudentDeleteFailed(
 ) {
   const failure = studentDeletionFailure(cause);
   const failedSession = await sessionModel.findOneAndUpdate(
-    { ...studentSessionIdentity(session), status: "deleting" },
+    { ...studentSessionIdentity(session), status: { $in: ["deleting", "deleted", "delete_failed"] } },
     {
       $set: {
         status: "delete_failed",
         deleteFailureCode: failure.code,
         deleteFailedAt: now(),
       },
+      $unset: { purgeAt: 1 },
     },
     { new: true },
   );
@@ -582,19 +584,67 @@ async function completeStudentDeletion(
     sessionModel = StudentFileSession,
     questionModel = StudentQuestionEvent,
     activityModel = StudentActivity,
+    now = () => new Date(),
   } = {},
 ) {
-  try {
-    const purgeResult = await purgeOperationSession(req, session);
-    assertStudentPurgeCompleted(purgeResult, session);
-  } catch (error) {
+  if (session.converterUploadId) {
+    try {
+      const purgeResult = await purgeOperationSession(req, session);
+      assertStudentPurgeCompleted(purgeResult, session);
+    } catch (error) {
+      throw studentPurgeFailure(error);
+    }
+  } else if (session.file?.rawRetained === true) {
+    const error = new Error("Unanalyzed Student session has an unsafe raw binding");
+    error.code = "STUDENT_RAW_BINDING_UNVERIFIED";
     throw studentPurgeFailure(error);
   }
   const metadataFilter = studentMetadataFilter(session);
   await questionModel.deleteMany(metadataFilter);
   await activityModel.deleteMany(metadataFilter);
-  if (typeof session.deleteOne === "function") await session.deleteOne();
-  else await sessionModel.deleteOne({ ...studentSessionIdentity(session), status: "deleting" });
+  for (const model of [questionModel, activityModel]) {
+    const isProductionModel = model === StudentQuestionEvent || model === StudentActivity;
+    if (typeof model.countDocuments === "function" && (!isProductionModel || mongoose.connection.readyState === 1)) {
+      const remaining = await model.countDocuments(metadataFilter);
+      if (Number(remaining || 0) !== 0) {
+        const error = new Error("Student child metadata remains after purge");
+        error.code = "STUDENT_CHILD_PURGE_INCOMPLETE";
+        throw error;
+      }
+    }
+  }
+  const completedAt = now();
+  const tombstone = await sessionModel.findOneAndUpdate(
+    { ...studentSessionIdentity(session), status: "deleting" },
+    {
+      $set: {
+        status: "deleted",
+        purgedAt: completedAt,
+        purgeAt: new Date(completedAt.getTime() + DEFAULT_DELETED_TOMBSTONE_MS),
+        converterUploadId: "",
+        targetTemplateId: "",
+        sourceSignatureHash: "",
+        summary: {},
+        file: {
+          originalName: "deleted",
+          sizeBytes: 0,
+          extension: "",
+          contentHash: "",
+          rawRetained: false,
+        },
+      },
+      $unset: {
+        deleteFailureCode: 1,
+        deleteFailedAt: 1,
+      },
+    },
+    { new: true, runValidators: true },
+  );
+  if (!tombstone) {
+    const error = new Error("Student purge tombstone could not be persisted");
+    error.code = "STUDENT_TOMBSTONE_WRITE_FAILED";
+    throw error;
+  }
 }
 
 async function deleteStudentSession(
@@ -656,7 +706,7 @@ async function deleteStudentSession(
       });
     }
     try {
-      await completeStudentDeletion(req, deletingSession, { purgeOperationSession });
+      await completeStudentDeletion(req, deletingSession, { purgeOperationSession, now });
     } catch (error) {
       let failedSession = null;
       let failure = studentDeletionFailure(error);
@@ -840,10 +890,37 @@ async function findActiveInternalSession(claims) {
 
 async function discardMetadataWriteIfSessionClosed(claims, model, record) {
   if (await findActiveInternalSession(claims)) return false;
-  await model.deleteOne({
-    _id: record._id,
-    sessionId: claims.session_id,
-  });
+  try {
+    const removed = await model.deleteOne({
+      _id: record._id,
+      sessionId: claims.session_id,
+    });
+    if (Number(removed?.deletedCount || 0) !== 1) {
+      throw new Error("Student child cleanup did not remove the inserted record");
+    }
+  } catch (error) {
+    await StudentFileSession.updateOne(
+      {
+        _id: claims.session_id,
+        userId: claims.user_id,
+        ownerScope: claims.owner_scope,
+        workspaceId: claims.workspace_id || null,
+        status: { $in: ["deleting", "deleted", "delete_failed"] },
+      },
+      {
+        $set: {
+          status: "delete_failed",
+          deleteFailureCode: "STUDENT_CHILD_CLEANUP_FAILED",
+          deleteFailedAt: new Date(),
+        },
+        $unset: { purgeAt: 1 },
+      },
+    );
+    const failure = new Error("Student child cleanup failed; durable purge retry required");
+    failure.code = "STUDENT_CHILD_CLEANUP_FAILED";
+    failure.cause = error;
+    throw failure;
+  }
   return true;
 }
 
@@ -1255,6 +1332,10 @@ async function sweepStaleStudentDeletions({
       { status: "deleting", deleteStartedAt: { $lte: cutoff } },
       { status: "deleting", deleteStartedAt: null, updatedAt: { $lte: cutoff } },
       { status: "delete_failed", deleteFailedAt: { $lte: cutoff } },
+      {
+        status: { $nin: ["deleting", "delete_failed", "expired", "deleted"] },
+        retentionExpiresAt: { $lte: currentTime },
+      },
     ],
   }).sort({ deleteFailedAt: 1, deleteStartedAt: 1, updatedAt: 1 })
     .limit(boundedLimit)
@@ -1269,6 +1350,10 @@ async function sweepStaleStudentDeletions({
           { status: "deleting", deleteStartedAt: { $lte: cutoff } },
           { status: "deleting", deleteStartedAt: null, updatedAt: { $lte: cutoff } },
           { status: "delete_failed", deleteFailedAt: { $lte: cutoff } },
+          {
+            status: { $nin: ["deleting", "delete_failed", "expired", "deleted"] },
+            retentionExpiresAt: { $lte: currentTime },
+          },
         ],
       },
       {
@@ -1286,7 +1371,7 @@ async function sweepStaleStudentDeletions({
       await completeStudentDeletion(
         { requestId: crypto.randomUUID(), headers: {} },
         session,
-        { purgeOperationSession, sessionModel, questionModel, activityModel },
+        { purgeOperationSession, sessionModel, questionModel, activityModel, now },
       );
       report.deleted += 1;
     } catch (error) {

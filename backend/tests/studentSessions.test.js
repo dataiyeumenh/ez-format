@@ -508,7 +508,7 @@ test("Phase 1 context token cannot confirm or export", () => {
   }
 });
 
-test("student session payload keeps metadata and discards raw rows", () => {
+test("unanalyzed student session payload cannot bind raw converter state", () => {
   assert.deepEqual(
     cleanStudentSessionPayload({
       workspaceId: " workspace-1 ",
@@ -533,9 +533,9 @@ test("student session payload keeps metadata and discards raw rows", () => {
         contentHash: "sha256:example",
         rawRetained: false,
       },
-      converterUploadId: "upload-1",
+      converterUploadId: "",
       targetTemplateId: "bsn_sales",
-      sourceSignatureHash: "source-hash",
+      sourceSignatureHash: "",
     },
   );
 });
@@ -741,9 +741,11 @@ test("authenticated owner can refresh an active session with an expired old cont
   assert.ok(refreshedClaims.exp > Math.floor(Date.now() / 1000));
 });
 
-test("student session model expires metadata and has no raw workbook fields", () => {
+test("student session metadata has no direct retention TTL or raw workbook fields", () => {
   const retentionExpiresAt = StudentFileSession.schema.path("retentionExpiresAt");
-  assert.equal(retentionExpiresAt.options.expires, 0);
+  assert.equal(retentionExpiresAt.options.expires, undefined);
+  const ttlIndexes = StudentFileSession.schema.indexes().filter(([, options]) => options.expireAfterSeconds === 0);
+  assert.equal(ttlIndexes.every(([, options]) => options.partialFilterExpression?.status === "deleted"), true);
   assert.equal(StudentFileSession.schema.path("rawRows"), undefined);
   assert.equal(StudentFileSession.schema.path("workbookBytes"), undefined);
   assert.equal(StudentFileSession.schema.path("file.rawBytes"), undefined);

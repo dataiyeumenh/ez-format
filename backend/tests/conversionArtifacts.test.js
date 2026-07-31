@@ -16,9 +16,19 @@ const {
 function repository() {
   const documents = [];
   const tombstones = [];
+  const lifecycles = new Map();
+  const lifecycleKey = (binding) => [
+    binding.ownerScope,
+    binding.userId,
+    binding.sessionId,
+    binding.uploadId,
+    binding.runId,
+    binding.targetTemplateId,
+  ].join("\0");
   return {
     documents,
     tombstones,
+    lifecycles,
     failStatusFor: null,
     failFinalDeleteStatus: false,
     async findLatest(binding) {
@@ -68,6 +78,36 @@ function repository() {
     async createTombstone(metadata) {
       tombstones.push(metadata);
       return metadata;
+    },
+    async acquireWriteLease(binding) {
+      const key = lifecycleKey(binding);
+      const lifecycle = lifecycles.get(key);
+      if (lifecycle && lifecycle.status !== "active") return null;
+      const active = lifecycle || { ...binding, status: "active", activeLeases: 0 };
+      active.activeLeases += 1;
+      lifecycles.set(key, active);
+      return { ...active };
+    },
+    async releaseWriteLease(binding) {
+      const lifecycle = lifecycles.get(lifecycleKey(binding));
+      if (lifecycle) lifecycle.activeLeases = Math.max(0, lifecycle.activeLeases - 1);
+    },
+    async beginPurge(binding) {
+      const key = lifecycleKey(binding);
+      const lifecycle = lifecycles.get(key) || { ...binding, activeLeases: 0 };
+      lifecycle.status = lifecycle.status === "purged" ? "purged" : "purging";
+      lifecycles.set(key, lifecycle);
+      return { ...lifecycle };
+    },
+    async find(binding) {
+      const lifecycle = lifecycles.get(lifecycleKey(binding));
+      return lifecycle ? { ...lifecycle } : null;
+    },
+    async markPurged(binding) {
+      const lifecycle = lifecycles.get(lifecycleKey(binding));
+      lifecycle.status = "purged";
+      lifecycle.activeLeases = 0;
+      return { ...lifecycle };
     },
   };
 }
@@ -143,11 +183,12 @@ test("artifact index setup removes the legacy TTL before creating the durable pe
       },
       async dropIndex(name) { events.push(`drop:${name}`); },
     },
-    async createIndexes() { events.push("create"); },
+    async createIndexes() { events.push("artifact:create"); },
   };
+  const lifecycleModel = { async createIndexes() { events.push("lifecycle:create"); } };
 
-  const result = await ensureConversionArtifactIndexes({ model });
-  assert.deepEqual(events, ["drop:purgeAt_1", "create"]);
+  const result = await ensureConversionArtifactIndexes({ model, lifecycleModel });
+  assert.deepEqual(events, ["drop:purgeAt_1", "artifact:create", "lifecycle:create"]);
   assert.deepEqual(result.droppedIndexes, ["purgeAt_1"]);
 });
 
@@ -224,6 +265,85 @@ test("all-artifact purge fails closed when byte deletion is pending", async () =
   );
   assert.equal(repo.documents.length, 1);
   assert.equal(backend.objects.size, 1);
+});
+
+test("durable operation purge fence rejects writes after purge across service restart", async () => {
+  const repo = repository();
+  const backend = storage();
+  const service = createConversionArtifactService({ repository: repo, lifecycleRepository: repo, storageAdapter: backend });
+  await service.putArtifact({ ...binding, kind: "state", content: Buffer.from("state") });
+  await service.purgeSessionArtifacts(binding);
+
+  const restarted = createConversionArtifactService({ repository: repo, lifecycleRepository: repo, storageAdapter: backend });
+  await assert.rejects(
+    restarted.putArtifact({ ...binding, revision: 2, content: Buffer.from("resurrect") }),
+    (error) => error.code === "ARTIFACT_OPERATION_PURGED" && error.statusCode === 410,
+  );
+  assert.equal(repo.documents.length, 0);
+  assert.equal(backend.objects.size, 0);
+});
+
+test("operation purge drains an in-flight write lease before proving zero artifacts", async () => {
+  const repo = repository();
+  const backend = storage();
+  const originalPut = backend.putArtifact.bind(backend);
+  let releaseWrite;
+  let signalWrite;
+  const writeReleased = new Promise((resolve) => { releaseWrite = resolve; });
+  const writeStarted = new Promise((resolve) => { signalWrite = resolve; });
+  backend.putArtifact = async (input) => {
+    const uploaded = await originalPut(input);
+    signalWrite();
+    await writeReleased;
+    return uploaded;
+  };
+  const service = createConversionArtifactService({
+    repository: repo,
+    lifecycleRepository: repo,
+    storageAdapter: backend,
+    purgeLeaseWaitMs: 1_000,
+    purgeLeasePollMs: 1,
+  });
+
+  const write = service.putArtifact({ ...binding, kind: "state", content: Buffer.from("state") });
+  await writeStarted;
+  let purgeFinished = false;
+  const purge = service.purgeSessionArtifacts(binding).finally(() => { purgeFinished = true; });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(purgeFinished, false);
+
+  releaseWrite();
+  await write;
+  const result = await purge;
+  assert.equal(result.remainingMetadata, 0);
+  assert.equal(result.remainingBytes, 0);
+  assert.equal(repo.documents.length, 0);
+  assert.equal(backend.objects.size, 0);
+});
+
+test("expired operation artifacts use the coordinated purge fence before metadata removal", async () => {
+  const repo = repository();
+  const backend = storage();
+  let current = new Date("2026-07-31T00:00:00.000Z");
+  const service = createConversionArtifactService({
+    repository: repo,
+    lifecycleRepository: repo,
+    storageAdapter: backend,
+    now: () => current,
+  });
+  await service.putArtifact({
+    ...binding,
+    expiresAt: new Date("2026-07-31T00:01:00.000Z"),
+    content: Buffer.from("expiring-state"),
+  });
+  current = new Date("2026-07-31T00:02:00.000Z");
+
+  const result = await service.sweepExpiredArtifacts({ limit: 10 });
+
+  assert.deepEqual(result, { scanned: 1, deleted: 1, pending: 0, failures: [] });
+  assert.equal(repo.documents.length, 0);
+  assert.equal(backend.objects.size, 0);
+  assert.equal([...repo.lifecycles.values()][0].status, "purged");
 });
 
 test("artifact service binds metadata, validates checksum, and compensates storage on metadata failure", async () => {

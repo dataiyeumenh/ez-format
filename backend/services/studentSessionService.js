@@ -42,6 +42,36 @@ const RETIRED_STUDENT_COLLECTION_NAMES = Object.freeze([
 const DEFAULT_RETIRED_MAX_TOTAL = 10_000;
 const DEFAULT_RETIRED_MAX_DURATION_MS = 30_000;
 
+async function ensureStudentPrivacyIndexes({
+  sessionModel,
+  questionEventModel,
+  activityModel,
+} = {}) {
+  const droppedIndexes = [];
+  for (const [name, model] of [
+    ["StudentFileSession", sessionModel],
+    ["StudentQuestionEvent", questionEventModel],
+    ["StudentActivity", activityModel],
+  ]) {
+    if (!model?.collection?.indexes || !model?.collection?.dropIndex || !model?.createIndexes) {
+      throw new Error(`${name} index management is unavailable`);
+    }
+    let indexes = [];
+    try {
+      indexes = await model.collection.indexes();
+    } catch (error) {
+      if (error?.code !== 26 && error?.codeName !== "NamespaceNotFound") throw error;
+    }
+    for (const index of indexes) {
+      if (index?.expireAfterSeconds == null || index?.key?.retentionExpiresAt !== 1) continue;
+      await model.collection.dropIndex(index.name);
+      droppedIndexes.push(`${name}.${index.name}`);
+    }
+    await model.createIndexes();
+  }
+  return { droppedIndexes };
+}
+
 function normalizeStudentPrivacyMigrationMode(value) {
   const mode = String(value || "off").trim().toLowerCase();
   if (!["off", "dry-run", "apply"].includes(mode)) {
@@ -460,6 +490,7 @@ async function migrateStudentPrivacy(
 
 module.exports = {
   buildOwnerScope,
+  ensureStudentPrivacyIndexes,
   hashStudentQuestion,
   migrateStudentPrivacy,
   normalizeStudentPrivacyMigrationMode,

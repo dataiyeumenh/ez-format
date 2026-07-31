@@ -425,7 +425,7 @@ def _scan_export_pii_independently(payload: Any) -> tuple[str, ...]:
                     continue
                 generated_prefixes = {
                     "phone": ("PHONE-", "TAX-", "BANK-", "DOC-"),
-                    "document_number": ("DOC-",),
+                    "document_number": ("PHONE-", "TAX-", "BANK-", "DOC-"),
                 }.get(category, ())
                 if any(prefix.endswith(marker) for marker in generated_prefixes):
                     continue

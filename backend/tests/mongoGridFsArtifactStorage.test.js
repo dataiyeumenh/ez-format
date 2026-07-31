@@ -43,7 +43,11 @@ function memoryGridFs() {
       return {
         limit: () => ({
           toArray: async () => [...files.values()]
-            .filter((file) => String(file.id) === String(query._id))
+            .filter((file) => Object.entries(query).every(([field, expected]) => {
+              if (field === "_id") return String(file.id) === String(expected);
+              if (!field.startsWith("metadata.")) return false;
+              return String(file.metadata[field.slice("metadata.".length)] ?? "") === String(expected);
+            }))
             .map((file) => ({ _id: file.id, length: file.bytes.length, metadata: file.metadata })),
         }),
       };
@@ -116,6 +120,56 @@ test("GridFS adapter deletes only the generated object id", async () => {
 
   await adapter.deleteArtifact({ objectId: published.objectId });
   assert.equal(gridFs.files.size, 0);
+});
+
+test("GridFS binding lookup requires every operation identity field without over-match", async () => {
+  const gridFs = memoryGridFs();
+  const adapter = new MongoGridFsArtifactStorageAdapter({
+    db: {},
+    bucketName: "conversion_artifacts",
+    maxBytes: 32,
+    GridFSBucket: gridFs.FakeBucket,
+  });
+  const exact = {
+    ownerScope: "user:user-1",
+    userId: "user-1",
+    sessionId: "session-1",
+    uploadId: "upload-1",
+    runId: "run-1",
+    targetTemplateId: "bsn_sales",
+    kind: "state",
+    revision: 1,
+  };
+  const exactArtifact = await adapter.putArtifact({ bytes: Buffer.from("exact"), metadata: exact });
+  for (const [field, value] of Object.entries({
+    ownerScope: "user:user-2",
+    userId: "user-2",
+    sessionId: "session-2",
+    uploadId: "upload-2",
+    runId: "run-2",
+    targetTemplateId: "bsn_purchase",
+  })) {
+    await adapter.putArtifact({
+      bytes: Buffer.from(field),
+      metadata: { ...exact, [field]: value },
+    });
+  }
+  await adapter.putArtifact({ bytes: Buffer.from("kind"), metadata: { ...exact, kind: "output" } });
+  await adapter.putArtifact({ bytes: Buffer.from("revision"), metadata: { ...exact, revision: 2 } });
+
+  const operationMatches = await adapter.findArtifactsByBinding((({ kind, revision, ...value }) => value)(exact));
+  const exactMatches = await adapter.findArtifactsByBinding(exact);
+
+  await assert.rejects(
+    adapter.findArtifactsByBinding({ ownerScope: exact.ownerScope, runId: exact.runId }),
+    (error) => error.code === "INVALID_ARTIFACT_BINDING",
+  );
+
+  assert.deepEqual(operationMatches.map((item) => item.objectId), [exactArtifact.objectId,
+    [...gridFs.files.values()].find((item) => item.metadata.kind === "output").id,
+    [...gridFs.files.values()].find((item) => item.metadata.revision === 2).id,
+  ]);
+  assert.deepEqual(exactMatches, [{ objectId: exactArtifact.objectId }]);
 });
 
 test("GridFS download source errors terminate the returned artifact stream", async () => {

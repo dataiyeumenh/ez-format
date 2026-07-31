@@ -19,6 +19,7 @@ const {
 } = require("../services/conversionContextService");
 const { createStartServer } = require("../server");
 const {
+  ensureStudentPrivacyIndexes,
   migrateStudentPrivacy,
   normalizeStudentPrivacyMigrationMode,
   hashStudentQuestion,
@@ -658,9 +659,35 @@ test("Student privacy cleanup backfills live metadata and purges bounded orphans
   );
 });
 
-test("Student metadata uses the session retention TTL", () => {
-  assert.equal(StudentQuestionEvent.schema.path("retentionExpiresAt").options.expires, 0);
-  assert.equal(StudentActivity.schema.path("retentionExpiresAt").options.expires, 0);
+test("Student metadata relies on coordinated purge instead of direct retention TTL", () => {
+  assert.equal(StudentQuestionEvent.schema.path("retentionExpiresAt").options.expires, undefined);
+  assert.equal(StudentActivity.schema.path("retentionExpiresAt").options.expires, undefined);
+});
+
+test("Student index repair drops legacy retention TTLs before creating coordinated indexes", async () => {
+  const events = [];
+  const model = (name) => ({
+    collection: {
+      async indexes() {
+        return [{ name: "_id_" }, { name: "retentionExpiresAt_1", key: { retentionExpiresAt: 1 }, expireAfterSeconds: 0 }];
+      },
+      async dropIndex(indexName) { events.push(`${name}:drop:${indexName}`); },
+    },
+    async createIndexes() { events.push(`${name}:create`); },
+  });
+
+  const result = await ensureStudentPrivacyIndexes({
+    sessionModel: model("session"),
+    questionEventModel: model("question"),
+    activityModel: model("activity"),
+  });
+
+  assert.deepEqual(events, [
+    "session:drop:retentionExpiresAt_1", "session:create",
+    "question:drop:retentionExpiresAt_1", "question:create",
+    "activity:drop:retentionExpiresAt_1", "activity:create",
+  ]);
+  assert.equal(result.droppedIndexes.length, 3);
 });
 
 test("manual session deletion cascades question and activity metadata first", async () => {
@@ -690,12 +717,17 @@ test("manual session deletion cascades question and activity metadata first", as
   };
   StudentFileSession.findOne = async () => session;
   StudentFileSession.findOneAndUpdate = async (_filter, update) => {
-    assert.equal(update.$set.status, "deleting");
-    assert.ok(update.$set.deleteStartedAt instanceof Date);
-    assert.equal(update.$set.deleteFailureCode, "");
-    assert.equal(update.$set.deleteFailedAt, null);
-    order.push("session-deleting");
-    session.status = "deleting";
+    if (update.$set.status === "deleting") {
+      assert.ok(update.$set.deleteStartedAt instanceof Date);
+      assert.equal(update.$set.deleteFailureCode, "");
+      assert.equal(update.$set.deleteFailedAt, null);
+      order.push("session-deleting");
+    } else {
+      assert.equal(update.$set.status, "deleted");
+      assert.ok(update.$set.purgeAt instanceof Date);
+      order.push("session-tombstone");
+    }
+    Object.assign(session, update.$set || {});
     return session;
   };
   StudentQuestionEvent.deleteMany = async () => {
@@ -737,7 +769,7 @@ test("manual session deletion cascades question and activity metadata first", as
       "converter-purge",
       "questions",
       "activities",
-      "session",
+      "session-tombstone",
     ]);
   } finally {
     StudentFileSession.findOne = originals.findOne;
@@ -993,8 +1025,13 @@ test("owner can retry a stale deleting session with fresh internal cleanup", asy
   };
   StudentFileSession.findOne = async () => session;
   StudentFileSession.findOneAndUpdate = async (filter, update) => {
-    assert.equal(filter.status, "deleting");
-    assert.ok(filter.deleteStartedAt.$lte instanceof Date);
+    if (update.$set.status === "deleting") {
+      assert.equal(filter.status, "deleting");
+      assert.ok(filter.deleteStartedAt.$lte instanceof Date);
+    } else {
+      assert.equal(filter.status, "deleting");
+      assert.equal(update.$set.status, "deleted");
+    }
     Object.assign(session, update.$set || {});
     return session;
   };
@@ -1021,7 +1058,7 @@ test("owner can retry a stale deleting session with fresh internal cleanup", asy
     );
 
     assert.equal(response.statusCode, 200);
-    assert.equal(session.deleted, true);
+    assert.equal(session.status, "deleted");
   } finally {
     StudentFileSession.findOne = originals.findOne;
     StudentFileSession.findOneAndUpdate = originals.findOneAndUpdate;
@@ -1089,10 +1126,12 @@ test("owner retries delete_failed with an expired old context and fresh internal
     );
 
     assert.equal(response.statusCode, 200);
-    assert.equal(session.deleted, true);
-    assert.equal(updates.length, 1);
+    assert.equal(session.status, "deleted");
+    assert.equal(updates.length, 2);
     assert.equal(updates[0].filter.status, "delete_failed");
     assert.equal(updates[0].update.$set.status, "deleting");
+    assert.equal(updates[1].filter.status, "deleting");
+    assert.equal(updates[1].update.$set.status, "deleted");
   } finally {
     StudentFileSession.findOne = originals.findOne;
     StudentFileSession.findOneAndUpdate = originals.findOneAndUpdate;
@@ -1276,7 +1315,6 @@ test("bounded Student deletion sweeper retries stale jobs with fresh cleanup", a
     deleteStartedAt: new Date("2026-07-31T00:00:00.000Z"),
   };
   let queryLimit;
-  let parentDeletes = 0;
   const sessionModel = {
     find() {
       return {
@@ -1289,10 +1327,6 @@ test("bounded Student deletion sweeper retries stale jobs with fresh cleanup", a
     async findOneAndUpdate(_filter, update) {
       Object.assign(session, update.$set || {});
       return session;
-    },
-    async deleteOne() {
-      parentDeletes += 1;
-      return { deletedCount: 1 };
     },
   };
   let purgeCalls = 0;
@@ -1318,8 +1352,147 @@ test("bounded Student deletion sweeper retries stale jobs with fresh cleanup", a
 
   assert.equal(queryLimit, 2);
   assert.equal(purgeCalls, 1);
-  assert.equal(parentDeletes, 1);
+  assert.equal(session.status, "deleted");
   assert.deepEqual(report, { scanned: 1, deleted: 1, failed: 0 });
+});
+
+test("coordinated Student sweeper purges expired raw state before tombstoning metadata", async () => {
+  const now = new Date("2026-07-31T00:10:00.000Z");
+  const session = {
+    _id: "507f1f77bcf86cd799439011",
+    userId: "507f1f77bcf86cd799439012",
+    workspaceId: null,
+    ownerScope: "user:507f1f77bcf86cd799439012",
+    converterUploadId: "student-upload-expired",
+    targetTemplateId: "bsn_sales",
+    status: "analyzed",
+    retentionExpiresAt: new Date("2026-07-31T00:00:00.000Z"),
+    file: { originalName: "private.xlsx", sizeBytes: 123, rawRetained: false },
+  };
+  const order = [];
+  let queryFilter;
+  const sessionModel = {
+    find(filter) {
+      queryFilter = filter;
+      return {
+        sort() { return this; }, limit() { return this; }, select() { return this; },
+        lean: async () => [{ _id: session._id, status: session.status }],
+      };
+    },
+    async findOneAndUpdate(_filter, update) {
+      Object.assign(session, update.$set || {});
+      if (update.$unset) for (const field of Object.keys(update.$unset)) delete session[field];
+      order.push(`session:${session.status}`);
+      return session;
+    },
+  };
+  const childModel = (name) => ({
+    async deleteMany() { order.push(name); return { deletedCount: 1 }; },
+    async countDocuments() { return 0; },
+  });
+
+  const report = await sweepStaleStudentDeletions({
+    now: () => now,
+    sessionModel,
+    questionModel: childModel("questions"),
+    activityModel: childModel("activities"),
+    purgeOperationSession: async () => {
+      order.push("converter-purge");
+      return {
+        success: true,
+        session_id: String(session._id),
+        upload_id: session.converterUploadId,
+        raw_upload_deleted: true,
+        local_operation_session_deleted: true,
+        remote_operation_session_deleted: true,
+        operation_session_deleted: true,
+      };
+    },
+  });
+
+  assert.ok(queryFilter.$or.some((item) => item.retentionExpiresAt?.$lte?.getTime() === now.getTime()));
+  assert.deepEqual(order, [
+    "session:deleting",
+    "converter-purge",
+    "questions",
+    "activities",
+    "session:deleted",
+  ]);
+  assert.equal(session.status, "deleted");
+  assert.ok(session.purgeAt > now);
+  assert.deepEqual(report, { scanned: 1, deleted: 1, failed: 0 });
+});
+
+test("failed post-insert cleanup persists a retryable Student purge job and never returns success", async () => {
+  process.env.CONVERTER_SERVICE_TOKEN = "converter-service-secret";
+  const sessionId = "507f1f77bcf86cd799439011";
+  const userId = "507f1f77bcf86cd799439012";
+  const retentionExpiresAt = new Date(Date.now() + 60_000);
+  const token = createStudentContextToken({
+    sessionId,
+    userId,
+    ownerScope: `user:${userId}`,
+    allowedScopes: ["ask"],
+    retentionExpiresAt,
+  });
+  const originals = {
+    findOne: StudentFileSession.findOne,
+    updateOne: StudentFileSession.updateOne,
+    create: StudentQuestionEvent.create,
+    deleteOne: StudentQuestionEvent.deleteOne,
+  };
+  let activeLookup = 0;
+  let persistedUpdate;
+  StudentFileSession.findOne = async () => {
+    activeLookup += 1;
+    return activeLookup === 1 ? {
+      _id: sessionId,
+      userId,
+      workspaceId: null,
+      ownerScope: `user:${userId}`,
+      converterUploadId: "upload-1",
+      retentionExpiresAt,
+      status: "analyzed",
+    } : null;
+  };
+  StudentFileSession.updateOne = async (filter, update) => {
+    persistedUpdate = { filter, update };
+    return { modifiedCount: 1 };
+  };
+  StudentQuestionEvent.create = async (payload) => ({ _id: "event-1", ...payload });
+  StudentQuestionEvent.deleteOne = async () => { throw new Error("cleanup unavailable"); };
+
+  try {
+    const response = responseRecorder();
+    await recordStudentQuestionEvent({
+      params: { id: sessionId },
+      headers: {
+        "x-converter-service-token": "converter-service-secret",
+        "x-student-context": token,
+      },
+      body: {
+        event: "question_answered",
+        questionHash: hashStudentQuestion("Có bao nhiêu hóa đơn?"),
+        questionLength: "Có bao nhiêu hóa đơn?".length,
+        category: "count_documents",
+        operation: "ask",
+        answerType: "deterministic_file_query",
+        evidenceIds: [],
+        evidenceCount: 0,
+        outcome: "supported",
+      },
+    }, response);
+
+    assert.equal(response.statusCode, 500);
+    assert.equal(persistedUpdate.update.$set.status, "delete_failed");
+    assert.equal(persistedUpdate.update.$set.deleteFailureCode, "STUDENT_CHILD_CLEANUP_FAILED");
+    assert.deepEqual(persistedUpdate.update.$unset, { purgeAt: 1 });
+  } finally {
+    StudentFileSession.findOne = originals.findOne;
+    StudentFileSession.updateOne = originals.updateOne;
+    StudentQuestionEvent.create = originals.create;
+    StudentQuestionEvent.deleteOne = originals.deleteOne;
+  }
 });
 
 test("delete racing authorized question and activity writes leaves no orphan", async () => {
@@ -1390,11 +1563,12 @@ test("delete racing authorized question and activity writes leaves no orphan", a
       activityDeleteMany: StudentActivity.deleteMany,
       activityDeleteOne: StudentActivity.deleteOne,
     };
-    StudentFileSession.findOne = async (filter) => (
-      filter.status && !parentExists ? null : session
-    );
-    StudentFileSession.findOneAndUpdate = async () => {
-      session.status = "deleting";
+    StudentFileSession.findOne = async (filter) => {
+      if (filter.status?.$nin?.includes(session.status)) return null;
+      return filter.status && !parentExists ? null : session;
+    };
+    StudentFileSession.findOneAndUpdate = async (_filter, update) => {
+      Object.assign(session, update.$set || {});
       return session;
     };
     item.model.create = async (payload) => {
@@ -1479,6 +1653,8 @@ function startupOptions(overrides = {}) {
     migrateMappingProfilesV2: async () => ({ skipped: true }),
     listen: () => ({ once() {} }),
     logger: { error() {}, log() {} },
+    ensureStudentPrivacyIndexes: async () => ({ droppedIndexes: [] }),
+    loadStudentPrivacyModels: () => ({}),
     startStudentDeletionSweeper: () => null,
     ...overrides,
   };

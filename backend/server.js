@@ -44,6 +44,7 @@ const {
   mergeGatewayCapabilities,
 } = require("./routes/converterGateway");
 const {
+  ensureStudentPrivacyIndexes,
   migrateStudentPrivacy,
   normalizeStudentPrivacyMigrationMode,
 } = require("./services/studentSessionService");
@@ -204,6 +205,7 @@ function createStartServer({
   runMappingProfileMigrations = runProductionMigrationPreflight,
   studentEnabled = studentAssistantEnabled,
   migrateStudentPrivacy: runStudentPrivacyMigration = migrateStudentPrivacy,
+  ensureStudentPrivacyIndexes: ensurePrivacyIndexes = ensureStudentPrivacyIndexes,
   loadStudentPrivacyModels: loadPrivacyModels = loadStudentPrivacyModels,
   repairEnabled = misaImportRepairEnabled,
   ensureRepairIndexes = ensureMisaImportRepairIndexes,
@@ -275,9 +277,11 @@ function createStartServer({
         throw error;
       }
     }
-    if (studentEnabled && privacyMigrationMode !== "off") {
+    const studentPrivacyModels = studentEnabled ? loadPrivacyModels(connection) : null;
+    if (studentPrivacyModels) await ensurePrivacyIndexes(studentPrivacyModels);
+    if (studentPrivacyModels && privacyMigrationMode !== "off") {
       try {
-        const report = await runStudentPrivacyMigration(loadPrivacyModels(connection), {
+        const report = await runStudentPrivacyMigration(studentPrivacyModels, {
           mode: privacyMigrationMode,
           maxRetiredRecords: process.env.STUDENT_PRIVACY_MIGRATION_MAX_TOTAL,
           maxDurationMs: process.env.STUDENT_PRIVACY_MIGRATION_MAX_DURATION_MS,

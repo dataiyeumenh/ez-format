@@ -1,11 +1,49 @@
 const crypto = require("node:crypto");
 const { compose, Transform } = require("node:stream");
+const mongoose = require("mongoose");
 const ConversionArtifact = require("../models/ConversionArtifact");
 const {
   assertMongoGridFsConfigured,
   createMongoGridFsArtifactStorage,
   configuredMaxBytes,
 } = require("./mongoGridFsArtifactStorage");
+
+const conversionOperationLifecycleSchema = new mongoose.Schema(
+  {
+    ownerScope: { type: String, required: true, trim: true, immutable: true },
+    userId: { type: String, required: true, trim: true, immutable: true },
+    sessionId: { type: String, required: true, trim: true, immutable: true },
+    uploadId: { type: String, required: true, trim: true, immutable: true },
+    runId: { type: String, required: true, trim: true, immutable: true },
+    targetTemplateId: { type: String, required: true, trim: true, immutable: true },
+    status: {
+      type: String,
+      enum: ["active", "purging", "purged"],
+      default: "active",
+      required: true,
+      index: true,
+    },
+    writeLeases: {
+      type: [{
+        _id: false,
+        leaseId: { type: String, required: true, immutable: true },
+        expiresAt: { type: Date, required: true, immutable: true },
+      }],
+      default: [],
+    },
+    purgeStartedAt: { type: Date, default: null },
+    purgedAt: { type: Date, default: null },
+  },
+  { timestamps: true },
+);
+
+conversionOperationLifecycleSchema.index(
+  { ownerScope: 1, userId: 1, sessionId: 1, uploadId: 1, runId: 1, targetTemplateId: 1 },
+  { unique: true },
+);
+
+const ConversionOperationLifecycle = mongoose.models.ConversionOperationLifecycle ||
+  mongoose.model("ConversionOperationLifecycle", conversionOperationLifecycleSchema);
 
 const DEFAULT_TOMBSTONE_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 const ARTIFACT_KINDS = new Set(["analysis", "upload", "output", "state", "manifest", "import_result", "repair_state", "retry_output"]);
@@ -33,6 +71,102 @@ function normalizeOwnerScope(value) {
 
 function plain(document) {
   return document && typeof document.toObject === "function" ? document.toObject() : document;
+}
+
+function lifecycleFilter(binding) {
+  return {
+    ownerScope: binding.ownerScope,
+    userId: binding.userId,
+    sessionId: binding.sessionId,
+    uploadId: binding.uploadId,
+    runId: binding.runId,
+    targetTemplateId: binding.targetTemplateId,
+  };
+}
+
+function lifecycleWriteError(message = "Operation session is no longer writable") {
+  return storageError(410, message, "ARTIFACT_OPERATION_PURGED");
+}
+
+function createMongooseOperationLifecycleRepository(Model = ConversionOperationLifecycle) {
+  const leaseLifetimeMs = 15 * 60 * 1000;
+  const withLeaseCount = (document, leaseId) => {
+    const value = plain(document);
+    if (!value) return value;
+    return { ...value, activeLeases: value.writeLeases?.length || 0, leaseId };
+  };
+  return {
+    async find(binding, now = new Date()) {
+      const document = await Model.findOneAndUpdate(
+        lifecycleFilter(binding),
+        { $pull: { writeLeases: { expiresAt: { $lte: now } } } },
+        { new: true },
+      );
+      return withLeaseCount(document);
+    },
+    async acquireWriteLease(binding) {
+      const leaseId = crypto.randomUUID();
+      const lease = { leaseId, expiresAt: new Date(Date.now() + leaseLifetimeMs) };
+      const filter = { ...lifecycleFilter(binding), status: "active" };
+      const current = await Model.findOneAndUpdate(
+        filter,
+        { $push: { writeLeases: lease } },
+        { new: true },
+      );
+      if (current) return withLeaseCount(current, leaseId);
+      try {
+        return withLeaseCount(await Model.create({
+          ...lifecycleFilter(binding),
+          status: "active",
+          writeLeases: [lease],
+        }), leaseId);
+      } catch (error) {
+        if (error?.code === 11000) throw lifecycleWriteError();
+        throw error;
+      }
+    },
+    async releaseWriteLease(binding, leaseId) {
+      if (!leaseId) throw lifecycleWriteError("Operation write lease is invalid");
+      await Model.updateOne(
+        lifecycleFilter(binding),
+        { $pull: { writeLeases: { leaseId } } },
+      );
+    },
+    async beginPurge(binding, now = new Date()) {
+      const started = await Model.findOneAndUpdate(
+        { ...lifecycleFilter(binding), status: "active" },
+        { $set: { status: "purging", purgeStartedAt: now } },
+        { new: true },
+      );
+      if (started) return withLeaseCount(started);
+      const existing = await Model.findOne(lifecycleFilter(binding));
+      if (existing) return withLeaseCount(existing);
+      try {
+        return withLeaseCount(await Model.create({
+          ...lifecycleFilter(binding),
+          status: "purging",
+          writeLeases: [],
+          purgeStartedAt: now,
+        }));
+      } catch (error) {
+        if (error?.code !== 11000) throw error;
+        return withLeaseCount(await Model.findOne(lifecycleFilter(binding)));
+      }
+    },
+    async markPurged(binding, now = new Date()) {
+      const result = await Model.findOneAndUpdate(
+        { ...lifecycleFilter(binding), status: "purging", "writeLeases.0": { $exists: false } },
+        { $set: { status: "purged", purgedAt: now } },
+        { new: true },
+      );
+      if (result) return withLeaseCount(result);
+      const existing = await Model.findOne(lifecycleFilter(binding));
+      if (existing?.status === "purged" && !(existing.writeLeases?.length)) {
+        return withLeaseCount(existing);
+      }
+      throw lifecycleWriteError("Operation purge fence could not be finalized");
+    },
+  };
 }
 
 function createMongooseArtifactRepository(Model = ConversionArtifact) {
@@ -123,14 +257,22 @@ function assertBinding(metadata, input) {
 
 function createConversionArtifactService({
   repository = createMongooseArtifactRepository(),
+  lifecycleRepository,
   storageAdapter,
   now = () => new Date(),
   maxBytes = configuredMaxBytes(),
   tombstoneRetentionMs = DEFAULT_TOMBSTONE_RETENTION_MS,
   purgeBatchSize = 100,
   purgeMaxArtifacts = 10_000,
+  purgeLeaseWaitMs = 5_000,
+  purgeLeasePollMs = 10,
 } = {}) {
   if (!storageAdapter) throw new Error("MongoDB/GridFS artifact adapter is required");
+  const lifecycleStore = lifecycleRepository || (
+    typeof repository.acquireWriteLease === "function"
+      ? repository
+      : createMongooseOperationLifecycleRepository()
+  );
 
   function purgeAt() {
     return new Date(now().getTime() + Math.max(60_000, tombstoneRetentionMs));
@@ -172,47 +314,53 @@ function createConversionArtifactService({
     if (binding.revision == null) throw storageError(400, "Artifact revision is required", "INVALID_ARTIFACT_REVISION");
     const expiresAt = new Date(input.expiresAt);
     if (Number.isNaN(expiresAt.getTime()) || expiresAt <= now()) throw storageError(400, "Artifact expiry is invalid", "INVALID_ARTIFACT_EXPIRY");
-    const existing = await repository.findLatest(binding);
-    if (existing) {
-      assertBinding(existing, input);
-      if (existing.status === "available" && new Date(existing.expiresAt) > now()) return existing;
-      throw storageError(410, "Artifact revision has been retired", "ARTIFACT_REVISION_RETIRED");
-    }
-    const expectedSha256 = input.sha256 == null ? "" : String(input.sha256).trim().toLowerCase();
-    let uploaded;
+    const lease = await lifecycleStore.acquireWriteLease(binding);
+    if (!lease || lease.status !== "active") throw lifecycleWriteError();
     try {
-      uploaded = await storageAdapter.putArtifact({
-        bytes: input.bytes || input.content,
-        metadata: {
-          ...binding,
-          mime: input.mime || input.contentType,
-          sha256: expectedSha256,
-          sizeBytes: input.sizeBytes,
-        },
-      });
-    } catch (error) {
-      if (error?.orphanedArtifact) await createCleanupTombstone(error.orphanedArtifact, expiresAt);
-      throw error;
-    }
-    const metadata = {
-      ...binding,
-      workspaceId: input.workspaceId == null || String(input.workspaceId).trim() === "" ? null : normalizeIdentifier(input.workspaceId, "Workspace id"),
-      gridFsObjectId: uploaded.objectId,
-      sha256: uploaded.sha256,
-      sizeBytes: uploaded.sizeBytes,
-      mime: String(input.mime || input.contentType || uploaded.mime || "application/octet-stream").trim(),
-      expiresAt,
-      status: "available",
-    };
-    if (metadata.sizeBytes > maxBytes) {
-      await compensate(uploaded.objectId, metadata);
-      throw storageError(413, "Artifact exceeds size limit", "ARTIFACT_TOO_LARGE");
-    }
-    try {
-      return await repository.create(metadata);
-    } catch (error) {
-      await compensate(uploaded.objectId, metadata);
-      throw error;
+      const existing = await repository.findLatest(binding);
+      if (existing) {
+        assertBinding(existing, input);
+        if (existing.status === "available" && new Date(existing.expiresAt) > now()) return existing;
+        throw storageError(410, "Artifact revision has been retired", "ARTIFACT_REVISION_RETIRED");
+      }
+      const expectedSha256 = input.sha256 == null ? "" : String(input.sha256).trim().toLowerCase();
+      let uploaded;
+      try {
+        uploaded = await storageAdapter.putArtifact({
+          bytes: input.bytes || input.content,
+          metadata: {
+            ...binding,
+            mime: input.mime || input.contentType,
+            sha256: expectedSha256,
+            sizeBytes: input.sizeBytes,
+          },
+        });
+      } catch (error) {
+        if (error?.orphanedArtifact) await createCleanupTombstone(error.orphanedArtifact, expiresAt);
+        throw error;
+      }
+      const metadata = {
+        ...binding,
+        workspaceId: input.workspaceId == null || String(input.workspaceId).trim() === "" ? null : normalizeIdentifier(input.workspaceId, "Workspace id"),
+        gridFsObjectId: uploaded.objectId,
+        sha256: uploaded.sha256,
+        sizeBytes: uploaded.sizeBytes,
+        mime: String(input.mime || input.contentType || uploaded.mime || "application/octet-stream").trim(),
+        expiresAt,
+        status: "available",
+      };
+      if (metadata.sizeBytes > maxBytes) {
+        await compensate(uploaded.objectId, metadata);
+        throw storageError(413, "Artifact exceeds size limit", "ARTIFACT_TOO_LARGE");
+      }
+      try {
+        return await repository.create(metadata);
+      } catch (error) {
+        await compensate(uploaded.objectId, metadata);
+        throw error;
+      }
+    } finally {
+      await lifecycleStore.releaseWriteLease(binding, lease.leaseId);
     }
   }
 
@@ -317,6 +465,19 @@ function createConversionArtifactService({
     const maxArtifacts = Math.min(Math.max(Number(purgeMaxArtifacts) || 10_000, 1), 100_000);
     let deletedArtifacts = 0;
     try {
+      const lifecycle = await lifecycleStore.beginPurge(binding, now());
+      if (!lifecycle || !["purging", "purged"].includes(lifecycle.status)) {
+        throw purgeIncomplete("Operation purge fence is unavailable");
+      }
+      const waitMs = Math.min(Math.max(Number(purgeLeaseWaitMs) || 5_000, 0), 60_000);
+      const pollMs = Math.min(Math.max(Number(purgeLeasePollMs) || 10, 1), 1_000);
+      const deadline = Date.now() + waitMs;
+      while (true) {
+        const current = await lifecycleStore.find(binding, now());
+        if (!current || Number(current.activeLeases || 0) <= 0) break;
+        if (Date.now() >= deadline) throw purgeIncomplete("Operation write leases did not drain");
+        await new Promise((resolve) => setTimeout(resolve, pollMs));
+      }
       while (true) {
         const artifacts = await repository.findSessionArtifacts(binding, { limit: batchSize });
         if (!Array.isArray(artifacts)) {
@@ -363,6 +524,7 @@ function createConversionArtifactService({
       if (remainingMetadata.length || finalBytes.length) {
         throw purgeIncomplete("Operation artifact purge could not prove zero remaining data");
       }
+      await lifecycleStore.markPurged(binding, now());
       return {
         success: true,
         purgeScope: "all_artifacts",
@@ -383,6 +545,15 @@ function createConversionArtifactService({
     const failures = [];
     for (const metadata of candidates) {
       try {
+        if (
+          metadata.tombstoneOnly !== true &&
+          metadata.status === "available" &&
+          new Date(metadata.expiresAt) <= now()
+        ) {
+          const result = await purgeSessionArtifacts(metadata);
+          deleted += Number(result.deletedArtifacts || 0);
+          continue;
+        }
         await markDeletionPending(metadata);
         await storageAdapter.deleteArtifact({ objectId: metadata.gridFsObjectId });
         await repository.markStatus(metadata.gridFsObjectId, "expired", { purgeAt: purgeAt() });
@@ -411,7 +582,10 @@ function createConversionArtifactService({
 
 let defaultService;
 function activeService() {
-  if (!defaultService) defaultService = createConversionArtifactService({ storageAdapter: createMongoGridFsArtifactStorage() });
+  if (!defaultService) defaultService = createConversionArtifactService({
+    storageAdapter: createMongoGridFsArtifactStorage(),
+    lifecycleRepository: createMongooseOperationLifecycleRepository(),
+  });
   return defaultService;
 }
 
@@ -452,7 +626,10 @@ function startConversionArtifactSweeper({ service = activeService(), env = proce
   return { ready, runOnce, stop: () => clearIntervalImpl(timer) };
 }
 
-async function ensureConversionArtifactIndexes({ model = ConversionArtifact } = {}) {
+async function ensureConversionArtifactIndexes({
+  model = ConversionArtifact,
+  lifecycleModel = ConversionOperationLifecycle,
+} = {}) {
   const droppedIndexes = [];
   let indexes = [];
   try {
@@ -469,6 +646,7 @@ async function ensureConversionArtifactIndexes({ model = ConversionArtifact } = 
     }
   }
   await model.createIndexes();
+  await lifecycleModel.createIndexes();
   return { droppedIndexes };
 }
 
@@ -477,6 +655,7 @@ module.exports = {
   assertArtifactStorageReachable,
   createConversionArtifactService,
   createMongooseArtifactRepository,
+  createMongooseOperationLifecycleRepository,
   deleteArtifact: (...args) => activeService().deleteArtifact(...args),
   ensureConversionArtifactIndexes,
   getArtifact: (...args) => activeService().getArtifact(...args),

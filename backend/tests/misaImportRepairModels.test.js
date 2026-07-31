@@ -64,6 +64,8 @@ function retryBatchInput(overrides = {}) {
 
 function memoryArtifactRepository() {
   const documents = [];
+  const lifecycles = new Map();
+  const key = (binding) => [binding.ownerScope, binding.userId, binding.sessionId, binding.uploadId, binding.runId, binding.targetTemplateId].join("\0");
   return {
     documents,
     async create(metadata) {
@@ -72,6 +74,31 @@ function memoryArtifactRepository() {
     },
     async findLatest() {
       return null;
+    },
+    async acquireWriteLease(binding) {
+      const lifecycle = lifecycles.get(key(binding)) || { status: "active", activeLeases: 0 };
+      if (lifecycle.status !== "active") return null;
+      lifecycle.activeLeases += 1;
+      lifecycles.set(key(binding), lifecycle);
+      return lifecycle;
+    },
+    async releaseWriteLease(binding) {
+      const lifecycle = lifecycles.get(key(binding));
+      if (lifecycle) lifecycle.activeLeases = Math.max(0, lifecycle.activeLeases - 1);
+    },
+    async beginPurge(binding) {
+      const lifecycle = lifecycles.get(key(binding)) || { activeLeases: 0 };
+      lifecycle.status = "purging";
+      lifecycles.set(key(binding), lifecycle);
+      return lifecycle;
+    },
+    async find(binding) {
+      return lifecycles.get(key(binding)) || null;
+    },
+    async markPurged(binding) {
+      const lifecycle = lifecycles.get(key(binding));
+      lifecycle.status = "purged";
+      return lifecycle;
     },
   };
 }

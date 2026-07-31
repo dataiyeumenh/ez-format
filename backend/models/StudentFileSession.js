@@ -63,11 +63,21 @@ const studentFileSessionSchema = new mongoose.Schema(
     deleteFailureCode: { type: String, trim: true, maxlength: 80, default: "" },
     deleteStartedAt: { type: Date, default: null, index: true },
     deleteFailedAt: { type: Date, default: null },
-    retentionExpiresAt: { type: Date, required: true, expires: 0 },
+    retentionExpiresAt: { type: Date, required: true },
+    purgedAt: { type: Date, default: null },
+    purgeAt: { type: Date, default: null },
   },
   { timestamps: true },
 );
 
 studentFileSessionSchema.index({ userId: 1, workspaceId: 1, createdAt: -1 });
+studentFileSessionSchema.index(
+  { purgeAt: 1 },
+  {
+    name: "student_deleted_tombstone_ttl",
+    expireAfterSeconds: 0,
+    partialFilterExpression: { status: "deleted" },
+  },
+);
 
 module.exports = mongoose.model("StudentFileSession", studentFileSessionSchema);

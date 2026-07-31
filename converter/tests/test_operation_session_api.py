@@ -251,6 +251,7 @@ def test_expired_local_operation_session_rejects_and_purges_raw_table(
         store.load_session(session.session_id)
 
     assert not session_dir.exists()
+    assert store._read_lifecycle_state(session.session_id)["status"] == "purged"
 
 
 def test_student_metadata_cache_rejects_expiry_and_purges_local_raw_state(
@@ -281,6 +282,7 @@ def test_student_metadata_cache_rejects_expiry_and_purges_local_raw_state(
 
     assert not session_dir.exists()
     assert session.session_id not in store._remote_payloads
+    assert store._read_lifecycle_state(session.session_id)["status"] == "purging"
 
 
 def test_student_metadata_operation_session_survives_process_restart(
@@ -408,6 +410,70 @@ def test_operation_session_sweeper_preserves_in_flight_creation_without_session_
     assert not in_flight_dir.exists()
     assert (final_dir / "session.json").is_file()
     assert not (final_dir / ".creating.json").exists()
+
+
+def test_operation_sweeper_drains_active_write_lease_without_resurrection(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv("OPERATION_STORE_PROVIDER", "local")
+    monkeypatch.setenv("NODE_ENV", "test")
+    monkeypatch.setenv("OPERATION_STORE_ALLOW_LOCAL", "true")
+    monkeypatch.setenv("CONVERTER_SERVICE_TOKEN", "converter-service-secret")
+    store = OperationStore(root=tmp_path / "sessions")
+    session = _create_test_operation_session(store)
+    write_started = threading.Event()
+    release_write = threading.Event()
+    cleanup_finished = threading.Event()
+    original_save = store._save_session
+
+    def blocked_save(updated, table_payload=None):
+        write_started.set()
+        assert release_write.wait(2)
+        return original_save(updated, table_payload)
+
+    store._save_session = blocked_save
+    writer = threading.Thread(
+        target=lambda: store.create_revision(
+            session.session_id,
+            expected_revision=session.active_revision,
+            expected_state_hash=session.state_hash,
+            changes={"r1": {"CCCD": "DOC-REDACTED"}},
+            created_by=session.owner_scope,
+        ),
+        daemon=True,
+    )
+    writer.start()
+    assert write_started.wait(2)
+
+    cleanup_result = {}
+    cleaner = threading.Thread(
+        target=lambda: (
+            cleanup_result.setdefault(
+                "deleted",
+                cleanup_expired_operation_sessions(
+                    root=store.root,
+                    now=datetime.now(timezone.utc) + timedelta(days=1),
+                    batch_size=10,
+                ),
+            ),
+            cleanup_finished.set(),
+        ),
+        daemon=True,
+    )
+    cleaner.start()
+    assert not cleanup_finished.wait(0.1)
+
+    release_write.set()
+    writer.join(2)
+    cleaner.join(2)
+
+    assert not writer.is_alive()
+    assert not cleaner.is_alive()
+    assert cleanup_result["deleted"] == [session.session_id]
+    assert not (store.root / session.session_id).exists()
+    with pytest.raises(OperationStoreError, match="purged|purging"):
+        store.load_session(session.session_id)
 
 
 def test_student_operation_create_is_atomic_through_remote_save_and_future_sweep(
@@ -546,6 +612,84 @@ def test_student_operation_purge_removes_local_state_but_fails_closed_on_remote_
         "operation_session_deleted": False,
     }
     assert not (store.root / session_id).exists()
+
+
+def test_operation_purge_fence_drains_in_flight_create_and_survives_restart(
+    tmp_path,
+):
+    session_id = "student-purge-create-race"
+    remote_write_started = threading.Event()
+    release_remote_write = threading.Event()
+    purge_finished = threading.Event()
+
+    class RemoteStore:
+        def __init__(self):
+            self.run_id = f"student:{session_id}"
+            self.session_id = session_id
+            self.has_state = False
+
+        def put_state(self, **payload):
+            remote_write_started.set()
+            assert release_remote_write.wait(2)
+            self.has_state = True
+            return {"session": {"revision": payload["revision"]}}
+
+        def delete_session_artifacts(self, **payload):
+            self.has_state = False
+            return {
+                "success": True,
+                "session_id": payload["session_id"],
+                "run_id": payload["run_id"],
+                "purge_scope": "all_artifacts",
+                "remaining_metadata": 0,
+                "remaining_bytes": 0,
+                "remote_operation_session_deleted": True,
+            }
+
+    remote = RemoteStore()
+    root = tmp_path / "sessions"
+    store = OperationStore(
+        root=root,
+        remote_client=remote,
+        conversion_run_id=remote.run_id,
+    )
+    results = {}
+
+    creator = threading.Thread(
+        target=lambda: results.setdefault(
+            "created",
+            _create_test_operation_session(store, session_id=session_id),
+        ),
+        daemon=True,
+    )
+    creator.start()
+    assert remote_write_started.wait(2)
+
+    def purge():
+        results["purge"] = store.purge_session_state(session_id)
+        purge_finished.set()
+
+    purger = threading.Thread(target=purge, daemon=True)
+    purger.start()
+    assert not purge_finished.wait(0.1)
+
+    release_remote_write.set()
+    creator.join(2)
+    purger.join(2)
+
+    assert not creator.is_alive()
+    assert not purger.is_alive()
+    assert results["purge"]["operation_session_deleted"] is True
+    assert remote.has_state is False
+    assert not (root / session_id).exists()
+
+    restarted = OperationStore(
+        root=root,
+        remote_client=remote,
+        conversion_run_id=remote.run_id,
+    )
+    with pytest.raises(OperationStoreError, match="purged|purging|xoá"):
+        _create_test_operation_session(restarted, session_id=session_id)
 
 
 def test_operation_sweeper_cleans_crashed_staging_after_creation_grace(
