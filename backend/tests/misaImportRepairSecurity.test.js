@@ -1009,6 +1009,8 @@ test("server preserves opaque request IDs for existing conversion correlation", 
 
 test("concurrent server lifecycles own independent repair sweepers", async () => {
   const serverPath = require.resolve("../server");
+  const artifactServicePath = require.resolve("../services/conversionArtifactService");
+  const artifactService = require(artifactServicePath);
   const restorers = [];
   const previousEnv = {
     NODE_ENV: process.env.NODE_ENV,
@@ -1027,7 +1029,8 @@ test("concurrent server lifecycles own independent repair sweepers", async () =>
     process.env.CONVERTER_PUBLIC_PROXY_ENABLED = "false";
     restorers.push(
       mockModule(require.resolve("../config/db"), async () => undefined),
-      mockModule(require.resolve("../services/conversionArtifactService"), {
+      mockModule(artifactServicePath, {
+        ...artifactService,
         assertArtifactStorageConfigured() {},
         ensureConversionArtifactIndexes: async () => ({ droppedIndexes: [] }),
         startConversionArtifactSweeper: () => ({ stop() {} }),
