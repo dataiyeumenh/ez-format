@@ -59,9 +59,9 @@ class MongoGridFsArtifactStorageAdapter {
     this.bucket = new Bucket(db, { bucketName: this.bucketName, chunkSizeBytes: 255 * 1024 });
   }
 
-  async putArtifact({ bytes, metadata = {} } = {}) {
+  async putArtifact({ bytes, metadata = {}, objectId } = {}) {
     const input = toReadable(bytes);
-    const upload = this.bucket.openUploadStream("temporary", {
+    const uploadOptions = {
       metadata: {
         ownerScope: String(metadata.ownerScope || "").trim(),
         userId: String(metadata.userId || "").trim(),
@@ -74,7 +74,10 @@ class MongoGridFsArtifactStorageAdapter {
         mime: String(metadata.mime || metadata.contentType || "application/octet-stream").trim(),
         createdAt: this.now(),
       },
-    });
+    };
+    const upload = objectId == null
+      ? this.bucket.openUploadStream("temporary", uploadOptions)
+      : this.bucket.openUploadStreamWithId(normalizeObjectId(objectId), "temporary", uploadOptions);
     const digest = crypto.createHash("sha256");
     let sizeBytes = 0;
     let sha256;

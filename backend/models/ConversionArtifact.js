@@ -4,6 +4,10 @@ const requiredWhenPublished = function requiredWhenPublished() {
   return !this.tombstoneOnly;
 };
 
+const requiredAfterWriteIntent = function requiredAfterWriteIntent() {
+  return this.status !== "write_intent";
+};
+
 const conversionArtifactSchema = new mongoose.Schema(
   {
     tombstoneOnly: { type: Boolean, default: false, immutable: true, index: true },
@@ -23,18 +27,19 @@ const conversionArtifactSchema = new mongoose.Schema(
       immutable: true,
     },
     revision: { type: Number, required: requiredWhenPublished, min: 1, immutable: true },
-    sha256: { type: String, required: true, trim: true, lowercase: true, immutable: true },
-    sizeBytes: { type: Number, required: true, min: 0, immutable: true },
+    sha256: { type: String, required: requiredAfterWriteIntent, default: "", trim: true, lowercase: true },
+    sizeBytes: { type: Number, required: requiredAfterWriteIntent, default: 0, min: 0 },
     mime: { type: String, required: true, trim: true, immutable: true },
     expiresAt: { type: Date, required: true, immutable: true },
     status: {
       type: String,
-      enum: ["available", "deletion_pending", "expired", "deleted", "missing", "corrupted"],
+      enum: ["write_intent", "available", "deletion_pending", "expired", "deleted", "missing", "corrupted"],
       default: "available",
       required: true,
       index: true,
     },
     purgeAt: { type: Date, default: null },
+    writeIntentExpiresAt: { type: Date, default: null },
   },
   { timestamps: true },
 );

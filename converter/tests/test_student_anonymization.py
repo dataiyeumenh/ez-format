@@ -176,7 +176,8 @@ def test_anonymization_preserves_blanks_and_numeric_identifiers_as_text():
     tax_code = session.replace("tax_code", "0012345678")
 
     assert isinstance(tax_code, str)
-    assert tax_code.startswith("TAX-00")
+    assert tax_code.startswith("PSEUDO-")
+    assert len(tax_code) == len("PSEUDO-") + 32
 
 
 def test_anonymization_rejects_unknown_categories():
@@ -382,7 +383,7 @@ def test_conservative_post_scan_is_independent_from_primary_cell_redaction(
         )
 
 
-def test_generated_pseudonym_phones_are_exempt_but_raw_phones_are_detected():
+def test_only_current_inventory_opaque_pseudonyms_are_exempt():
     session = AnonymizationSession("session-phone-token", "secret")
     generated = [
         session.replace("phone", "0901234567"),
@@ -391,9 +392,21 @@ def test_generated_pseudonym_phones_are_exempt_but_raw_phones_are_detected():
         session.replace("document_number", "079203001234"),
     ]
 
-    assert scan_export_pii_independently(generated) == ()
-    assert "phone" in scan_export_pii_independently(
-        ["0901234567", "+84 901 234 567"]
+    assert all(token.startswith("PSEUDO-") for token in generated)
+    assert scan_export_pii_independently(
+        generated,
+        allowed_tokens=session.generated_tokens,
+    ) == ()
+    assert "free_text" in scan_export_pii_independently(generated)
+    raw_matches = scan_export_pii_independently(
+        ["0901234567", "+84 901 234 567", "PHONE-0901234567", "DOC-B1234567"]
+    )
+    assert "phone" in raw_matches
+    assert "document_number" in raw_matches
+    fabricated = generated[0][:-1] + ("0" if generated[0][-1] != "0" else "1")
+    assert "free_text" in scan_export_pii_independently(
+        [fabricated],
+        allowed_tokens=session.generated_tokens,
     )
 
 

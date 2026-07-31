@@ -14,6 +14,14 @@ function memoryGridFs() {
   class FakeBucket {
     openUploadStream(filename, options = {}) {
       const id = `grid-${nextId++}`;
+      return this._openUploadStream(id, filename, options);
+    }
+
+    openUploadStreamWithId(id, filename, options = {}) {
+      return this._openUploadStream(String(id), filename, options);
+    }
+
+    _openUploadStream(id, filename, options) {
       const chunks = [];
       const stream = new (require("node:stream").Writable)({
         write(chunk, _encoding, callback) {
@@ -103,6 +111,26 @@ test("GridFS adapter streams bounded bytes, hashes them, and never accepts a bro
     }),
     (error) => error.code === "ARTIFACT_TOO_LARGE",
   );
+});
+
+test("GridFS adapter publishes bytes under the precommitted write-intent object id", async () => {
+  const gridFs = memoryGridFs();
+  const adapter = new MongoGridFsArtifactStorageAdapter({
+    db: {},
+    bucketName: "conversion_artifacts",
+    maxBytes: 32,
+    GridFSBucket: gridFs.FakeBucket,
+  });
+  const reservedObjectId = "507f1f77bcf86cd799439011";
+
+  const published = await adapter.putArtifact({
+    objectId: reservedObjectId,
+    bytes: Buffer.from("intent-first"),
+    metadata: { ownerScope: "user:user-1", runId: "run-1" },
+  });
+
+  assert.equal(String(published.objectId), reservedObjectId);
+  assert.equal(gridFs.files.has(reservedObjectId), true);
 });
 
 test("GridFS adapter deletes only the generated object id", async () => {

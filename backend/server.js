@@ -68,6 +68,8 @@ const voucherReconstructionEnabled =
   "true";
 const studentAssistantEnabled =
   String(process.env.STUDENT_ASSISTANT_ENABLED || "false").toLowerCase() === "true";
+const studentPrivacyRetentionEnabled =
+  String(process.env.STUDENT_PRIVACY_RETENTION_ENABLED || "false").toLowerCase() === "true";
 const misaImportRepairEnabled =
   String(process.env.MISA_IMPORT_REPAIR_ENABLED || "false").trim().toLowerCase() ===
   "true";
@@ -204,6 +206,7 @@ function createStartServer({
   migrateMappingProfilesV2 = migrateMappingProfilesV1ToV2,
   runMappingProfileMigrations = runProductionMigrationPreflight,
   studentEnabled = studentAssistantEnabled,
+  studentPrivacyRetentionEnabled: privacyRetentionEnabled = studentPrivacyRetentionEnabled,
   migrateStudentPrivacy: runStudentPrivacyMigration = migrateStudentPrivacy,
   ensureStudentPrivacyIndexes: ensurePrivacyIndexes = ensureStudentPrivacyIndexes,
   loadStudentPrivacyModels: loadPrivacyModels = loadStudentPrivacyModels,
@@ -216,6 +219,11 @@ function createStartServer({
   logger = console,
 } = {}) {
   return async function startServer() {
+    if (studentEnabled && !privacyRetentionEnabled) {
+      throw new Error(
+        "STUDENT_PRIVACY_RETENTION_ENABLED=true is required when Student Assistant is enabled",
+      );
+    }
     const privacyMigrationMode = normalizeStudentPrivacyMigrationMode(
       process.env.STUDENT_PRIVACY_MIGRATION_MODE,
     );
@@ -277,7 +285,7 @@ function createStartServer({
         throw error;
       }
     }
-    const studentPrivacyModels = studentEnabled ? loadPrivacyModels(connection) : null;
+    const studentPrivacyModels = privacyRetentionEnabled ? loadPrivacyModels(connection) : null;
     if (studentPrivacyModels) await ensurePrivacyIndexes(studentPrivacyModels);
     if (studentPrivacyModels && privacyMigrationMode !== "off") {
       try {
@@ -303,7 +311,7 @@ function createStartServer({
     const artifactSweeper = converterGatewayUsageReady
       ? startArtifactSweeper()
       : null;
-    const studentDeletionSweeper = studentEnabled
+    const studentDeletionSweeper = privacyRetentionEnabled
       ? startStudentDeleteSweeper()
       : null;
     const server = listen(PORT, () => {
@@ -336,4 +344,5 @@ module.exports = {
   createStartServer,
   converterGatewayUsageReady,
   studentAssistantEnabled,
+  studentPrivacyRetentionEnabled,
 };

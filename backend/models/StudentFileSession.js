@@ -60,6 +60,7 @@ const studentFileSessionSchema = new mongoose.Schema(
     targetTemplateId: { type: String, trim: true, maxlength: 128, default: "" },
     sourceSignatureHash: { type: String, trim: true, maxlength: 256, default: "" },
     summary: { type: mongoose.Schema.Types.Mixed, default: {} },
+    childWriteEpoch: { type: Number, default: 0, min: 0 },
     deleteFailureCode: { type: String, trim: true, maxlength: 80, default: "" },
     deleteStartedAt: { type: Date, default: null, index: true },
     deleteFailedAt: { type: Date, default: null },

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import os
 import shutil
@@ -23,6 +24,7 @@ from app.operation_store_client import NodeOperationStoreClient, OperationStoreC
 STUDENT_METADATA_STATE_CONTRACT = "student_metadata_v1"
 DEFAULT_OPERATION_SESSION_CLEANUP_BATCH_SIZE = 100
 DEFAULT_OPERATION_SESSION_CREATION_GRACE_SECONDS = 300
+MIN_OPERATION_FENCE_RETENTION_SECONDS = 24 * 60 * 60
 _OPERATION_SESSION_DIRECTORY_LOCK = threading.RLock()
 _ACTIVE_OPERATION_SESSION_CREATIONS: set[tuple[str, str]] = set()
 
@@ -106,8 +108,6 @@ def cleanup_expired_operation_sessions(
         if configured
         else BACKEND_ROOT / ".artifacts" / "operation-sessions"
     )
-    if not session_root.is_dir():
-        return []
     configured_limit = batch_size
     if configured_limit is None:
         configured_limit = os.getenv(
@@ -121,7 +121,12 @@ def cleanup_expired_operation_sessions(
     current_time = now or datetime.now(timezone.utc)
     deleted: list[str] = []
     inspected = 0
-    for directory in sorted(session_root.iterdir(), key=lambda path: path.name):
+    directories = (
+        sorted(session_root.iterdir(), key=lambda path: path.name)
+        if session_root.is_dir()
+        else ()
+    )
+    for directory in directories:
         if inspected >= limit:
             break
         if not directory.is_dir() and not directory.is_symlink():
@@ -144,6 +149,13 @@ def cleanup_expired_operation_sessions(
             continue
         if removed:
             deleted.append(directory.name)
+    lifecycle_root = session_root.parent / f".{session_root.name}-lifecycle"
+    if lifecycle_root.is_dir():
+        for state_path in sorted(lifecycle_root.glob("*.json"), key=lambda path: path.name):
+            if inspected >= limit:
+                break
+            inspected += 1
+            _remove_expired_purged_fence(state_path, current_time)
     return deleted
 
 
@@ -1129,10 +1141,12 @@ class OperationStore:
             raise OperationStoreError("Operation session is purging or purged")
 
     def _lifecycle_lock_path(self, session_id: str) -> Path:
-        return self._lifecycle_root / f"{self._directory(session_id).name}.lock"
+        self._directory(session_id)
+        return self._lifecycle_root / f"{_operation_fence_key(session_id)}.lock"
 
     def _lifecycle_state_path(self, session_id: str) -> Path:
-        return self._lifecycle_root / f"{self._directory(session_id).name}.json"
+        self._directory(session_id)
+        return self._lifecycle_root / f"{_operation_fence_key(session_id)}.json"
 
     def _read_lifecycle_state(self, session_id: str) -> dict[str, Any] | None:
         path = self._lifecycle_state_path(session_id)
@@ -1149,14 +1163,10 @@ class OperationStore:
     def _write_lifecycle_state(self, session_id: str, status: str) -> None:
         if status not in {"active", "purging", "purged"}:
             raise OperationStoreError("Operation lifecycle fence không hợp lệ")
+        current_time = datetime.now(timezone.utc)
         self._atomic_write(
             self._lifecycle_state_path(session_id),
-            {
-                "schema_version": 1,
-                "session_id": session_id,
-                "status": status,
-                "updated_at": datetime.now(timezone.utc).isoformat(),
-            },
+            _operation_fence_payload(status, current_time),
         )
 
     @staticmethod
@@ -1255,6 +1265,92 @@ def _creation_grace_seconds() -> int:
     return min(max(configured, 30), 3600)
 
 
+def _operation_fence_secret() -> bytes:
+    secret = next(
+        (
+            os.getenv(name, "").strip()
+            for name in (
+                "OPERATION_FENCE_HMAC_SECRET",
+                "CONVERSION_CONTEXT_SECRET",
+                "CONVERTER_SERVICE_TOKEN",
+            )
+            if os.getenv(name, "").strip()
+        ),
+        "",
+    )
+    if not secret:
+        raise OperationStoreError("Operation lifecycle HMAC secret is required")
+    return secret.encode("utf-8")
+
+
+def _operation_fence_key(session_id: str) -> str:
+    normalized = str(session_id or "").strip()
+    if not normalized:
+        raise OperationStoreError("Session ID không hợp lệ")
+    return hmac.new(
+        _operation_fence_secret(),
+        normalized.encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+
+
+def _operation_fence_retention_seconds() -> int:
+    values = [MIN_OPERATION_FENCE_RETENTION_SECONDS, _ttl_seconds()]
+    for name in (
+        "OPERATION_FENCE_RETENTION_SECONDS",
+        "STUDENT_UPLOAD_RETENTION_SECONDS",
+        "CONVERTER_ARTIFACT_TTL_SECONDS",
+    ):
+        try:
+            values.append(max(0, int(os.getenv(name, "0"))))
+        except ValueError:
+            continue
+    return max(values)
+
+
+def _operation_fence_payload(status: str, current_time: datetime) -> dict[str, Any]:
+    retain_until = current_time + timedelta(
+        seconds=_operation_fence_retention_seconds()
+    )
+    payload: dict[str, Any] = {
+        "schema_version": 2,
+        "status": status,
+        "updated_at": current_time.isoformat(),
+        "retain_until": retain_until.isoformat(),
+    }
+    if status == "purged":
+        payload["purge_after"] = retain_until.isoformat()
+    return payload
+
+
+def _remove_expired_purged_fence(state_path: Path, current_time: datetime) -> bool:
+    lock_path = state_path.with_suffix(".lock")
+    try:
+        observed = json.loads(state_path.read_text(encoding="utf-8"))
+        if observed.get("status") != "purged":
+            return False
+        with _file_lock(lock_path):
+            payload = json.loads(state_path.read_text(encoding="utf-8"))
+            if payload.get("status") != "purged":
+                return False
+            raw_purge_after = payload.get("purge_after")
+            purge_after = datetime.fromisoformat(
+                str(raw_purge_after or "").replace("Z", "+00:00")
+            )
+            if purge_after.tzinfo is None:
+                purge_after = purge_after.replace(tzinfo=timezone.utc)
+            if purge_after > current_time:
+                return False
+            state_path.unlink(missing_ok=True)
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return False
+    try:
+        lock_path.unlink(missing_ok=True)
+    except OSError:
+        return False
+    return not state_path.exists() and not lock_path.exists()
+
+
 def _remove_operation_session_directory(root: Path, directory: Path) -> None:
     if directory.parent.resolve() != root.resolve():
         raise OperationStoreError("Operation session cleanup path không hợp lệ")
@@ -1284,8 +1380,9 @@ def _coordinated_remove_expired_directory(root: Path, directory: Path) -> bool:
 
     lifecycle_root = root.parent / f".{root.name}-lifecycle"
     lifecycle_root.mkdir(parents=True, exist_ok=True)
-    lifecycle_path = lifecycle_root / f"{session_id}.json"
-    lock_path = lifecycle_root / f"{session_id}.lock"
+    lifecycle_key = _operation_fence_key(session_id)
+    lifecycle_path = lifecycle_root / f"{lifecycle_key}.json"
+    lock_path = lifecycle_root / f"{lifecycle_key}.lock"
     with OperationStore._locks_guard:
         thread_lock = OperationStore._locks.setdefault(session_id, threading.RLock())
     with thread_lock:
@@ -1303,12 +1400,7 @@ def _coordinated_remove_expired_directory(root: Path, directory: Path) -> bool:
                     )
             OperationStore._atomic_write(
                 lifecycle_path,
-                {
-                    "schema_version": 1,
-                    "session_id": session_id,
-                    "status": "purging",
-                    "updated_at": datetime.now(timezone.utc).isoformat(),
-                },
+                _operation_fence_payload("purging", datetime.now(timezone.utc)),
             )
             with _OPERATION_SESSION_DIRECTORY_LOCK:
                 if directory.exists() or directory.is_symlink():
@@ -1317,12 +1409,7 @@ def _coordinated_remove_expired_directory(root: Path, directory: Path) -> bool:
                 return False
             OperationStore._atomic_write(
                 lifecycle_path,
-                {
-                    "schema_version": 1,
-                    "session_id": session_id,
-                    "status": "purged",
-                    "updated_at": datetime.now(timezone.utc).isoformat(),
-                },
+                _operation_fence_payload("purged", datetime.now(timezone.utc)),
             )
             return True
 

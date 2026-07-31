@@ -10,12 +10,7 @@ const {
 
 const conversionOperationLifecycleSchema = new mongoose.Schema(
   {
-    ownerScope: { type: String, required: true, trim: true, immutable: true },
-    userId: { type: String, required: true, trim: true, immutable: true },
-    sessionId: { type: String, required: true, trim: true, immutable: true },
-    uploadId: { type: String, required: true, trim: true, immutable: true },
-    runId: { type: String, required: true, trim: true, immutable: true },
-    targetTemplateId: { type: String, required: true, trim: true, immutable: true },
+    operationKey: { type: String, required: true, trim: true, immutable: true },
     status: {
       type: String,
       enum: ["active", "purging", "purged"],
@@ -33,19 +28,31 @@ const conversionOperationLifecycleSchema = new mongoose.Schema(
     },
     purgeStartedAt: { type: Date, default: null },
     purgedAt: { type: Date, default: null },
+    retainUntil: { type: Date, default: null },
+    purgeAt: { type: Date, default: null },
   },
   { timestamps: true },
 );
 
 conversionOperationLifecycleSchema.index(
-  { ownerScope: 1, userId: 1, sessionId: 1, uploadId: 1, runId: 1, targetTemplateId: 1 },
+  { operationKey: 1 },
   { unique: true },
+);
+conversionOperationLifecycleSchema.index(
+  { purgeAt: 1 },
+  {
+    name: "conversion_operation_purged_ttl",
+    expireAfterSeconds: 0,
+    partialFilterExpression: { status: "purged" },
+  },
 );
 
 const ConversionOperationLifecycle = mongoose.models.ConversionOperationLifecycle ||
   mongoose.model("ConversionOperationLifecycle", conversionOperationLifecycleSchema);
 
 const DEFAULT_TOMBSTONE_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
+const DEFAULT_LIFECYCLE_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
+const DEFAULT_WRITE_INTENT_TIMEOUT_MS = 15 * 60 * 1000;
 const ARTIFACT_KINDS = new Set(["analysis", "upload", "output", "state", "manifest", "import_result", "repair_state", "retry_output"]);
 const SAFE_IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$/;
 const OWNER_SCOPE = /^(user|workspace):[A-Za-z0-9_-]{1,160}$/;
@@ -73,14 +80,28 @@ function plain(document) {
   return document && typeof document.toObject === "function" ? document.toObject() : document;
 }
 
-function lifecycleFilter(binding) {
+function artifactLifecycleSecret(explicitSecret) {
+  const secret = String(
+    explicitSecret || process.env.ARTIFACT_LIFECYCLE_HMAC_SECRET ||
+    process.env.CONVERSION_CONTEXT_SECRET || "",
+  ).trim();
+  if (secret.length < 32) {
+    throw new Error("ARTIFACT_LIFECYCLE_HMAC_SECRET must contain at least 32 characters");
+  }
+  return secret;
+}
+
+function lifecycleFilter(binding, secret) {
+  const canonical = [
+    binding.ownerScope,
+    binding.userId,
+    binding.sessionId,
+    binding.uploadId,
+    binding.runId,
+    binding.targetTemplateId,
+  ].join("\0");
   return {
-    ownerScope: binding.ownerScope,
-    userId: binding.userId,
-    sessionId: binding.sessionId,
-    uploadId: binding.uploadId,
-    runId: binding.runId,
-    targetTemplateId: binding.targetTemplateId,
+    operationKey: crypto.createHmac("sha256", secret).update(canonical).digest("hex"),
   };
 }
 
@@ -88,8 +109,20 @@ function lifecycleWriteError(message = "Operation session is no longer writable"
   return storageError(410, message, "ARTIFACT_OPERATION_PURGED");
 }
 
-function createMongooseOperationLifecycleRepository(Model = ConversionOperationLifecycle) {
-  const leaseLifetimeMs = 15 * 60 * 1000;
+function createMongooseOperationLifecycleRepository(Model = ConversionOperationLifecycle, {
+  hmacSecret,
+  leaseLifetimeMs = 30_000,
+  lifecycleRetentionMs = DEFAULT_LIFECYCLE_RETENTION_MS,
+} = {}) {
+  const secret = artifactLifecycleSecret(hmacSecret);
+  const boundedLeaseLifetimeMs = Math.min(
+    Math.max(Number(leaseLifetimeMs) || 30_000, 5_000),
+    15 * 60 * 1000,
+  );
+  const boundedLifecycleRetentionMs = Math.max(
+    Number(lifecycleRetentionMs) || DEFAULT_LIFECYCLE_RETENTION_MS,
+    24 * 60 * 60 * 1000,
+  );
   const withLeaseCount = (document, leaseId) => {
     const value = plain(document);
     if (!value) return value;
@@ -98,69 +131,109 @@ function createMongooseOperationLifecycleRepository(Model = ConversionOperationL
   return {
     async find(binding, now = new Date()) {
       const document = await Model.findOneAndUpdate(
-        lifecycleFilter(binding),
+        lifecycleFilter(binding, secret),
         { $pull: { writeLeases: { expiresAt: { $lte: now } } } },
         { new: true },
       );
       return withLeaseCount(document);
     },
-    async acquireWriteLease(binding) {
+    async acquireWriteLease(binding, { retainUntil } = {}) {
       const leaseId = crypto.randomUUID();
-      const lease = { leaseId, expiresAt: new Date(Date.now() + leaseLifetimeMs) };
-      const filter = { ...lifecycleFilter(binding), status: "active" };
-      const current = await Model.findOneAndUpdate(
-        filter,
-        { $push: { writeLeases: lease } },
-        { new: true },
-      );
+      const lease = {
+        leaseId,
+        expiresAt: new Date(Date.now() + boundedLeaseLifetimeMs),
+      };
+      const filter = { ...lifecycleFilter(binding, secret), status: "active" };
+      const update = { $push: { writeLeases: lease } };
+      if (retainUntil instanceof Date && !Number.isNaN(retainUntil.getTime())) {
+        update.$max = { retainUntil };
+      }
+      const current = await Model.findOneAndUpdate(filter, update, { new: true });
       if (current) return withLeaseCount(current, leaseId);
       try {
         return withLeaseCount(await Model.create({
-          ...lifecycleFilter(binding),
+          ...lifecycleFilter(binding, secret),
           status: "active",
           writeLeases: [lease],
+          retainUntil,
         }), leaseId);
       } catch (error) {
         if (error?.code === 11000) throw lifecycleWriteError();
         throw error;
       }
     },
+    async renewWriteLease(binding, leaseId, now = new Date()) {
+      if (!leaseId) return null;
+      const document = await Model.findOneAndUpdate(
+        {
+          ...lifecycleFilter(binding, secret),
+          status: "active",
+          writeLeases: { $elemMatch: { leaseId, expiresAt: { $gt: now } } },
+        },
+        {
+          $set: {
+            "writeLeases.$.expiresAt": new Date(now.getTime() + boundedLeaseLifetimeMs),
+          },
+        },
+        { new: true },
+      );
+      return withLeaseCount(document, leaseId);
+    },
+    async validateWriteLease(binding, leaseId, now = new Date()) {
+      if (!leaseId) return null;
+      const document = await Model.findOne({
+        ...lifecycleFilter(binding, secret),
+        status: "active",
+        writeLeases: { $elemMatch: { leaseId, expiresAt: { $gt: now } } },
+      });
+      return withLeaseCount(document, leaseId);
+    },
     async releaseWriteLease(binding, leaseId) {
       if (!leaseId) throw lifecycleWriteError("Operation write lease is invalid");
       await Model.updateOne(
-        lifecycleFilter(binding),
+        lifecycleFilter(binding, secret),
         { $pull: { writeLeases: { leaseId } } },
       );
     },
     async beginPurge(binding, now = new Date()) {
       const started = await Model.findOneAndUpdate(
-        { ...lifecycleFilter(binding), status: "active" },
+        { ...lifecycleFilter(binding, secret), status: "active" },
         { $set: { status: "purging", purgeStartedAt: now } },
         { new: true },
       );
       if (started) return withLeaseCount(started);
-      const existing = await Model.findOne(lifecycleFilter(binding));
+      const existing = await Model.findOne(lifecycleFilter(binding, secret));
       if (existing) return withLeaseCount(existing);
       try {
         return withLeaseCount(await Model.create({
-          ...lifecycleFilter(binding),
+          ...lifecycleFilter(binding, secret),
           status: "purging",
           writeLeases: [],
           purgeStartedAt: now,
         }));
       } catch (error) {
         if (error?.code !== 11000) throw error;
-        return withLeaseCount(await Model.findOne(lifecycleFilter(binding)));
+        return withLeaseCount(await Model.findOne(lifecycleFilter(binding, secret)));
       }
     },
     async markPurged(binding, now = new Date()) {
+      const current = await Model.findOne(lifecycleFilter(binding, secret));
+      const retainUntil = current?.retainUntil ? new Date(current.retainUntil) : now;
+      const purgeAt = new Date(Math.max(
+        now.getTime() + boundedLifecycleRetentionMs,
+        Number.isNaN(retainUntil.getTime()) ? 0 : retainUntil.getTime(),
+      ));
       const result = await Model.findOneAndUpdate(
-        { ...lifecycleFilter(binding), status: "purging", "writeLeases.0": { $exists: false } },
-        { $set: { status: "purged", purgedAt: now } },
+        {
+          ...lifecycleFilter(binding, secret),
+          status: "purging",
+          "writeLeases.0": { $exists: false },
+        },
+        { $set: { status: "purged", purgedAt: now, purgeAt } },
         { new: true },
       );
       if (result) return withLeaseCount(result);
-      const existing = await Model.findOne(lifecycleFilter(binding));
+      const existing = await Model.findOne(lifecycleFilter(binding, secret));
       if (existing?.status === "purged" && !(existing.writeLeases?.length)) {
         return withLeaseCount(existing);
       }
@@ -179,6 +252,19 @@ function createMongooseArtifactRepository(Model = ConversionArtifact) {
     async create(metadata) {
       return plain(await Model.create(metadata));
     },
+    async createWriteIntent(metadata) {
+      return plain(await Model.create({ ...metadata, status: "write_intent" }));
+    },
+    async publishWriteIntent(gridFsObjectId, metadata) {
+      return plain(await Model.findOneAndUpdate(
+        { gridFsObjectId, tombstoneOnly: false, status: "write_intent" },
+        {
+          $set: { ...metadata, status: "available" },
+          $unset: { writeIntentExpiresAt: 1 },
+        },
+        { new: true, runValidators: true },
+      ));
+    },
     async markStatus(gridFsObjectId, status, updates = {}) {
       const update = { $set: { status } };
       if (Object.hasOwn(updates, "purgeAt")) {
@@ -193,6 +279,7 @@ function createMongooseArtifactRepository(Model = ConversionArtifact) {
     async findExpired({ now, limit }) {
       const documents = await Model.find({
         $or: [
+          { tombstoneOnly: false, status: "write_intent", writeIntentExpiresAt: { $lte: now } },
           { tombstoneOnly: false, status: "deletion_pending" },
           { tombstoneOnly: false, status: "available", expiresAt: { $lte: now } },
           { tombstoneOnly: true, status: "deletion_pending" },
@@ -250,7 +337,11 @@ function assertBinding(metadata, input) {
     const expected = normalizeIdentifier(input[field], `${label[0].toUpperCase()}${label.slice(1)} id`);
     if (metadata[field] !== expected) throw storageError(403, "Artifact binding does not match this conversion", "ARTIFACT_BINDING_MISMATCH");
   }
-  if (!/^[a-f0-9]{64}$/.test(String(metadata.sha256 || "")) || !Number.isSafeInteger(metadata.sizeBytes) || metadata.sizeBytes < 0) {
+  if (
+    metadata.status !== "write_intent" &&
+    (!/^[a-f0-9]{64}$/.test(String(metadata.sha256 || "")) ||
+      !Number.isSafeInteger(metadata.sizeBytes) || metadata.sizeBytes < 0)
+  ) {
     throw storageError(409, "Artifact metadata checksum is invalid", "ARTIFACT_CHECKSUM_MISMATCH");
   }
 }
@@ -266,6 +357,11 @@ function createConversionArtifactService({
   purgeMaxArtifacts = 10_000,
   purgeLeaseWaitMs = 5_000,
   purgeLeasePollMs = 10,
+  leaseHeartbeatIntervalMs = 10_000,
+  writeIntentTimeoutMs = DEFAULT_WRITE_INTENT_TIMEOUT_MS,
+  objectIdFactory = () => new mongoose.Types.ObjectId(),
+  setIntervalImpl = setInterval,
+  clearIntervalImpl = clearInterval,
 } = {}) {
   if (!storageAdapter) throw new Error("MongoDB/GridFS artifact adapter is required");
   const lifecycleStore = lifecycleRepository || (
@@ -273,6 +369,11 @@ function createConversionArtifactService({
       ? repository
       : createMongooseOperationLifecycleRepository()
   );
+  for (const method of ["acquireWriteLease", "renewWriteLease", "validateWriteLease", "releaseWriteLease"]) {
+    if (typeof lifecycleStore[method] !== "function") {
+      throw new Error(`Artifact lifecycle repository is missing ${method}`);
+    }
+  }
 
   function purgeAt() {
     return new Date(now().getTime() + Math.max(60_000, tombstoneRetentionMs));
@@ -309,13 +410,71 @@ function createConversionArtifactService({
     }
   }
 
+  function startWriteLeaseHeartbeat(binding, leaseId) {
+    const intervalMs = Math.min(
+      Math.max(Number(leaseHeartbeatIntervalMs) || 10_000, 5),
+      60_000,
+    );
+    let stopped = false;
+    let failure = null;
+    let inFlight = Promise.resolve();
+    const timer = setIntervalImpl(() => {
+      inFlight = inFlight.then(async () => {
+        if (stopped || failure) return;
+        const renewed = await lifecycleStore.renewWriteLease(binding, leaseId);
+        if (!renewed || renewed.status !== "active") throw lifecycleWriteError();
+      }).catch((error) => {
+        failure = error?.code === "ARTIFACT_OPERATION_PURGED" ? error : lifecycleWriteError();
+      });
+    }, intervalMs);
+    timer?.unref?.();
+    return {
+      async assertHealthy() {
+        await inFlight;
+        if (failure) throw failure;
+      },
+      async stop() {
+        stopped = true;
+        clearIntervalImpl(timer);
+        await inFlight;
+      },
+    };
+  }
+
+  async function discardProvisionalArtifact(intent, cause) {
+    let cleanupFailure = null;
+    try {
+      await storageAdapter.deleteArtifact({ objectId: intent.gridFsObjectId });
+      if (await storageAdapter.getArtifact({ objectId: intent.gridFsObjectId })) {
+        throw new Error("Provisional artifact bytes remain");
+      }
+      const removed = await repository.deleteMetadata(intent.gridFsObjectId);
+      if (Number(removed?.deletedCount || 0) !== 1) {
+        throw new Error("Provisional artifact metadata remains");
+      }
+    } catch (error) {
+      cleanupFailure = error;
+      try {
+        await repository.markStatus(intent.gridFsObjectId, "deletion_pending", { purgeAt: purgeAt() });
+      } catch {
+        // The pre-existing write intent remains durable and sweep-discoverable.
+      }
+    }
+    if (cleanupFailure) {
+      const pending = storageError(503, "Artifact cleanup remains pending", "ARTIFACT_CLEANUP_PENDING");
+      pending.cause = cause || cleanupFailure;
+      throw pending;
+    }
+  }
+
   async function putArtifact(input) {
     const binding = normalizeBinding(input);
     if (binding.revision == null) throw storageError(400, "Artifact revision is required", "INVALID_ARTIFACT_REVISION");
     const expiresAt = new Date(input.expiresAt);
     if (Number.isNaN(expiresAt.getTime()) || expiresAt <= now()) throw storageError(400, "Artifact expiry is invalid", "INVALID_ARTIFACT_EXPIRY");
-    const lease = await lifecycleStore.acquireWriteLease(binding);
+    const lease = await lifecycleStore.acquireWriteLease(binding, { retainUntil: expiresAt });
     if (!lease || lease.status !== "active") throw lifecycleWriteError();
+    const heartbeat = startWriteLeaseHeartbeat(binding, lease.leaseId);
     try {
       const existing = await repository.findLatest(binding);
       if (existing) {
@@ -324,9 +483,25 @@ function createConversionArtifactService({
         throw storageError(410, "Artifact revision has been retired", "ARTIFACT_REVISION_RETIRED");
       }
       const expectedSha256 = input.sha256 == null ? "" : String(input.sha256).trim().toLowerCase();
+      const workspaceId = input.workspaceId == null || String(input.workspaceId).trim() === ""
+        ? null
+        : normalizeIdentifier(input.workspaceId, "Workspace id");
+      const intent = await repository.createWriteIntent({
+        ...binding,
+        workspaceId,
+        gridFsObjectId: objectIdFactory(),
+        sha256: "",
+        sizeBytes: 0,
+        mime: String(input.mime || input.contentType || "application/octet-stream").trim(),
+        expiresAt,
+        writeIntentExpiresAt: new Date(
+          now().getTime() + Math.max(60_000, Number(writeIntentTimeoutMs) || DEFAULT_WRITE_INTENT_TIMEOUT_MS),
+        ),
+      });
       let uploaded;
       try {
         uploaded = await storageAdapter.putArtifact({
+          objectId: intent.gridFsObjectId,
           bytes: input.bytes || input.content,
           metadata: {
             ...binding,
@@ -336,30 +511,45 @@ function createConversionArtifactService({
           },
         });
       } catch (error) {
-        if (error?.orphanedArtifact) await createCleanupTombstone(error.orphanedArtifact, expiresAt);
+        await discardProvisionalArtifact(intent, error);
         throw error;
       }
       const metadata = {
         ...binding,
-        workspaceId: input.workspaceId == null || String(input.workspaceId).trim() === "" ? null : normalizeIdentifier(input.workspaceId, "Workspace id"),
+        workspaceId,
         gridFsObjectId: uploaded.objectId,
         sha256: uploaded.sha256,
         sizeBytes: uploaded.sizeBytes,
         mime: String(input.mime || input.contentType || uploaded.mime || "application/octet-stream").trim(),
         expiresAt,
-        status: "available",
       };
       if (metadata.sizeBytes > maxBytes) {
-        await compensate(uploaded.objectId, metadata);
+        await discardProvisionalArtifact(intent);
         throw storageError(413, "Artifact exceeds size limit", "ARTIFACT_TOO_LARGE");
       }
+      await heartbeat.assertHealthy();
+      const finalLease = await lifecycleStore.validateWriteLease(binding, lease.leaseId);
+      if (!finalLease || finalLease.status !== "active") {
+        await discardProvisionalArtifact(intent);
+        throw lifecycleWriteError();
+      }
+      let published;
       try {
-        return await repository.create(metadata);
+        published = await repository.publishWriteIntent(intent.gridFsObjectId, metadata);
+        if (!published) throw lifecycleWriteError("Artifact write intent could not be published");
       } catch (error) {
-        await compensate(uploaded.objectId, metadata);
+        await discardProvisionalArtifact(intent, error);
         throw error;
       }
+      await heartbeat.assertHealthy();
+      const publishedLease = await lifecycleStore.validateWriteLease(binding, lease.leaseId);
+      if (!publishedLease || publishedLease.status !== "active") {
+        await discardProvisionalArtifact(published);
+        throw lifecycleWriteError();
+      }
+      return published;
     } finally {
+      await heartbeat.stop();
       await lifecycleStore.releaseWriteLease(binding, lease.leaseId);
     }
   }
@@ -547,8 +737,10 @@ function createConversionArtifactService({
       try {
         if (
           metadata.tombstoneOnly !== true &&
-          metadata.status === "available" &&
-          new Date(metadata.expiresAt) <= now()
+          (
+            metadata.status === "write_intent" ||
+            (metadata.status === "available" && new Date(metadata.expiresAt) <= now())
+          )
         ) {
           const result = await purgeSessionArtifacts(metadata);
           deleted += Number(result.deletedArtifacts || 0);

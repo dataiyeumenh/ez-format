@@ -555,6 +555,68 @@ function studentSessionIdentity(session) {
   };
 }
 
+function studentTransactionRequired(cause) {
+  const error = new Error("Student privacy writes require transaction-capable MongoDB");
+  error.code = "STUDENT_TRANSACTION_REQUIRED";
+  if (cause) error.cause = cause;
+  return error;
+}
+
+async function runStudentMongoTransaction(
+  work,
+  {
+    connection = mongoose.connection,
+    environment = process.env.NODE_ENV,
+  } = {},
+) {
+  let mongoSession;
+  try {
+    if (
+      connection?.readyState === 1 &&
+      typeof connection.startSession === "function"
+    ) {
+      try {
+        mongoSession = await connection.startSession();
+      } catch (error) {
+        if (environment === "production") throw studentTransactionRequired(error);
+      }
+      if (typeof mongoSession?.withTransaction === "function") {
+        let result;
+        await mongoSession.withTransaction(async () => {
+          result = await work(mongoSession);
+        });
+        return result;
+      }
+    }
+    if (environment === "production") throw studentTransactionRequired();
+    return work(null);
+  } finally {
+    if (typeof mongoSession?.endSession === "function") {
+      await mongoSession.endSession();
+    }
+  }
+}
+
+function activeStudentParentFilter(claims) {
+  return {
+    _id: claims.session_id,
+    userId: claims.user_id,
+    ownerScope: claims.owner_scope,
+    workspaceId: claims.workspace_id || null,
+    retentionExpiresAt: { $gt: new Date() },
+    status: { $nin: ["expired", "deleted", "deleting", "delete_failed"] },
+    converterUploadId: { $nin: ["", null] },
+  };
+}
+
+async function countStudentChildren(model, filter, mongoSession) {
+  const query = model.countDocuments(filter);
+  if (mongoSession && typeof query?.session === "function") {
+    return query.session(mongoSession);
+  }
+  return query;
+}
+
 async function markStudentDeleteFailed(
   session,
   cause,
@@ -584,6 +646,7 @@ async function completeStudentDeletion(
     sessionModel = StudentFileSession,
     questionModel = StudentQuestionEvent,
     activityModel = StudentActivity,
+    runInTransaction = runStudentMongoTransaction,
     now = () => new Date(),
   } = {},
 ) {
@@ -600,51 +663,54 @@ async function completeStudentDeletion(
     throw studentPurgeFailure(error);
   }
   const metadataFilter = studentMetadataFilter(session);
-  await questionModel.deleteMany(metadataFilter);
-  await activityModel.deleteMany(metadataFilter);
-  for (const model of [questionModel, activityModel]) {
-    const isProductionModel = model === StudentQuestionEvent || model === StudentActivity;
-    if (typeof model.countDocuments === "function" && (!isProductionModel || mongoose.connection.readyState === 1)) {
-      const remaining = await model.countDocuments(metadataFilter);
-      if (Number(remaining || 0) !== 0) {
-        const error = new Error("Student child metadata remains after purge");
-        error.code = "STUDENT_CHILD_PURGE_INCOMPLETE";
-        throw error;
+  await runInTransaction(async (mongoSession) => {
+    const transactionOptions = mongoSession ? { session: mongoSession } : undefined;
+    await questionModel.deleteMany(metadataFilter, transactionOptions);
+    await activityModel.deleteMany(metadataFilter, transactionOptions);
+    for (const model of [questionModel, activityModel]) {
+      const isProductionModel = model === StudentQuestionEvent || model === StudentActivity;
+      if (typeof model.countDocuments === "function" && (!isProductionModel || mongoose.connection.readyState === 1)) {
+        const remaining = await countStudentChildren(model, metadataFilter, mongoSession);
+        if (Number(remaining || 0) !== 0) {
+          const error = new Error("Student child metadata remains after purge");
+          error.code = "STUDENT_CHILD_PURGE_INCOMPLETE";
+          throw error;
+        }
       }
     }
-  }
-  const completedAt = now();
-  const tombstone = await sessionModel.findOneAndUpdate(
-    { ...studentSessionIdentity(session), status: "deleting" },
-    {
-      $set: {
-        status: "deleted",
-        purgedAt: completedAt,
-        purgeAt: new Date(completedAt.getTime() + DEFAULT_DELETED_TOMBSTONE_MS),
-        converterUploadId: "",
-        targetTemplateId: "",
-        sourceSignatureHash: "",
-        summary: {},
-        file: {
-          originalName: "deleted",
-          sizeBytes: 0,
-          extension: "",
-          contentHash: "",
-          rawRetained: false,
+    const completedAt = now();
+    const tombstone = await sessionModel.findOneAndUpdate(
+      { ...studentSessionIdentity(session), status: "deleting" },
+      {
+        $set: {
+          status: "deleted",
+          purgedAt: completedAt,
+          purgeAt: new Date(completedAt.getTime() + DEFAULT_DELETED_TOMBSTONE_MS),
+          converterUploadId: "",
+          targetTemplateId: "",
+          sourceSignatureHash: "",
+          summary: {},
+          file: {
+            originalName: "deleted",
+            sizeBytes: 0,
+            extension: "",
+            contentHash: "",
+            rawRetained: false,
+          },
+        },
+        $unset: {
+          deleteFailureCode: 1,
+          deleteFailedAt: 1,
         },
       },
-      $unset: {
-        deleteFailureCode: 1,
-        deleteFailedAt: 1,
-      },
-    },
-    { new: true, runValidators: true },
-  );
-  if (!tombstone) {
-    const error = new Error("Student purge tombstone could not be persisted");
-    error.code = "STUDENT_TOMBSTONE_WRITE_FAILED";
-    throw error;
-  }
+      { new: true, runValidators: true, ...(transactionOptions || {}) },
+    );
+    if (!tombstone) {
+      const error = new Error("Student purge tombstone could not be persisted");
+      error.code = "STUDENT_TOMBSTONE_WRITE_FAILED";
+      throw error;
+    }
+  });
 }
 
 async function deleteStudentSession(
@@ -652,6 +718,7 @@ async function deleteStudentSession(
   res,
   {
     purgeOperationSession = purgeStudentOperationSession,
+    runInTransaction = runStudentMongoTransaction,
     now = () => new Date(),
   } = {},
 ) {
@@ -706,7 +773,11 @@ async function deleteStudentSession(
       });
     }
     try {
-      await completeStudentDeletion(req, deletingSession, { purgeOperationSession, now });
+      await completeStudentDeletion(req, deletingSession, {
+        purgeOperationSession,
+        runInTransaction,
+        now,
+      });
     } catch (error) {
       let failedSession = null;
       let failure = studentDeletionFailure(error);
@@ -877,15 +948,7 @@ function verifyInternalStudentRequest(req, res, requiredScope) {
 }
 
 async function findActiveInternalSession(claims) {
-  return StudentFileSession.findOne({
-    _id: claims.session_id,
-    userId: claims.user_id,
-    ownerScope: claims.owner_scope,
-    workspaceId: claims.workspace_id || null,
-    retentionExpiresAt: { $gt: new Date() },
-    status: { $nin: ["expired", "deleted", "deleting", "delete_failed"] },
-    converterUploadId: { $nin: ["", null] },
-  });
+  return StudentFileSession.findOne(activeStudentParentFilter(claims));
 }
 
 async function discardMetadataWriteIfSessionClosed(claims, model, record) {
@@ -924,7 +987,11 @@ async function discardMetadataWriteIfSessionClosed(claims, model, record) {
   return true;
 }
 
-async function recordStudentActivity(req, res) {
+async function recordStudentActivity(
+  req,
+  res,
+  { runInTransaction = runStudentMongoTransaction } = {},
+) {
   try {
     const payload = cleanStudentActivityPayload(req.body);
     if (!payload) {
@@ -933,31 +1000,54 @@ async function recordStudentActivity(req, res) {
     const requiredScope = STUDENT_ACTIVITY_CONFIG[payload.eventType].scope;
     const claims = verifyInternalStudentRequest(req, res, requiredScope);
     if (!claims) return undefined;
-    const session = await findActiveInternalSession(claims);
-    if (!session) {
+    const result = await runInTransaction(async (mongoSession) => {
+      if (!mongoSession) {
+        const session = await findActiveInternalSession(claims);
+        if (!session) return null;
+        const activity = await StudentActivity.create({
+          sessionId: session._id,
+          userId: session.userId,
+          workspaceId: session.workspaceId || null,
+          ownerScope: session.ownerScope,
+          retentionExpiresAt: session.retentionExpiresAt,
+          ...payload,
+        });
+        const closed = await discardMetadataWriteIfSessionClosed(
+          claims,
+          StudentActivity,
+          activity,
+        );
+        return { activity, closed };
+      }
+      const session = await StudentFileSession.findOneAndUpdate(
+        activeStudentParentFilter(claims),
+        { $inc: { childWriteEpoch: 1 } },
+        { new: true, session: mongoSession },
+      );
+      if (!session) return null;
+      const [activity] = await StudentActivity.create([{
+        sessionId: session._id,
+        userId: session.userId,
+        workspaceId: session.workspaceId || null,
+        ownerScope: session.ownerScope,
+        retentionExpiresAt: session.retentionExpiresAt,
+        ...payload,
+      }], { session: mongoSession });
+      return { activity, closed: false };
+    });
+    if (!result) {
       return res.status(404).json({ success: false, message: "Không tìm thấy phiên hỗ trợ đang hoạt động" });
     }
-    const activity = await StudentActivity.create({
-      sessionId: session._id,
-      userId: session.userId,
-      workspaceId: session.workspaceId || null,
-      ownerScope: session.ownerScope,
-      retentionExpiresAt: session.retentionExpiresAt,
-      ...payload,
-    });
-    if (
-      await discardMetadataWriteIfSessionClosed(
-        claims,
-        StudentActivity,
-        activity,
-      )
-    ) {
+    if (result.closed) {
       return res.status(409).json({
         success: false,
         message: "Phiên hỗ trợ đã đóng trong khi ghi nhận activity",
       });
     }
-    return res.status(201).json({ success: true, activity: serializeStudentActivity(activity) });
+    return res.status(201).json({
+      success: true,
+      activity: serializeStudentActivity(result.activity),
+    });
   } catch (error) {
     return res.status(500).json({
       success: false,
@@ -1123,7 +1213,11 @@ async function recordStudentAnalysisCompleted(req, res) {
   }
 }
 
-async function recordStudentQuestionEvent(req, res) {
+async function recordStudentQuestionEvent(
+  req,
+  res,
+  { runInTransaction = runStudentMongoTransaction } = {},
+) {
   try {
     const expectedServiceToken = String(process.env.CONVERTER_SERVICE_TOKEN || "").trim();
     if (!expectedServiceToken) {
@@ -1178,41 +1272,42 @@ async function recordStudentQuestionEvent(req, res) {
       });
     }
 
-    const session = await StudentFileSession.findOne({
-      _id: claims.session_id,
-      userId: claims.user_id,
-      ownerScope: claims.owner_scope,
-      workspaceId: claims.workspace_id || null,
-      retentionExpiresAt: { $gt: new Date() },
-      status: { $nin: ["expired", "deleted", "deleting", "delete_failed"] },
-      converterUploadId: { $nin: ["", null] },
+    const result = await runInTransaction(async (mongoSession) => {
+      const session = mongoSession
+        ? await StudentFileSession.findOneAndUpdate(
+            activeStudentParentFilter(claims),
+            { $inc: { childWriteEpoch: 1 } },
+            { new: true, session: mongoSession },
+          )
+        : await findActiveInternalSession(claims);
+      if (!session) return null;
+      const eventPayload = {
+        sessionId: session._id,
+        userId: session.userId,
+        workspaceId: session.workspaceId || null,
+        ownerScope: session.ownerScope,
+        questionHash: payload.questionHash,
+        questionLength: payload.questionLength,
+        category: payload.category,
+        operation: payload.operation,
+        answerType: payload.answerType,
+        evidenceIds: payload.evidenceIds,
+        evidenceCount: payload.evidenceCount,
+        outcome: payload.outcome,
+        retentionExpiresAt: session.retentionExpiresAt,
+      };
+      const event = mongoSession
+        ? (await StudentQuestionEvent.create([eventPayload], { session: mongoSession }))[0]
+        : await StudentQuestionEvent.create(eventPayload);
+      const closed = mongoSession
+        ? false
+        : await discardMetadataWriteIfSessionClosed(claims, StudentQuestionEvent, event);
+      return { event, closed };
     });
-    if (!session) {
+    if (!result) {
       return res.status(404).json({ success: false, message: "Không tìm thấy phiên hỗ trợ đang hoạt động" });
     }
-
-    const event = await StudentQuestionEvent.create({
-      sessionId: session._id,
-      userId: session.userId,
-      workspaceId: session.workspaceId || null,
-      ownerScope: session.ownerScope,
-      questionHash: payload.questionHash,
-      questionLength: payload.questionLength,
-      category: payload.category,
-      operation: payload.operation,
-      answerType: payload.answerType,
-      evidenceIds: payload.evidenceIds,
-      evidenceCount: payload.evidenceCount,
-      outcome: payload.outcome,
-      retentionExpiresAt: session.retentionExpiresAt,
-    });
-    if (
-      await discardMetadataWriteIfSessionClosed(
-        claims,
-        StudentQuestionEvent,
-        event,
-      )
-    ) {
+    if (result.closed) {
       return res.status(409).json({
         success: false,
         message: "Phiên hỗ trợ đã đóng trong khi ghi nhận câu hỏi",
@@ -1221,10 +1316,10 @@ async function recordStudentQuestionEvent(req, res) {
     return res.status(202).json({
       success: true,
       event: {
-        id: String(event._id),
-        answerType: event.answerType,
-        evidenceCount: event.evidenceCount,
-        outcome: event.outcome,
+        id: String(result.event._id),
+        answerType: result.event.answerType,
+        evidenceCount: result.event.evidenceCount,
+        outcome: result.event.outcome,
       },
     });
   } catch (error) {
@@ -1322,6 +1417,7 @@ async function sweepStaleStudentDeletions({
   sessionModel = StudentFileSession,
   questionModel = StudentQuestionEvent,
   activityModel = StudentActivity,
+  runInTransaction = runStudentMongoTransaction,
   purgeOperationSession = purgeStudentOperationSession,
 } = {}) {
   const boundedLimit = Math.min(Math.max(Math.floor(Number(limit) || 25), 1), 100);
@@ -1371,7 +1467,14 @@ async function sweepStaleStudentDeletions({
       await completeStudentDeletion(
         { requestId: crypto.randomUUID(), headers: {} },
         session,
-        { purgeOperationSession, sessionModel, questionModel, activityModel, now },
+        {
+          purgeOperationSession,
+          sessionModel,
+          questionModel,
+          activityModel,
+          runInTransaction,
+          now,
+        },
       );
       report.deleted += 1;
     } catch (error) {
@@ -1419,6 +1522,7 @@ module.exports = {
   cleanQuestionEventPayload,
   cleanStudentActivityPayload,
   cleanStudentSessionPayload,
+  completeStudentDeletion,
   createContextToken,
   createStudentSession,
   deleteStudentSession,
@@ -1430,6 +1534,7 @@ module.exports = {
   recordStudentAnalysisCompleted,
   recordStudentActivity,
   recordStudentQuestionEvent,
+  runStudentMongoTransaction,
   refreshStudentContext,
   serializeStudentSession,
   sessionIsExpired,

@@ -1,15 +1,19 @@
 const assert = require("node:assert/strict");
+const { readFileSync } = require("node:fs");
+const path = require("node:path");
 const test = require("node:test");
 
 const StudentActivity = require("../models/StudentActivity");
 const StudentFileSession = require("../models/StudentFileSession");
 const StudentQuestionEvent = require("../models/StudentQuestionEvent");
 const {
+  completeStudentDeletion,
   deleteStudentSession,
   purgeStudentOperationSession,
   recordStudentActivity,
   recordStudentQuestionEvent,
   refreshStudentContext,
+  runStudentMongoTransaction,
   sweepStaleStudentDeletions,
 } = require("../controllers/studentSessionController");
 const {
@@ -1423,6 +1427,145 @@ test("coordinated Student sweeper purges expired raw state before tombstoning me
   assert.deepEqual(report, { scanned: 1, deleted: 1, failed: 0 });
 });
 
+test("Student child write acquires the active parent fence in the same transaction", async () => {
+  process.env.CONVERTER_SERVICE_TOKEN = "converter-service-secret";
+  const sessionId = "507f1f77bcf86cd799439011";
+  const userId = "507f1f77bcf86cd799439012";
+  const retentionExpiresAt = new Date(Date.now() + 60_000);
+  const token = createStudentContextToken({
+    sessionId,
+    userId,
+    ownerScope: `user:${userId}`,
+    allowedScopes: ["accounting_map"],
+    retentionExpiresAt,
+  });
+  const transaction = { id: "student-write-transaction" };
+  const originals = {
+    findOne: StudentFileSession.findOne,
+    findOneAndUpdate: StudentFileSession.findOneAndUpdate,
+    create: StudentActivity.create,
+  };
+  let transactionCalls = 0;
+  let parentFenceCalls = 0;
+  StudentFileSession.findOne = async () => { throw new Error("non-transactional parent read"); };
+  StudentFileSession.findOneAndUpdate = async (filter, update, options) => {
+    parentFenceCalls += 1;
+    assert.equal(options.session, transaction);
+    assert.ok(filter.status.$nin.includes("deleting"));
+    assert.deepEqual(update, { $inc: { childWriteEpoch: 1 } });
+    return {
+      _id: sessionId,
+      userId,
+      workspaceId: null,
+      ownerScope: `user:${userId}`,
+      converterUploadId: "upload-1",
+      retentionExpiresAt,
+      status: "analyzed",
+    };
+  };
+  StudentActivity.create = async (payloads, options) => {
+    assert.equal(options.session, transaction);
+    assert.equal(Array.isArray(payloads), true);
+    return [{ _id: "activity-1", createdAt: new Date(), ...payloads[0] }];
+  };
+
+  try {
+    const response = responseRecorder();
+    await recordStudentActivity({
+      params: { id: sessionId },
+      headers: {
+        "x-converter-service-token": "converter-service-secret",
+        "x-student-context": token,
+      },
+      body: {
+        eventType: "accounting_map_reviewed",
+        evidenceCount: 0,
+        containsRawValues: false,
+      },
+    }, response, {
+      runInTransaction: async (work) => {
+        transactionCalls += 1;
+        return work(transaction);
+      },
+    });
+
+    assert.equal(response.statusCode, 201);
+    assert.equal(transactionCalls, 1);
+    assert.equal(parentFenceCalls, 1);
+  } finally {
+    StudentFileSession.findOne = originals.findOne;
+    StudentFileSession.findOneAndUpdate = originals.findOneAndUpdate;
+    StudentActivity.create = originals.create;
+  }
+});
+
+test("production Student writes fail closed without transaction-capable Mongo", async () => {
+  await assert.rejects(
+    runStudentMongoTransaction(async () => "unsafe", {
+      environment: "production",
+      connection: { readyState: 1, async startSession() { return {}; } },
+    }),
+    (error) => error.code === "STUDENT_TRANSACTION_REQUIRED",
+  );
+});
+
+test("Student deletion drains children and tombstones the parent in one transaction", async () => {
+  const transaction = { id: "student-delete-transaction" };
+  const session = {
+    _id: "session-transaction-delete",
+    userId: "user-1",
+    workspaceId: null,
+    ownerScope: "user:user-1",
+    converterUploadId: "upload-1",
+    targetTemplateId: "bsn_sales",
+    status: "deleting",
+    retentionExpiresAt: new Date(Date.now() + 60_000),
+  };
+  const calls = [];
+  const childModel = (name) => ({
+    async deleteMany(_filter, options) {
+      calls.push(`${name}:delete:${options.session.id}`);
+      return { deletedCount: 1 };
+    },
+    countDocuments() {
+      return { session: async (mongoSession) => {
+        calls.push(`${name}:count:${mongoSession.id}`);
+        return 0;
+      } };
+    },
+  });
+  const sessionModel = {
+    async findOneAndUpdate(_filter, _update, options) {
+      calls.push(`session:tombstone:${options.session.id}`);
+      return { ...session, status: "deleted" };
+    },
+  };
+
+  await completeStudentDeletion({}, session, {
+    purgeOperationSession: async () => ({
+      success: true,
+      session_id: session._id,
+      upload_id: session.converterUploadId,
+      raw_upload_deleted: true,
+      local_operation_session_deleted: true,
+      remote_operation_session_deleted: true,
+      operation_session_deleted: true,
+    }),
+    sessionModel,
+    questionModel: childModel("question"),
+    activityModel: childModel("activity"),
+    runInTransaction: async (work) => work(transaction),
+  });
+
+  assert.deepEqual(calls, [
+    "question:delete:student-delete-transaction",
+    "activity:delete:student-delete-transaction",
+    "question:count:student-delete-transaction",
+    "activity:count:student-delete-transaction",
+    "session:tombstone:student-delete-transaction",
+  ]);
+});
+
 test("failed post-insert cleanup persists a retryable Student purge job and never returns success", async () => {
   process.env.CONVERTER_SERVICE_TOKEN = "converter-service-secret";
   const sessionId = "507f1f77bcf86cd799439011";
@@ -1656,6 +1799,7 @@ function startupOptions(overrides = {}) {
     ensureStudentPrivacyIndexes: async () => ({ droppedIndexes: [] }),
     loadStudentPrivacyModels: () => ({}),
     startStudentDeletionSweeper: () => null,
+    studentPrivacyRetentionEnabled: true,
     ...overrides,
   };
 }
@@ -1673,12 +1817,77 @@ test("Student startup wires stale deletion retry sweeper only when enabled", asy
 
   await createStartServer(startupOptions({
     studentEnabled: false,
+    studentPrivacyRetentionEnabled: false,
     startStudentDeletionSweeper: () => {
       starts += 1;
       return { stop() {} };
     },
   }))();
   assert.equal(starts, 1);
+});
+
+test("explicit Student privacy retention runs after the product feature is disabled", async () => {
+  const previousMode = process.env.STUDENT_PRIVACY_MIGRATION_MODE;
+  process.env.STUDENT_PRIVACY_MIGRATION_MODE = "off";
+  let modelLoads = 0;
+  let indexRuns = 0;
+  let sweeperStarts = 0;
+  let migrationCalls = 0;
+  try {
+    await createStartServer(startupOptions({
+      studentEnabled: false,
+      studentPrivacyRetentionEnabled: true,
+      loadStudentPrivacyModels: () => {
+        modelLoads += 1;
+        return {};
+      },
+      ensureStudentPrivacyIndexes: async () => {
+        indexRuns += 1;
+        return { droppedIndexes: [] };
+      },
+      migrateStudentPrivacy: async () => {
+        migrationCalls += 1;
+        return {};
+      },
+      startStudentDeletionSweeper: () => {
+        sweeperStarts += 1;
+        return { stop() {} };
+      },
+    }))();
+  } finally {
+    if (previousMode === undefined) delete process.env.STUDENT_PRIVACY_MIGRATION_MODE;
+    else process.env.STUDENT_PRIVACY_MIGRATION_MODE = previousMode;
+  }
+  assert.deepEqual({ modelLoads, indexRuns, sweeperStarts, migrationCalls }, {
+    modelLoads: 1,
+    indexRuns: 1,
+    sweeperStarts: 1,
+    migrationCalls: 0,
+  });
+});
+
+test("Student product startup fails closed when privacy retention is disabled", async () => {
+  await assert.rejects(
+    createStartServer(startupOptions({
+      studentEnabled: true,
+      studentPrivacyRetentionEnabled: false,
+    }))(),
+    /STUDENT_PRIVACY_RETENTION_ENABLED/,
+  );
+});
+
+test("rollback runbook keeps Student privacy retention enabled", () => {
+  const root = path.resolve(__dirname, "../..");
+  const envExample = readFileSync(path.join(root, ".env.example"), "utf8");
+  const rollback = readFileSync(
+    path.join(root, "docs/deployment/main-experimental-rollback-runbook.md"),
+    "utf8",
+  );
+  assert.match(envExample, /^STUDENT_PRIVACY_RETENTION_ENABLED=true$/m);
+  assert.match(
+    rollback,
+    /STUDENT_ASSISTANT_ENABLED=false[\s\S]{0,200}STUDENT_PRIVACY_RETENTION_ENABLED=true/,
+  );
 });
 
 test("feature-off startup performs zero Student migration or model loading", async () => {
@@ -1693,6 +1902,7 @@ test("feature-off startup performs zero Student migration or model loading", asy
   try {
     await createStartServer(startupOptions({
       studentEnabled: false,
+      studentPrivacyRetentionEnabled: false,
       migrateQuestionEvents: migration,
       migrateStudentPrivacy: migration,
       loadStudentPrivacyModels: () => {

@@ -692,6 +692,50 @@ def test_operation_purge_fence_drains_in_flight_create_and_survives_restart(
         _create_test_operation_session(restarted, session_id=session_id)
 
 
+def test_purged_fence_is_hmac_minimized_and_swept_only_after_safe_horizon(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv("OPERATION_STORE_PROVIDER", "local")
+    monkeypatch.setenv("NODE_ENV", "test")
+    monkeypatch.setenv("OPERATION_STORE_ALLOW_LOCAL", "true")
+    monkeypatch.setenv("CONVERTER_SERVICE_TOKEN", "converter-service-secret")
+    monkeypatch.setenv(
+        "OPERATION_FENCE_HMAC_SECRET",
+        "operation-fence-test-secret-at-least-32-characters",
+    )
+    monkeypatch.setenv("OPERATION_FENCE_RETENTION_SECONDS", "86400")
+    root = tmp_path / "sessions"
+    store = OperationStore(root=root)
+    session = _create_test_operation_session(store)
+
+    result = store.purge_session_state(session.session_id)
+    assert result["operation_session_deleted"] is True
+    state_path = store._lifecycle_state_path(session.session_id)
+    lock_path = store._lifecycle_lock_path(session.session_id)
+    payload = json.loads(state_path.read_text(encoding="utf-8"))
+    assert session.session_id not in state_path.name
+    assert session.session_id not in state_path.read_text(encoding="utf-8")
+    assert "session_id" not in payload
+    assert payload["status"] == "purged"
+    purge_after = datetime.fromisoformat(payload["purge_after"])
+
+    cleanup_expired_operation_sessions(
+        root=root,
+        now=purge_after - timedelta(seconds=1),
+        batch_size=10,
+    )
+    assert state_path.is_file()
+
+    cleanup_expired_operation_sessions(
+        root=root,
+        now=purge_after + timedelta(seconds=1),
+        batch_size=10,
+    )
+    assert not state_path.exists()
+    assert not lock_path.exists()
+
+
 def test_operation_sweeper_cleans_crashed_staging_after_creation_grace(
     tmp_path,
     monkeypatch,

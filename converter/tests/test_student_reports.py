@@ -45,7 +45,7 @@ def test_report_contains_only_selected_verified_activity_and_approved_note():
     assert "## Skills" in report
     assert "## Handoff checklist" in report
     assert "Reviewed the mapping with the supervisor." not in report
-    assert "TEXT-" in report
+    assert "PSEUDO-" in report
 
 
 def test_report_rejects_activity_not_in_signed_session_metadata():
@@ -83,7 +83,7 @@ def test_report_redacts_confidential_values_before_rendering_markdown():
     )
 
     assert "Công ty TNHH Sao Mai" not in report
-    assert "COMPANY-" in report
+    assert "PSEUDO-" in report
 
 
 def test_report_sanitizes_filename_and_sheet_metadata_by_default():
@@ -131,7 +131,7 @@ def test_report_conservatively_redacts_names_cccd_addresses_and_unknown_text():
     )
 
     assert all(value.casefold() not in report.casefold() for value in sensitive)
-    assert "TEXT-" in report
+    assert "PSEUDO-" in report
 
 
 def test_report_independent_post_scan_rejects_primary_redaction_regression(monkeypatch):

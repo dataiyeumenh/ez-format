@@ -65,12 +65,33 @@ function retryBatchInput(overrides = {}) {
 function memoryArtifactRepository() {
   const documents = [];
   const lifecycles = new Map();
+  let leaseSequence = 0;
   const key = (binding) => [binding.ownerScope, binding.userId, binding.sessionId, binding.uploadId, binding.runId, binding.targetTemplateId].join("\0");
   return {
     documents,
     async create(metadata) {
       documents.push({ ...metadata });
       return documents.at(-1);
+    },
+    async createWriteIntent(metadata) {
+      const intent = { ...metadata, status: "write_intent" };
+      documents.push(intent);
+      return intent;
+    },
+    async publishWriteIntent(objectId, metadata) {
+      const intent = documents.find((item) => item.gridFsObjectId === objectId);
+      if (!intent || intent.status !== "write_intent") return null;
+      Object.assign(intent, metadata, { status: "available" });
+      return intent;
+    },
+    async deleteMetadata(objectId) {
+      const index = documents.findIndex((item) => item.gridFsObjectId === objectId);
+      if (index >= 0) documents.splice(index, 1);
+      return { deletedCount: index >= 0 ? 1 : 0 };
+    },
+    async markStatus(objectId, status, updates = {}) {
+      const document = documents.find((item) => item.gridFsObjectId === objectId);
+      if (document) Object.assign(document, updates, { status });
     },
     async findLatest() {
       return null;
@@ -79,12 +100,25 @@ function memoryArtifactRepository() {
       const lifecycle = lifecycles.get(key(binding)) || { status: "active", activeLeases: 0 };
       if (lifecycle.status !== "active") return null;
       lifecycle.activeLeases += 1;
+      lifecycle.leaseId = `lease-${++leaseSequence}`;
       lifecycles.set(key(binding), lifecycle);
-      return lifecycle;
+      return { ...lifecycle };
     },
-    async releaseWriteLease(binding) {
+    async renewWriteLease(binding, leaseId) {
       const lifecycle = lifecycles.get(key(binding));
-      if (lifecycle) lifecycle.activeLeases = Math.max(0, lifecycle.activeLeases - 1);
+      if (!lifecycle || lifecycle.status !== "active" || lifecycle.leaseId !== leaseId) return null;
+      return { ...lifecycle };
+    },
+    async validateWriteLease(binding, leaseId) {
+      const lifecycle = lifecycles.get(key(binding));
+      if (!lifecycle || lifecycle.status !== "active" || lifecycle.leaseId !== leaseId) return null;
+      return { ...lifecycle };
+    },
+    async releaseWriteLease(binding, leaseId) {
+      const lifecycle = lifecycles.get(key(binding));
+      if (lifecycle?.leaseId === leaseId) {
+        lifecycle.activeLeases = Math.max(0, lifecycle.activeLeases - 1);
+      }
     },
     async beginPurge(binding) {
       const lifecycle = lifecycles.get(key(binding)) || { activeLeases: 0 };
@@ -424,17 +458,21 @@ test("repair artifact kinds stay owner-bound with bytes outside Mongo metadata",
   const stored = [];
   const service = createConversionArtifactService({
     repository,
+    objectIdFactory: () => `gridfs-${stored.length + 1}`,
     storageAdapter: {
       async putArtifact(input) {
         stored.push(input);
         return {
-          objectId: `gridfs-${stored.length}`,
+          objectId: input.objectId,
           sha256: require("node:crypto").createHash("sha256").update(input.bytes).digest("hex"),
           sizeBytes: input.bytes.length,
         };
       },
       async deleteArtifact() {
         return { deleted: true };
+      },
+      async getArtifact() {
+        return null;
       },
     },
   });

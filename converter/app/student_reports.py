@@ -60,7 +60,7 @@ def build_internship_markdown_report(
         "approved_notes": notes,
     }
     _reject_confidential_values(render_payload, confidential_values)
-    _reject_independent_pii(render_payload)
+    _reject_independent_pii(render_payload, anonymization_session)
 
     lines = ["# Internship Handoff Report", "", "## File metadata"]
     lines.extend(f"- {label}: {_markdown_text(value)}" for label, value in metadata.items())
@@ -104,7 +104,7 @@ def build_internship_markdown_report(
     )
     report = "\n".join(lines) + "\n"
     _reject_confidential_values(report, confidential_values)
-    _reject_independent_pii(report)
+    _reject_independent_pii(report, anonymization_session)
     return report
 
 
@@ -280,9 +280,15 @@ def _reject_confidential_values(
         )
 
 
-def _reject_independent_pii(payload: Any) -> None:
+def _reject_independent_pii(
+    payload: Any,
+    session: AnonymizationSession,
+) -> None:
     try:
-        matches = scan_export_pii_independently(payload)
+        matches = scan_export_pii_independently(
+            payload,
+            allowed_tokens=session.generated_tokens,
+        )
     except Exception as exc:
         raise ReportValidationError("report privacy post-scan failed closed") from exc
     if matches:

@@ -9,6 +9,7 @@ const path = require("node:path");
 const {
   createConversionArtifactService,
   createMongooseArtifactRepository,
+  createMongooseOperationLifecycleRepository,
   ensureConversionArtifactIndexes,
   startConversionArtifactSweeper,
 } = require("../services/conversionArtifactService");
@@ -17,6 +18,7 @@ function repository() {
   const documents = [];
   const tombstones = [];
   const lifecycles = new Map();
+  let leaseSequence = 0;
   const lifecycleKey = (binding) => [
     binding.ownerScope,
     binding.userId,
@@ -44,6 +46,17 @@ function repository() {
       documents.push({ ...metadata });
       return metadata;
     },
+    async createWriteIntent(metadata) {
+      const intent = { ...metadata, status: "write_intent" };
+      documents.push(intent);
+      return intent;
+    },
+    async publishWriteIntent(objectId, metadata) {
+      const intent = documents.find((item) => item.gridFsObjectId === objectId);
+      if (!intent || intent.status !== "write_intent") return null;
+      Object.assign(intent, metadata, { status: "available" });
+      return intent;
+    },
     async markStatus(objectId, status, updates = {}) {
       if (this.failStatusFor === objectId || (this.failFinalDeleteStatus && status === "deleted")) {
         throw new Error(this.failFinalDeleteStatus && status === "deleted"
@@ -56,7 +69,7 @@ function repository() {
     },
     async findExpired({ now, limit }) {
       return [...documents, ...tombstones]
-        .filter((item) => item.status === "deletion_pending" || (item.status === "available" && item.expiresAt <= now))
+        .filter((item) => item.status === "write_intent" || item.status === "deletion_pending" || (item.status === "available" && item.expiresAt <= now))
         .slice(0, limit);
     },
     async findSessionArtifacts(binding, { limit }) {
@@ -83,14 +96,27 @@ function repository() {
       const key = lifecycleKey(binding);
       const lifecycle = lifecycles.get(key);
       if (lifecycle && lifecycle.status !== "active") return null;
-      const active = lifecycle || { ...binding, status: "active", activeLeases: 0 };
+      const active = lifecycle || { ...binding, status: "active", activeLeases: 0, renewals: 0 };
+      const leaseId = `lease-${++leaseSequence}`;
       active.activeLeases += 1;
+      active.leaseId = leaseId;
       lifecycles.set(key, active);
-      return { ...active };
+      return { ...active, leaseId };
     },
-    async releaseWriteLease(binding) {
+    async renewWriteLease(binding, leaseId) {
       const lifecycle = lifecycles.get(lifecycleKey(binding));
-      if (lifecycle) lifecycle.activeLeases = Math.max(0, lifecycle.activeLeases - 1);
+      if (!lifecycle || lifecycle.status !== "active" || lifecycle.leaseId !== leaseId) return null;
+      lifecycle.renewals += 1;
+      return { ...lifecycle, leaseId };
+    },
+    async validateWriteLease(binding, leaseId) {
+      const lifecycle = lifecycles.get(lifecycleKey(binding));
+      if (!lifecycle || lifecycle.status !== "active" || lifecycle.leaseId !== leaseId) return null;
+      return { ...lifecycle, leaseId };
+    },
+    async releaseWriteLease(binding, leaseId) {
+      const lifecycle = lifecycles.get(lifecycleKey(binding));
+      if (lifecycle && lifecycle.leaseId === leaseId) lifecycle.activeLeases = Math.max(0, lifecycle.activeLeases - 1);
     },
     async beginPurge(binding) {
       const key = lifecycleKey(binding);
@@ -120,7 +146,7 @@ function storage() {
     objects,
     failDeletes: false,
     async putArtifact(input) {
-      const objectId = `object-${id++}`;
+      const objectId = input.objectId || `object-${id++}`;
       objects.set(objectId, Buffer.from(input.bytes));
       bindings.set(objectId, { ...(input.metadata || {}) });
       return {
@@ -313,12 +339,135 @@ test("operation purge drains an in-flight write lease before proving zero artifa
   assert.equal(purgeFinished, false);
 
   releaseWrite();
-  await write;
+  await assert.rejects(
+    write,
+    (error) => error.code === "ARTIFACT_OPERATION_PURGED",
+  );
   const result = await purge;
   assert.equal(result.remainingMetadata, 0);
   assert.equal(result.remainingBytes, 0);
   assert.equal(repo.documents.length, 0);
   assert.equal(backend.objects.size, 0);
+});
+
+test("artifact write heartbeat renews its lease until publication", async () => {
+  const repo = repository();
+  const backend = storage();
+  const originalPut = backend.putArtifact.bind(backend);
+  backend.putArtifact = async (input) => {
+    await new Promise((resolve) => setTimeout(resolve, 35));
+    return originalPut(input);
+  };
+  const service = createConversionArtifactService({
+    repository: repo,
+    lifecycleRepository: repo,
+    storageAdapter: backend,
+    leaseHeartbeatIntervalMs: 5,
+  });
+
+  await service.putArtifact({ ...binding, content: Buffer.from("long-write") });
+
+  const lifecycle = [...repo.lifecycles.values()][0];
+  assert.ok(lifecycle.renewals >= 2);
+  assert.equal(lifecycle.activeLeases, 0);
+});
+
+test("final lifecycle fence rejects publication and removes provisional state", async () => {
+  const repo = repository();
+  const backend = storage();
+  repo.validateWriteLease = async (operationBinding) => {
+    const lifecycle = repo.lifecycles.get([
+      operationBinding.ownerScope,
+      operationBinding.userId,
+      operationBinding.sessionId,
+      operationBinding.uploadId,
+      operationBinding.runId,
+      operationBinding.targetTemplateId,
+    ].join("\0"));
+    lifecycle.status = "purging";
+    return null;
+  };
+  const service = createConversionArtifactService({
+    repository: repo,
+    lifecycleRepository: repo,
+    storageAdapter: backend,
+  });
+
+  await assert.rejects(
+    service.putArtifact({ ...binding, content: Buffer.from("provisional") }),
+    (error) => error.code === "ARTIFACT_OPERATION_PURGED" && error.statusCode === 410,
+  );
+  assert.equal(repo.documents.length, 0);
+  assert.equal(backend.objects.size, 0);
+});
+
+test("durable write intent exists before GridFS and survives cleanup bookkeeping failure", async () => {
+  const repo = repository();
+  const backend = storage();
+  backend.putArtifact = async ({ objectId, bytes }) => {
+    assert.equal(repo.documents.some((item) => item.gridFsObjectId === objectId && item.status === "write_intent"), true);
+    backend.objects.set(objectId, Buffer.from(bytes));
+    const error = new Error("simulated upload crash");
+    error.code = "GRIDFS_UPLOAD_FAILED";
+    error.orphanedArtifact = { objectId, sha256: "a".repeat(64), sizeBytes: 5, mime: "application/octet-stream" };
+    throw error;
+  };
+  backend.deleteArtifact = async () => { throw new Error("byte cleanup unavailable"); };
+  repo.markStatus = async () => { throw new Error("intent update unavailable"); };
+  const service = createConversionArtifactService({
+    repository: repo,
+    lifecycleRepository: repo,
+    storageAdapter: backend,
+  });
+
+  await assert.rejects(
+    service.putArtifact({ ...binding, content: Buffer.from("crash") }),
+    (error) => error.code === "ARTIFACT_CLEANUP_PENDING",
+  );
+  assert.equal(repo.documents.length, 1);
+  assert.equal(repo.documents[0].status, "write_intent");
+  assert.equal((await repo.findExpired({ now: new Date(), limit: 10 }))[0], repo.documents[0]);
+});
+
+test("Mongo lifecycle fence stores only an HMAC key and expires purged records", async () => {
+  const calls = [];
+  const model = {
+    async findOneAndUpdate(filter, update) {
+      calls.push({ filter, update });
+      if (update.$set?.status === "purged") {
+        return { ...filter, status: "purged", writeLeases: [], ...update.$set };
+      }
+      return null;
+    },
+    async create(payload) {
+      calls.push({ create: payload });
+      return payload;
+    },
+    async findOne() { return null; },
+    async updateOne() {},
+  };
+  const lifecycle = createMongooseOperationLifecycleRepository(model, {
+    hmacSecret: "artifact-lifecycle-test-secret-at-least-32-characters",
+    lifecycleRetentionMs: 86_400_000,
+  });
+
+  const lease = await lifecycle.acquireWriteLease(binding, {
+    retainUntil: new Date("2026-08-05T00:00:00.000Z"),
+  });
+  const created = calls.find((item) => item.create).create;
+  assert.match(created.operationKey, /^[a-f0-9]{64}$/);
+  for (const field of ["ownerScope", "userId", "sessionId", "uploadId", "runId", "targetTemplateId"]) {
+    assert.equal(Object.hasOwn(created, field), false);
+  }
+
+  await lifecycle.releaseWriteLease(binding, lease.leaseId);
+  await lifecycle.beginPurge(binding, new Date("2026-08-06T00:00:00.000Z"));
+  await lifecycle.markPurged(binding, new Date("2026-08-06T00:00:00.000Z"));
+  const terminal = calls.find((item) => item.update?.$set?.status === "purged");
+  assert.ok(terminal.update.$set.purgeAt > new Date("2026-08-06T00:00:00.000Z"));
+  const lifecycleSchema = require("mongoose").models.ConversionOperationLifecycle.schema;
+  const ttl = lifecycleSchema.indexes().find(([, options]) => options.name === "conversion_operation_purged_ttl");
+  assert.deepEqual(ttl[1].partialFilterExpression, { status: "purged" });
 });
 
 test("expired operation artifacts use the coordinated purge fence before metadata removal", async () => {
@@ -367,7 +516,7 @@ test("artifact service binds metadata, validates checksum, and compensates stora
   );
 
   const failingRepo = repository();
-  failingRepo.create = async () => {
+  failingRepo.publishWriteIntent = async () => {
     throw new Error("metadata failed");
   };
   const failingStorage = storage();
@@ -446,9 +595,9 @@ test("stream size mismatch terminates the returned response pipeline", async () 
   assert.equal(response.destroyed, true);
 });
 
-test("metadata failure plus GridFS delete failure creates a purgeable tombstone", async () => {
+test("metadata failure plus GridFS delete failure leaves a purgeable write intent", async () => {
   const repo = repository();
-  repo.create = async () => { throw new Error("metadata failed"); };
+  repo.publishWriteIntent = async () => { throw new Error("metadata failed"); };
   const backend = storage();
   backend.failDeletes = true;
   const service = createConversionArtifactService({
@@ -457,20 +606,25 @@ test("metadata failure plus GridFS delete failure creates a purgeable tombstone"
     now: () => new Date("2026-07-30T00:00:00.000Z"),
   });
 
-  await assert.rejects(service.putArtifact({ ...binding, content: Buffer.from("orphan") }), /metadata failed/);
-  assert.equal(repo.tombstones.length, 1);
-  assert.equal(repo.tombstones[0].status, "deletion_pending");
-  assert.equal(repo.tombstones[0].purgeAt.toISOString(), "2026-08-06T00:00:00.000Z");
+  await assert.rejects(
+    service.putArtifact({ ...binding, content: Buffer.from("orphan") }),
+    (error) => error.code === "ARTIFACT_CLEANUP_PENDING",
+  );
+  assert.equal(repo.documents.length, 1);
+  assert.equal(repo.documents[0].status, "deletion_pending");
+  assert.equal(repo.documents[0].purgeAt.toISOString(), "2026-08-06T00:00:00.000Z");
 });
 
-test("GridFS write cleanup failure is persisted as a purgeable tombstone", async () => {
+test("GridFS write cleanup failure remains discoverable through its durable intent", async () => {
   const repo = repository();
   const backend = storage();
-  backend.putArtifact = async () => {
+  backend.failDeletes = true;
+  backend.putArtifact = async ({ objectId, bytes }) => {
+    backend.objects.set(objectId, Buffer.from(bytes));
     const error = new Error("upload failed");
     error.code = "GRIDFS_UPLOAD_FAILED";
     error.orphanedArtifact = {
-      objectId: "orphan-object",
+      objectId,
       sha256: "a".repeat(64),
       sizeBytes: 5,
       mime: "application/octet-stream",
@@ -483,24 +637,28 @@ test("GridFS write cleanup failure is persisted as a purgeable tombstone", async
     now: () => new Date("2026-07-30T00:00:00.000Z"),
   });
 
-  await assert.rejects(service.putArtifact({ ...binding, content: Buffer.from("orphan") }), /upload failed/);
-  assert.equal(repo.tombstones.length, 1);
-  assert.equal(repo.tombstones[0].gridFsObjectId, "orphan-object");
-  assert.equal(repo.tombstones[0].purgeAt.toISOString(), "2026-08-06T00:00:00.000Z");
+  await assert.rejects(
+    service.putArtifact({ ...binding, content: Buffer.from("orphan") }),
+    (error) => error.code === "ARTIFACT_CLEANUP_PENDING",
+  );
+  assert.equal(repo.documents.length, 1);
+  assert.equal(repo.documents[0].status, "deletion_pending");
+  assert.equal(repo.documents[0].purgeAt.toISOString(), "2026-08-06T00:00:00.000Z");
 });
 
-test("metadata failure never hides an undurable cleanup tombstone failure", async () => {
+test("metadata failure never hides an undurable write-intent cleanup failure", async () => {
   const repo = repository();
-  repo.create = async () => { throw new Error("metadata secret"); };
-  repo.createTombstone = async () => { throw new Error("repository secret"); };
+  repo.publishWriteIntent = async () => { throw new Error("metadata secret"); };
+  repo.markStatus = async () => { throw new Error("repository secret"); };
   const backend = storage();
   backend.failDeletes = true;
   const service = createConversionArtifactService({ repository: repo, storageAdapter: backend });
 
   await assert.rejects(
     service.putArtifact({ ...binding, content: Buffer.from("orphan") }),
-    (error) => error.code === "ARTIFACT_TOMBSTONE_FAILED" && !error.message.includes("secret"),
+    (error) => error.code === "ARTIFACT_CLEANUP_PENDING" && !error.message.includes("secret"),
   );
+  assert.equal(repo.documents[0].status, "write_intent");
 });
 
 test("delete marks metadata pending before deleting bytes and preserves pending state if final metadata write fails", async () => {

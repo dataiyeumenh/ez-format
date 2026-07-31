@@ -1703,7 +1703,7 @@ def test_internship_report_requires_verified_activity_ids_and_safe_approved_note
     assert response.headers["content-type"].startswith("text/markdown")
     assert "Completed a deterministic reconciliation review." not in response.text
     assert "Reviewed with the supervisor." not in response.text
-    assert "TEXT-" in response.text
+    assert "PSEUDO-" in response.text
     assert "Khách A" not in response.text
 
 

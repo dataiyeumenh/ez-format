@@ -118,6 +118,11 @@ _VIETNAMESE_ADDRESS_PATTERN = re.compile(
 _CCCD_PATTERN = re.compile(r"(?<!\d)(\d{12})(?!\d)")
 _STRICT_IDENTIFIER_PATTERN = re.compile(r"\d{9,12}")
 _PASSPORT_PATTERN = re.compile(r"[A-Z][0-9]{7,8}", re.IGNORECASE)
+_OPAQUE_PSEUDONYM_PATTERN = re.compile(r"PSEUDO-[A-F0-9]{32}")
+_OPAQUE_PSEUDONYM_CANDIDATE_PATTERN = re.compile(
+    r"PSEUDO-[A-F0-9]{32}",
+    re.IGNORECASE,
+)
 _SAFE_CODE_PATTERN = re.compile(r"[A-Z0-9][A-Z0-9._/-]{0,39}", re.IGNORECASE)
 _SAFE_NUMBER_PATTERN = re.compile(r"[-+]?(?:\d{1,3}(?:[.,]\d{3})+|\d+)(?:[.,]\d+)?")
 _SAFE_FORMULA_PATTERN = re.compile(r"=[A-Z0-9_$:.,()+\-*/\s]+", re.IGNORECASE)
@@ -326,6 +331,10 @@ class AnonymizationSession:
 
     anonymize = replace
 
+    @property
+    def generated_tokens(self) -> frozenset[str]:
+        return frozenset(self._replacements.values())
+
 
 def sanitize_conservative_value(
     value: Any,
@@ -344,9 +353,13 @@ def sanitize_conservative_value(
     return value if replacement is None else replacement[0]
 
 
-def scan_export_pii_independently(payload: Any) -> tuple[str, ...]:
+def scan_export_pii_independently(
+    payload: Any,
+    *,
+    allowed_tokens: Iterable[str] = (),
+) -> tuple[str, ...]:
     """Run the export PII recognizer without primary redaction dependencies."""
-    return _scan_export_pii_independently(payload)
+    return _scan_export_pii_independently(payload, allowed_tokens=allowed_tokens)
 
 
 def scan_confidential_values(
@@ -409,25 +422,32 @@ def discover_pii_values(payload: Any) -> dict[str, tuple[str, ...]]:
     return {category: tuple(values) for category, values in discovered.items()}
 
 
-def _scan_export_pii_independently(payload: Any) -> tuple[str, ...]:
+def _scan_export_pii_independently(
+    payload: Any,
+    *,
+    allowed_tokens: Iterable[str] = (),
+) -> tuple[str, ...]:
+    inventory = frozenset(
+        token
+        for token in (str(value) for value in allowed_tokens)
+        if _OPAQUE_PSEUDONYM_PATTERN.fullmatch(token)
+    )
     matches: set[str] = set()
     for candidate in _iter_text_values(payload):
         text = str(candidate or "")
+        for pseudonym in _OPAQUE_PSEUDONYM_CANDIDATE_PATTERN.findall(text):
+            if pseudonym not in inventory:
+                matches.add("free_text")
+        text = _OPAQUE_PSEUDONYM_CANDIDATE_PATTERN.sub(
+            lambda found: " " if found.group(0) in inventory else found.group(0),
+            text,
+        )
         for category, pattern in _POST_SCAN_PII_PATTERNS:
             if category in matches:
                 continue
             for match in pattern.finditer(text):
                 value = match.group(0)
                 if category == "email" and value.casefold().endswith("@example.invalid"):
-                    continue
-                prefix = text[max(0, match.start() - 16) : match.start()].upper()
-                if category == "address" and "ADDRESS-" in value.upper():
-                    continue
-                generated_prefixes = {
-                    "phone": ("PHONE-", "TAX-", "BANK-", "DOC-"),
-                    "document_number": ("PHONE-", "TAX-", "BANK-", "DOC-"),
-                }.get(category, ())
-                if any(prefix.endswith(marker) for marker in generated_prefixes):
                     continue
                 matches.add(category)
                 break
@@ -439,23 +459,8 @@ def _scan_export_pii_independently(payload: Any) -> tuple[str, ...]:
 def _is_anonymized_token(
     text: str, start: int, category: str, value: str
 ) -> bool:
-    if category == "email" and value.casefold().endswith("@example.invalid"):
-        return True
-    if re.fullmatch(
-        rf"(?:{'|'.join(map(re.escape, _TEXT_PREFIXES.values()))})-[A-F0-9]{{12}}",
-        value,
-        flags=re.IGNORECASE,
-    ):
-        return True
-    prefix = text[max(0, start - 16) : start].upper()
-    if any(prefix.endswith(marker) for marker in ("PHONE-", "TAX-", "BANK-", "DOC-")):
-        return True
-    expected = {
-        "phone": "PHONE-",
-        "tax_code": "TAX-",
-        "bank_account": "BANK-",
-    }.get(category)
-    return bool(expected and prefix.endswith(expected))
+    del text, start, category, value
+    return False
 
 
 def _merge_confidential_values(
@@ -537,6 +542,7 @@ def _scan_export_cells_independently(
     content: bytes,
     *,
     header_row_number: int | None,
+    allowed_tokens: Iterable[str] = (),
 ) -> tuple[str, ...]:
     workbook = load_workbook(BytesIO(content), data_only=False)
     if len(workbook.worksheets) != 1:
@@ -593,11 +599,10 @@ def _scan_export_cells_independently(
                 "free_text",
             )
 
-    generated_text = re.compile(
-        r"(?:COMPANY|COUNTERPARTY|ADDRESS|TEXT)-[A-F0-9]{12}"
-        r"|(?:PHONE|TAX|BANK|DOC)-[A-Z0-9-]+"
-        r"|(?:anon|student)-[a-f0-9]{12}@example\.invalid",
-        re.IGNORECASE,
+    inventory = frozenset(
+        token
+        for token in (str(value) for value in allowed_tokens)
+        if _OPAQUE_PSEUDONYM_PATTERN.fullmatch(token)
     )
     safe_code = re.compile(r"[A-Z0-9][A-Z0-9._/-]{0,39}", re.IGNORECASE)
     safe_number = re.compile(r"[-+]?(?:\d{1,3}(?:[.,]\d{3})+|\d+)(?:[.,]\d+)?")
@@ -615,8 +620,10 @@ def _scan_export_cells_independently(
             if independent_header_row is not None and cell.row == independent_header_row:
                 continue
             text = str(value).strip()
-            if generated_text.fullmatch(text):
+            if text in inventory:
                 continue
+            if _OPAQUE_PSEUDONYM_CANDIDATE_PATTERN.fullmatch(text):
+                return ("free_text",)
             policy = policies.get(cell.column, "free_text")
             if sensitive_id.fullmatch(text):
                 return ("document_number",)
@@ -686,7 +693,10 @@ def anonymize_workbook_bytes(
     exported_values = _workbook_values(exported, extension)
     matches = scan_confidential_values(exported_values, active_values)
     try:
-        independent_matches = _scan_export_pii_independently(exported_values)
+        independent_matches = _scan_export_pii_independently(
+            exported_values,
+            allowed_tokens=session.generated_tokens,
+        )
         conservative_matches = _scan_export_cells_independently(
             exported,
             header_row_number=(
@@ -694,6 +704,7 @@ def anonymize_workbook_bytes(
                 if analyzed_header_row_index is not None
                 else None
             ),
+            allowed_tokens=session.generated_tokens,
         )
     except Exception as exc:
         raise AnonymizationUnsupportedLayerError("pii_post_scan") from exc
@@ -1297,14 +1308,9 @@ def _export_filename(filename: str) -> str:
 
 
 def _replacement_for(category: str, source: str, digest: bytes) -> str:
-    token = digest.hex()[:12].upper()
-    if category in _TEXT_PREFIXES:
-        return f"{_TEXT_PREFIXES[category]}-{token}"
-    if category == "email":
-        return f"student-{digest.hex()[:12]}@example.invalid"
-    if category in _NUMERIC_PREFIXES:
-        return f"{_NUMERIC_PREFIXES[category]}-{_numeric_token(source, digest)}"
-    raise ValueError(f"Unsupported anonymization category: {category}")
+    del source
+    _validate_category(category)
+    return f"PSEUDO-{digest.hex()[:32].upper()}"
 
 
 def _numeric_token(source: str, digest: bytes) -> str:
