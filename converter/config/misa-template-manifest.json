@@ -1,6 +1,6 @@
 {
-  "schema_version": 1,
-  "manifest_version": "2026-07-31.1",
+  "schema_version": 2,
+  "manifest_version": "2026-07-31.2",
   "templates": {
     "bsn_sales": {
       "canonical_filename": "BSN - Form import bán hàng.xls",
@@ -69,7 +69,18 @@
         "Đơn giá vốn",
         "Tiền vốn",
         "Hàng hóa giữ hộ/bán hộ"
-      ]
+      ],
+      "provenance": {
+        "source_kind": "partner_supplied",
+        "source_reference": "Partner-provided workbook committed as converter/fixtures/templates/bsn_sales.xls",
+        "acquisition_date": "unknown",
+        "misa_product": "unknown",
+        "misa_release": "unknown",
+        "reviewer": "project-owner",
+        "review_status": "accepted_for_project_use",
+        "trust_level": "partner_supplied",
+        "official_status": "not_claimed_official"
+      }
     },
     "bsn_purchase": {
       "canonical_filename": "BSN - Form import mua hàng.xls",
@@ -118,7 +129,18 @@
         "TK thuế GTGT",
         "Phí hàng về kho/Chi phí mua hàng",
         "Nhóm HHDV mua vào"
-      ]
+      ],
+      "provenance": {
+        "source_kind": "partner_supplied",
+        "source_reference": "Partner-provided workbook committed as converter/fixtures/templates/bsn_purchase.xls",
+        "acquisition_date": "unknown",
+        "misa_product": "unknown",
+        "misa_release": "unknown",
+        "reviewer": "project-owner",
+        "review_status": "accepted_for_project_use",
+        "trust_level": "partner_supplied",
+        "official_status": "not_claimed_official"
+      }
     },
     "misa_purchase_domestic": {
       "canonical_filename": "mua_hang_trong_nuoc_full.xls",
@@ -186,7 +208,18 @@
         "Số khế ước đi vay",
         "Số khế ước cho vay",
         "CP không hợp lý"
-      ]
+      ],
+      "provenance": {
+        "source_kind": "partner_supplied",
+        "source_reference": "Partner-provided workbook committed as converter/fixtures/templates/mua_hang_trong_nuoc_full.xls",
+        "acquisition_date": "unknown",
+        "misa_product": "unknown",
+        "misa_release": "unknown",
+        "reviewer": "project-owner",
+        "review_status": "accepted_for_project_use",
+        "trust_level": "partner_supplied",
+        "official_status": "not_claimed_official"
+      }
     },
     "sales_goods": {
       "canonical_filename": "Form bán hàng hóa.xls",
@@ -248,7 +281,18 @@
         "Đơn giá vốn",
         "Tiền vốn",
         "Hàng hóa giữ hộ/bán hộ"
-      ]
+      ],
+      "provenance": {
+        "source_kind": "partner_supplied",
+        "source_reference": "Partner-provided workbook committed as converter/fixtures/templates/sales_goods.xls",
+        "acquisition_date": "unknown",
+        "misa_product": "unknown",
+        "misa_release": "unknown",
+        "reviewer": "project-owner",
+        "review_status": "accepted_for_project_use",
+        "trust_level": "partner_supplied",
+        "official_status": "not_claimed_official"
+      }
     },
     "sales_service": {
       "canonical_filename": "Form bán hàng dịch vụ.xls",
@@ -295,7 +339,18 @@
         "Tiền thuế GTGT",
         "TK thuế GTGT",
         "HH không TH trên tờ khai thuế GTGT"
-      ]
+      ],
+      "provenance": {
+        "source_kind": "partner_supplied",
+        "source_reference": "Partner-provided workbook committed as converter/fixtures/templates/sales_service.xls",
+        "acquisition_date": "unknown",
+        "misa_product": "unknown",
+        "misa_release": "unknown",
+        "reviewer": "project-owner",
+        "review_status": "accepted_for_project_use",
+        "trust_level": "partner_supplied",
+        "official_status": "not_claimed_official"
+      }
     },
     "purchase_goods": {
       "canonical_filename": "Form mua hàng hóa.xls",
@@ -363,7 +418,18 @@
         "Số khế ước đi vay",
         "Số khế ước cho vay",
         "CP không hợp lý"
-      ]
+      ],
+      "provenance": {
+        "source_kind": "partner_supplied",
+        "source_reference": "Partner-provided workbook committed as converter/fixtures/templates/purchase_goods.xls",
+        "acquisition_date": "unknown",
+        "misa_product": "unknown",
+        "misa_release": "unknown",
+        "reviewer": "project-owner",
+        "review_status": "accepted_for_project_use",
+        "trust_level": "partner_supplied",
+        "official_status": "not_claimed_official"
+      }
     },
     "purchase_service": {
       "canonical_filename": "Form mua dịch vụ.xls",
@@ -410,7 +476,18 @@
         "Tên NCC",
         "Mã số thuế NCC",
         "Địa chỉ NCC"
-      ]
+      ],
+      "provenance": {
+        "source_kind": "partner_supplied",
+        "source_reference": "Partner-provided workbook committed as converter/fixtures/templates/purchase_service.xls",
+        "acquisition_date": "unknown",
+        "misa_product": "unknown",
+        "misa_release": "unknown",
+        "reviewer": "project-owner",
+        "review_status": "accepted_for_project_use",
+        "trust_level": "partner_supplied",
+        "official_status": "not_claimed_official"
+      }
     }
   }
 }

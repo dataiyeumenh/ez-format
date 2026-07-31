@@ -8,6 +8,7 @@ import os
 import re
 import sys
 from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -17,8 +18,20 @@ from app.excel_io import TemplateWorkbook, read_template
 
 DEFAULT_TEMPLATE_DIR = BACKEND_ROOT / "fixtures" / "templates"
 DEFAULT_MANIFEST_PATH = BACKEND_ROOT / "config" / "misa-template-manifest.json"
-MANIFEST_SCHEMA_VERSION = 1
+MANIFEST_SCHEMA_VERSION = 2
 _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+_TRUST_LEVEL_PATTERN = re.compile(r"^[a-z][a-z0-9_-]{1,63}$")
+_PROVENANCE_FIELDS = {
+    "source_kind",
+    "source_reference",
+    "acquisition_date",
+    "misa_product",
+    "misa_release",
+    "reviewer",
+    "review_status",
+    "trust_level",
+    "official_status",
+}
 
 DISPLAY_FILENAMES = {
     "bsn_sales": "BSN - Form import bán hàng.xls",
@@ -36,6 +49,19 @@ class MisaTemplateProvenanceError(RuntimeError):
 
 
 @dataclass(frozen=True)
+class TemplateTrustMetadata:
+    source_kind: str
+    source_reference: str
+    acquisition_date: str
+    misa_product: str
+    misa_release: str
+    reviewer: str
+    review_status: str
+    trust_level: str
+    official_status: str
+
+
+@dataclass(frozen=True)
 class TemplateProvenance:
     canonical_filename: str
     bundled_filename: str
@@ -44,6 +70,7 @@ class TemplateProvenance:
     header_row: int
     column_count: int
     headers: tuple[str, ...]
+    trust: TemplateTrustMetadata
 
 
 @dataclass(frozen=True)
@@ -51,6 +78,7 @@ class MisaTemplate:
     id: str
     label: str
     filename: str
+    sha256: str
     path: Path
     workbook: TemplateWorkbook
 
@@ -99,6 +127,7 @@ def get_misa_template(template_id: str) -> MisaTemplate:
         id=template_id,
         label=definition.label,
         filename=provenance.canonical_filename,
+        sha256=provenance.sha256,
         path=path,
         workbook=workbook,
     )
@@ -112,7 +141,7 @@ def verify_all_misa_templates() -> dict[str, str]:
     verified: dict[str, str] = {}
     for template_id in CONVERSION_TYPES:
         template = get_misa_template(template_id)
-        verified[template_id] = hashlib.sha256(template.path.read_bytes()).hexdigest()
+        verified[template_id] = template.sha256
     return verified
 
 
@@ -121,6 +150,7 @@ def regenerate_manifest_candidate(
     template_dir: Path,
     output_path: Path,
     manifest_version: str,
+    trust: TemplateTrustMetadata,
 ) -> Path:
     active_path = configured_manifest_path()
     if _same_path(output_path, active_path):
@@ -138,10 +168,11 @@ def regenerate_manifest_candidate(
     for template_id in CONVERSION_TYPES:
         provenance = _template_provenance_from_manifest(template_id, active)
         path = _template_path_for(template_id, template_dir, provenance)
-        _verified_workbook(template_id, path, provenance, verify_hash=False)
+        workbook = _verified_workbook(template_id, path, provenance, verify_hash=False)
         candidate["templates"][template_id]["sha256"] = hashlib.sha256(
-            path.read_bytes()
+            workbook.file_contents
         ).hexdigest()
+        candidate["templates"][template_id]["provenance"] = _trust_payload(trust)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     try:
         with output_path.open("x", encoding="utf-8", newline="\n") as handle:
@@ -162,13 +193,17 @@ def review_manifest_candidate(*, template_dir: Path, candidate_path: Path) -> No
     for template_id in CONVERSION_TYPES:
         active_entry = active["templates"][template_id]
         candidate_entry = candidate["templates"][template_id]
-        for field in set(active_entry) - {"sha256"}:
+        for field in set(active_entry) - {"sha256", "provenance"}:
             if candidate_entry.get(field) != active_entry[field]:
                 raise MisaTemplateProvenanceError(
                     f"Candidate auto-learned {field} for {template_id}; "
                     "manual schema review required"
                 )
         provenance = _template_provenance_from_manifest(template_id, candidate)
+        if provenance.trust.review_status != "accepted_for_project_use":
+            raise MisaTemplateProvenanceError(
+                f"Candidate review status is not accepted for {template_id}"
+            )
         path = _template_path_for(template_id, template_dir, provenance)
         _verified_workbook(template_id, path, provenance)
 
@@ -219,6 +254,7 @@ def _template_provenance_from_manifest(
         "header_row",
         "column_count",
         "headers",
+        "provenance",
     }
     if not isinstance(raw_entry, dict) or set(raw_entry) != expected_fields:
         raise MisaTemplateProvenanceError(
@@ -245,6 +281,7 @@ def _template_provenance_from_manifest(
     header_row = raw_entry["header_row"]
     column_count = raw_entry["column_count"]
     headers = raw_entry["headers"]
+    trust = _trust_metadata(template_id, raw_entry["provenance"])
     if not isinstance(sha256, str) or not _SHA256_PATTERN.fullmatch(sha256):
         raise MisaTemplateProvenanceError(
             f"MISA template SHA-256 is invalid for {template_id}"
@@ -280,6 +317,7 @@ def _template_provenance_from_manifest(
         raise MisaTemplateProvenanceError(
             f"MISA template headers omit required schema for {template_id}"
         )
+    _enforce_production_trust(template_id, trust)
     return TemplateProvenance(
         canonical_filename=canonical_filename,
         bundled_filename=bundled_filename,
@@ -288,7 +326,99 @@ def _template_provenance_from_manifest(
         header_row=header_row,
         column_count=column_count,
         headers=tuple(headers),
+        trust=trust,
     )
+
+
+def _trust_metadata(template_id: str, value: Any) -> TemplateTrustMetadata:
+    if not isinstance(value, dict) or set(value) != _PROVENANCE_FIELDS:
+        raise MisaTemplateProvenanceError(
+            f"MISA template provenance metadata is invalid for {template_id}"
+        )
+    if any(not isinstance(value[field], str) or not value[field].strip() for field in value):
+        raise MisaTemplateProvenanceError(
+            f"MISA template provenance metadata is incomplete for {template_id}"
+        )
+    trust = TemplateTrustMetadata(**{field: value[field].strip() for field in value})
+    if trust.source_kind not in {"partner_supplied", "vendor_download", "internal_reviewed"}:
+        raise MisaTemplateProvenanceError(
+            f"MISA template source kind is invalid for {template_id}"
+        )
+    if trust.acquisition_date != "unknown":
+        try:
+            date.fromisoformat(trust.acquisition_date)
+        except ValueError as exc:
+            raise MisaTemplateProvenanceError(
+                f"MISA template acquisition date is invalid for {template_id}"
+            ) from exc
+    if trust.review_status not in {
+        "accepted_for_project_use",
+        "pending_review",
+        "rejected",
+    }:
+        raise MisaTemplateProvenanceError(
+            f"MISA template review status is invalid for {template_id}"
+        )
+    if trust.review_status == "accepted_for_project_use" and trust.reviewer.lower() in {
+        "unknown",
+        "unrecorded",
+    }:
+        raise MisaTemplateProvenanceError(
+            f"MISA template accepted review lacks reviewer for {template_id}"
+        )
+    if not _TRUST_LEVEL_PATTERN.fullmatch(trust.trust_level):
+        raise MisaTemplateProvenanceError(
+            f"MISA template trust level is invalid for {template_id}"
+        )
+    if trust.official_status not in {
+        "not_claimed_official",
+        "verified_official_source",
+    }:
+        raise MisaTemplateProvenanceError(
+            f"MISA template official status is invalid for {template_id}"
+        )
+    if trust.source_kind == "partner_supplied" and (
+        trust.official_status != "not_claimed_official"
+    ):
+        raise MisaTemplateProvenanceError(
+            f"Partner-supplied MISA template cannot claim official status: {template_id}"
+        )
+    if trust.official_status == "verified_official_source" and (
+        trust.source_kind != "vendor_download"
+        or not trust.source_reference.lower().startswith("https://")
+        or trust.acquisition_date == "unknown"
+        or trust.misa_product == "unknown"
+        or trust.misa_release == "unknown"
+    ):
+        raise MisaTemplateProvenanceError(
+            f"Official MISA template claim lacks verifiable metadata: {template_id}"
+        )
+    return trust
+
+
+def _trust_payload(trust: TemplateTrustMetadata) -> dict[str, str]:
+    return {field: getattr(trust, field) for field in _PROVENANCE_FIELDS}
+
+
+def _enforce_production_trust(
+    template_id: str,
+    trust: TemplateTrustMetadata,
+) -> None:
+    if os.getenv("NODE_ENV", "").strip().lower() != "production":
+        return
+    accepted = {
+        item.strip()
+        for item in os.getenv("MISA_TEMPLATE_ACCEPTED_TRUST_LEVELS", "").split(",")
+        if item.strip()
+    }
+    if not accepted or trust.trust_level not in accepted:
+        raise MisaTemplateProvenanceError(
+            f"MISA template accepted trust level is not configured for {template_id}"
+        )
+    if trust.review_status != "accepted_for_project_use":
+        raise MisaTemplateProvenanceError(
+            f"MISA template review status is not accepted for {template_id}"
+        )
 
 
 def _load_manifest(manifest_path: Path) -> dict[str, Any]:
@@ -332,7 +462,8 @@ def _verified_workbook(
     verify_hash: bool = True,
 ) -> TemplateWorkbook:
     try:
-        actual_sha256 = hashlib.sha256(path.read_bytes()).hexdigest()
+        file_contents = path.read_bytes()
+        actual_sha256 = hashlib.sha256(file_contents).hexdigest()
     except OSError as exc:
         raise MisaTemplateProvenanceError(
             f"MISA template cannot be read for {template_id}: {path}"
@@ -342,7 +473,7 @@ def _verified_workbook(
             f"MISA template SHA-256 mismatch for {template_id}: {path}"
         )
     try:
-        workbook = read_template(path)
+        workbook = read_template(path, file_contents=file_contents)
     except Exception as exc:
         raise MisaTemplateProvenanceError(
             f"MISA template workbook is invalid for {template_id}: {path}"
@@ -378,6 +509,15 @@ def _main(argv: list[str] | None = None) -> int:
     regenerate.add_argument("--template-dir", required=True)
     regenerate.add_argument("--output", required=True)
     regenerate.add_argument("--manifest-version", required=True)
+    regenerate.add_argument("--source-kind", required=True)
+    regenerate.add_argument("--source-reference", required=True)
+    regenerate.add_argument("--acquisition-date", required=True)
+    regenerate.add_argument("--misa-product", required=True)
+    regenerate.add_argument("--misa-release", required=True)
+    regenerate.add_argument("--reviewer", required=True)
+    regenerate.add_argument("--review-status", required=True)
+    regenerate.add_argument("--trust-level", required=True)
+    regenerate.add_argument("--official-status", required=True)
 
     review = subparsers.add_parser(
         "review-manifest",
@@ -395,6 +535,13 @@ def _main(argv: list[str] | None = None) -> int:
                 template_dir=_configured_path(args.template_dir, DEFAULT_TEMPLATE_DIR),
                 output_path=Path(args.output).resolve(strict=False),
                 manifest_version=args.manifest_version,
+                trust=_trust_metadata(
+                    "rotation",
+                    {
+                        field: getattr(args, field)
+                        for field in _PROVENANCE_FIELDS
+                    },
+                ),
             )
             print(f"Candidate manifest written for review: {output}")
         else:

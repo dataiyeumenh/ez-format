@@ -17,15 +17,19 @@ Production/local template configuration:
 ```powershell
 $env:MISA_TEMPLATE_DIR='fixtures/templates'
 $env:MISA_TEMPLATE_MANIFEST_PATH='config/misa-template-manifest.json'
+$env:MISA_TEMPLATE_ACCEPTED_TRUST_LEVELS='partner_supplied'
 $env:MAPPING_DB_PATH='converter\data\mapping_profiles.sqlite'
 ```
 
 Relative template and manifest paths resolve from this `converter` directory.
 An external `MISA_TEMPLATE_DIR` must contain exact reviewed bytes under each
-official filename recorded as `canonical_filename`; a same-header replacement
+canonical filename recorded as `canonical_filename`; a same-header replacement
 is rejected. Production imports verify every supported template and fail before
 the API starts when the manifest, filename, SHA-256, sheet, header row, or ordered
-header schema differs.
+header schema differs. Production also requires an explicitly configured accepted
+trust level. The current templates are partner-supplied; their acquisition date,
+MISA product, and MISA release are unknown, and the project does not claim that
+they came from an official MISA source.
 
 Verify the active deployment assets:
 
@@ -41,7 +45,16 @@ manifest, review it, then commit the template and manifest together:
 python -m app.misa_templates regenerate-manifest `
   --template-dir fixtures/templates `
   --output ../.artifacts/misa-template-manifest.candidate.json `
-  --manifest-version 2026-08-01.1
+  --manifest-version 2026-08-01.1 `
+  --source-kind partner_supplied `
+  --source-reference "Partner-provided workbook rotation review" `
+  --acquisition-date 2026-08-01 `
+  --misa-product unknown `
+  --misa-release unknown `
+  --reviewer reviewer-name `
+  --review-status accepted_for_project_use `
+  --trust-level partner_supplied `
+  --official-status not_claimed_official
 python -m app.misa_templates review-manifest `
   --template-dir fixtures/templates `
   --candidate ../.artifacts/misa-template-manifest.candidate.json
@@ -49,8 +62,9 @@ git diff --no-index config/misa-template-manifest.json `
   ../.artifacts/misa-template-manifest.candidate.json
 ```
 
-The commands preserve filename, sheet, header-row, column-count, and ordered
-header invariants. Schema changes require separate manual manifest review. The
+The regenerate command requires explicit provenance and review metadata. The
+commands preserve filename, sheet, header-row, column-count, and ordered header
+invariants. Schema changes require separate manual manifest review. The
 manifest covers all export targets, including the six canonical purchase/sales
 forms and the supported `misa_purchase_domestic` compatibility target. Keep the
 BSN sales template at its reviewed 59-column schema.

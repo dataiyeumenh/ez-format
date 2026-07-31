@@ -40,6 +40,74 @@ def _style_signatures(book, sheet, row: int, limit: int) -> list[tuple]:
     return [_style_signature(book, sheet, row, col) for col in range(limit)]
 
 
+def _row_layout(row_info) -> tuple:
+    return (
+        row_info.height,
+        row_info.has_default_height,
+        row_info.height_mismatch,
+        row_info.hidden,
+        row_info.outline_level,
+        row_info.outline_group_starts_ends,
+        row_info.additional_space_above,
+        row_info.additional_space_below,
+    )
+
+
+def _column_layout(column_info) -> tuple:
+    return (
+        column_info.width,
+        column_info.hidden,
+        column_info.outline_level,
+        column_info.collapsed,
+    )
+
+
+def _assert_full_structure_equal(
+    source_book,
+    output_book,
+    header_row_index: int,
+    schema_column_count: int,
+) -> None:
+    assert output_book.sheet_names() == source_book.sheet_names()
+    source = source_book.sheet_by_index(0)
+    output = output_book.sheet_by_index(0)
+    assert output.nrows == source.nrows
+    assert output.ncols == source.ncols
+    assert output.default_row_height == source.default_row_height == 300
+    assert output.default_row_height_mismatch == source.default_row_height_mismatch
+    assert sorted(output.merged_cells) == sorted(source.merged_cells)
+    assert set(output.colinfo_map) == set(source.colinfo_map)
+    for column in source.colinfo_map:
+        assert _column_layout(output.colinfo_map[column]) == _column_layout(
+            source.colinfo_map[column]
+        )
+    assert set(output.rowinfo_map) == set(source.rowinfo_map)
+    for row in source.rowinfo_map:
+        assert _row_layout(output.rowinfo_map[row]) == _row_layout(source.rowinfo_map[row])
+    covered_merged_cells = {
+        (row, column)
+        for rlo, rhi, clo, chi in source.merged_cells
+        for row in range(rlo, rhi)
+        for column in range(clo, chi)
+        if (row, column) != (rlo, clo)
+    }
+    for row in range(min(source.nrows, 12)):
+        for column in range(schema_column_count):
+            if (row, column) in covered_merged_cells:
+                continue
+            if (
+                source.cell_value(row, column) in (None, "")
+                and row not in {header_row_index, header_row_index + 1}
+            ):
+                continue
+            assert _style_signature(output_book, output, row, column) == _style_signature(
+                source_book,
+                source,
+                row,
+                column,
+            )
+
+
 def test_export_preserves_preamble_alignment_for_all_misa_templates(tmp_path):
     for template in list_misa_templates():
         output_path = tmp_path / f"{template.id}.xls"
@@ -63,6 +131,26 @@ def test_export_preserves_preamble_alignment_for_all_misa_templates(tmp_path):
                     expected,
                     sheet.cell_value(row_idx, col_idx),
                 )
+
+
+def test_literal_export_preserves_full_structure_for_all_misa_templates(tmp_path):
+    for template in list_misa_templates():
+        output_path = tmp_path / f"literal-{template.id}.xls"
+        row = {header: "" for header in template.headers}
+
+        write_xls_from_template(template.workbook, [row], output_path)
+
+        source_book = xlrd.open_workbook(
+            file_contents=template.workbook.file_contents,
+            formatting_info=True,
+        )
+        output_book = xlrd.open_workbook(str(output_path), formatting_info=True)
+        _assert_full_structure_equal(
+            source_book,
+            output_book,
+            template.workbook.header_row_index,
+            len(template.headers),
+        )
 
 
 def test_bsn_sales_augmented_lot_expiry_do_not_shift_cost_preamble(tmp_path):
@@ -148,7 +236,7 @@ def test_export_clears_stale_template_data_rows(tmp_path):
         assert sheet.cell_value(stale_row, invoice_col) == ""
 
 
-def test_export_does_not_copy_blank_template_tail(tmp_path):
+def test_export_preserves_literal_template_tail(tmp_path):
     template = next(item for item in list_misa_templates() if item.id == "bsn_sales")
     output_path = tmp_path / "trimmed_tail.xls"
     row = {header: "" for header in template.headers}
@@ -157,5 +245,9 @@ def test_export_does_not_copy_blank_template_tail(tmp_path):
     write_xls_from_template(template.workbook, [row], output_path)
 
     sheet = xlrd.open_workbook(str(output_path), formatting_info=True).sheet_by_index(0)
-    assert sheet.nrows <= 12
-    assert len(sheet.rowinfo_map) <= 128
+    source = xlrd.open_workbook(
+        file_contents=template.workbook.file_contents,
+        formatting_info=True,
+    ).sheet_by_index(0)
+    assert sheet.nrows == source.nrows
+    assert len(sheet.rowinfo_map) == len(source.rowinfo_map)

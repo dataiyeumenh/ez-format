@@ -11,6 +11,7 @@ import openpyxl
 import xlrd
 import xlwt
 from openpyxl.styles.numbers import is_date_format
+from xlutils.copy import copy as copy_xls_workbook
 from xlutils.filter import XLWTWriter
 
 from app.normalization import is_blank, normalize_header
@@ -62,6 +63,7 @@ class InputTable:
 @dataclass(frozen=True)
 class TemplateWorkbook:
     path: Path
+    file_contents: bytes
     sheet_name: str
     header_row_index: int
     headers: list[str]
@@ -100,8 +102,9 @@ def find_header_row(sheet: xlrd.sheet.Sheet) -> int:
     return best_row
 
 
-def read_template(path: Path) -> TemplateWorkbook:
-    book = xlrd.open_workbook(str(path), formatting_info=False)
+def read_template(path: Path, *, file_contents: bytes | None = None) -> TemplateWorkbook:
+    contents = file_contents if file_contents is not None else path.read_bytes()
+    book = xlrd.open_workbook(file_contents=contents, formatting_info=False)
     sheet = book.sheet_by_index(0)
     header_row_index = find_header_row(sheet)
     headers = [str(sheet.cell_value(header_row_index, col)).strip() for col in range(sheet.ncols)]
@@ -110,6 +113,7 @@ def read_template(path: Path) -> TemplateWorkbook:
     ]
     return TemplateWorkbook(
         path=path,
+        file_contents=contents,
         sheet_name=sheet.name,
         header_row_index=header_row_index,
         headers=headers,
@@ -350,10 +354,16 @@ def write_xls_from_template(
     *,
     output_sheet_name: str | None = None,
 ) -> None:
-    source_book = xlrd.open_workbook(str(template.path), formatting_info=True)
-    source_sheet = source_book.sheet_by_name(template.sheet_name)
-    workbook = xlwt.Workbook(encoding="utf-8")
-    sheet = workbook.add_sheet(_sanitize_output_sheet_name(output_sheet_name, template.sheet_name))
+    source_book = xlrd.open_workbook(
+        file_contents=template.file_contents,
+        formatting_info=True,
+    )
+    source_sheet_index = source_book.sheet_names().index(template.sheet_name)
+    source_sheet = source_book.sheet_by_index(source_sheet_index)
+    workbook = copy_xls_workbook(source_book)
+    sheet = workbook.get_sheet(source_sheet_index)
+    if output_sheet_name:
+        sheet.set_name(_sanitize_output_sheet_name(output_sheet_name, template.sheet_name))
     styles = _xlwt_styles_for(source_book)
     data_start_row = template.header_row_index + 1
     output_end_row = data_start_row + len(output_rows)
@@ -361,21 +371,14 @@ def write_xls_from_template(
     if output_end_row > 65536:
         raise ValueError("Output exceeds the .xls row limit of 65,536 rows.")
 
-    _copy_column_layout(source_sheet, sheet, len(template.headers))
-    _copy_static_template_rows(
-        source_sheet=source_sheet,
-        output_sheet=sheet,
-        styles=styles,
+    _clear_stale_template_rows(
+        source_sheet,
+        sheet,
+        styles,
+        start_row=data_start_row,
         max_col_count=len(template.headers),
-        data_start_row=data_start_row,
+        fallback_row=data_start_row,
     )
-    for row_idx in range(data_start_row, min(source_sheet.nrows, max(output_end_row, 12))):
-        _copy_row_layout(
-            source_sheet,
-            sheet,
-            row_idx,
-            fallback_row=data_start_row,
-        )
     data_styles = [
         _style_for_cell(
             source_sheet,
@@ -388,12 +391,8 @@ def write_xls_from_template(
     ]
 
     for record_idx, record in enumerate(output_rows, start=data_start_row):
-        _copy_row_layout(
-            source_sheet,
-            sheet,
-            record_idx,
-            fallback_row=data_start_row,
-        )
+        if record_idx >= source_sheet.nrows:
+            _copy_row_layout(source_sheet, sheet, record_idx, fallback_row=data_start_row)
         for col_idx, header in enumerate(template.headers):
             if not header:
                 continue
@@ -407,66 +406,6 @@ def write_xls_from_template(
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     workbook.save(str(output_path))
-
-
-def _copy_column_layout(
-    source_sheet: xlrd.sheet.Sheet,
-    output_sheet: xlwt.Worksheet.Worksheet,
-    max_col_count: int,
-) -> None:
-    for col_idx in range(max_col_count):
-        source_col = source_sheet.colinfo_map.get(col_idx)
-        if source_col is None:
-            continue
-        output_col = output_sheet.col(col_idx)
-        output_col.width = source_col.width
-        output_col.hidden = source_col.hidden
-        output_col.level = source_col.outline_level
-        output_col.collapse = source_col.collapsed
-
-
-def _copy_static_template_rows(
-    *,
-    source_sheet: xlrd.sheet.Sheet,
-    output_sheet: xlwt.Worksheet.Worksheet,
-    styles: list[xlwt.Style.XFStyle],
-    max_col_count: int,
-    data_start_row: int,
-) -> None:
-    merged_top_left: dict[tuple[int, int], tuple[int, int, int, int]] = {}
-    merged_covered: set[tuple[int, int]] = set()
-    for rlo, rhi, clo, chi in source_sheet.merged_cells:
-        if rlo >= data_start_row:
-            continue
-        merged_top_left[(rlo, clo)] = (rlo, rhi, clo, chi)
-        for row_idx in range(rlo, rhi):
-            for col_idx in range(clo, chi):
-                if (row_idx, col_idx) != (rlo, clo):
-                    merged_covered.add((row_idx, col_idx))
-
-    for row_idx in range(data_start_row):
-        _copy_row_layout(source_sheet, output_sheet, row_idx, fallback_row=row_idx)
-        for col_idx in range(max_col_count):
-            if (row_idx, col_idx) in merged_covered:
-                continue
-            value = (
-                source_sheet.cell_value(row_idx, col_idx)
-                if row_idx < source_sheet.nrows and col_idx < source_sheet.ncols
-                else ""
-            )
-            style = _style_for_cell(
-                source_sheet,
-                styles,
-                row_idx,
-                col_idx,
-                fallback_row=min(row_idx, max(source_sheet.nrows - 1, 0)),
-            )
-            merged = merged_top_left.get((row_idx, col_idx))
-            if merged:
-                rlo, rhi, clo, chi = merged
-                output_sheet.write_merge(rlo, rhi - 1, clo, chi - 1, value, style)
-            else:
-                output_sheet.write(row_idx, col_idx, value, style)
 
 
 def _copy_row_layout(

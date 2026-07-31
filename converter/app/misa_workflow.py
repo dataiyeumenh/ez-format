@@ -61,7 +61,6 @@ from app.mapping_profile_v2 import (
     match_mapping_profile_v2,
     quarantine_mapping_profile_v2,
     record_confirmed_export_v2,
-    template_version,
 )
 from app.mapping_semantics import validate_mapping_semantics
 from app.misa_readiness import add_master_data_resolutions, build_readiness_report
@@ -264,7 +263,7 @@ def analyze_upload(
     v2_profile = None
     v2_match = None
     v2_match_tier: str | None = None
-    resolved_template_version = template_version(template.workbook.path)
+    resolved_template_version = template.sha256
     if profile_token and mapping_profile_v2_enabled():
         try:
             v2_match = match_mapping_profile_v2(
@@ -1030,7 +1029,7 @@ def manifest_for_confirmed_profile(
         conversion_id=conversion_id,
         export_batch_id=export_batch_id,
         target_template_id=resolved.template.id,
-        template_hash=template_version(resolved.template.workbook.path),
+        template_hash=resolved.template.sha256,
         raw_file_hash=str(resolved.metadata.get("raw_sha256") or ""),
         mapping_profile_id=profile_id,
         mapping_profile_version=resolved.profile_version,

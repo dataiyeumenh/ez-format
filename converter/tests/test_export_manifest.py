@@ -377,6 +377,7 @@ def test_manifest_workflow_uses_resolved_export_rows_and_hashes(tmp_path, monkey
     resolved = SimpleNamespace(
         template=SimpleNamespace(
             id="bsn_sales",
+            sha256="d" * 64,
             workbook=SimpleNamespace(path=template_path),
         ),
         metadata={"raw_sha256": "b" * 64, "profile_state_hash": "c" * 64},
@@ -407,7 +408,7 @@ def test_manifest_workflow_uses_resolved_export_rows_and_hashes(tmp_path, monkey
     assert len(manifest.rows) == len(resolved.rows)
     assert manifest.raw_file_hash == "b" * 64
     assert manifest.mapping_profile_state_hash == "c" * 64
-    assert manifest.template_hash != "a" * 64
+    assert manifest.template_hash == "d" * 64
     assert manifest.document_groups[0]["amount_total"] == "100"
 
 

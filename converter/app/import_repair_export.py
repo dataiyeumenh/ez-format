@@ -9,7 +9,6 @@ from tempfile import TemporaryDirectory
 from typing import Any, Mapping
 
 from app.excel_io import write_xls_from_template
-from app.mapping_profile_v2 import template_version
 from app.misa_templates import get_misa_template
 from app.models import ExportManifestV1
 from app.parsing import parse_date, parse_decimal
@@ -127,7 +126,7 @@ def export_retry_workbook(
         else ExportManifestV1.model_validate(manifest)
     )
     template = get_misa_template(bound_manifest.target_template_id)
-    if template_version(template.workbook.path) != bound_manifest.template_hash:
+    if template.sha256 != bound_manifest.template_hash:
         raise RetryBlockedError("trusted template checksum mismatch")
     with TemporaryDirectory(prefix="ezformat-retry-") as directory:
         output_path = Path(directory) / "misa-retry.xls"
