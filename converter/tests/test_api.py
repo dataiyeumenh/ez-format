@@ -233,8 +233,8 @@ def test_convert_endpoint_returns_xls_file_and_cleans_temp_storage():
     workbook_path.write_bytes(response.content)
     try:
         sheet = xlrd.open_workbook(str(workbook_path)).sheet_by_index(0)
-        assert sheet.cell_value(8, 7) == "HD046178"
-        assert sheet.cell_value(8, 25) == "SP094030"
+        assert sheet.cell_value(8, 7) == "SYN-INV-000001"
+        assert sheet.cell_value(8, 25) == "SYN-ITEM-001"
     finally:
         workbook_path.unlink(missing_ok=True)
 

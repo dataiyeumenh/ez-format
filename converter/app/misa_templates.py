@@ -16,9 +16,13 @@ from app.conversion_types import BACKEND_ROOT, CONVERSION_TYPES
 from app.excel_io import TemplateWorkbook, read_template
 from app.misa_biff import (
     advanced_biff_feature_names,
+    iter_biff_records,
     probe_biff_features,
+    scan_ole_metadata,
     scan_template_content,
+    scrub_ole_metadata_copy,
     scrub_template_copy,
+    workbook_stream,
 )
 
 
@@ -182,7 +186,10 @@ def verify_all_misa_templates(
 
 
 probe_misa_template_biff = probe_biff_features
+iter_misa_biff_records = iter_biff_records
+scan_misa_ole_metadata = scan_ole_metadata
 scan_misa_template_content = scan_template_content
+scrub_misa_ole_metadata_copy = scrub_ole_metadata_copy
 scrub_misa_template_copy = scrub_template_copy
 
 

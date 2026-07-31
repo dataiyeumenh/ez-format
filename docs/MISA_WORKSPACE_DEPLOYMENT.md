@@ -54,10 +54,11 @@ every export target; a missing or mismatched template/manifest prevents startup.
 Production also fails closed unless every template's reviewed trust level is in
 `MISA_TEMPLATE_ACCEPTED_TRUST_LEVELS`. The committed templates are scrubbed
 structural derivatives of partner samples. Raw customer rows and unreferenced
-BIFF shared strings are absent from the current template files. Acquisition date,
-MISA product, and MISA release are unknown; these files are not claimed to be
-official MISA downloads. Historical commits may contain predecessor bytes;
-history rewriting requires a separate authorized operation. Do not point
+BIFF shared strings are absent from the current template files. OLE summary author
+properties and BIFF write-access/file-sharing usernames are also blanked.
+Acquisition date, MISA product, and MISA release are unknown; these files are not
+claimed to be official MISA downloads. Historical commits may contain predecessor
+bytes; history rewriting requires a separate authorized operation. Do not point
 production at an unreviewed local template folder.
 
 The current `xlutils.copy` exporter does not preserve formulas, defined names,

@@ -58,8 +58,8 @@ def test_formula_preserves_unsafe_decimal_precision():
 
 def test_known_exporter_duplicate_suffix_is_removed_without_generic_stripping():
     assert (
-        transform_value("HDO1764925151999_77832", "Số chứng từ (*)")
-        == "HDO1764925151999"
+        transform_value("HDO0000000000000_77832", "Số chứng từ (*)")
+        == "HDO0000000000000"
     )
 
 

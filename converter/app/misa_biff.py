@@ -17,6 +17,12 @@ _EOF = 0x000A
 _SST = 0x00FC
 _CONTINUE = 0x003C
 _LABELSST = 0x00FD
+_FILESHARING = 0x005B
+_WRITEACCESS = 0x005C
+_OLE_PROPERTY_STREAMS = (
+    "\x05SummaryInformation",
+    "\x05DocumentSummaryInformation",
+)
 _FORMULA_IDS = {0x0006, 0x0206, 0x0406}
 _FORMULA_FEATURE_IDS = _FORMULA_IDS | {
     0x0021,  # ARRAY (BIFF2)
@@ -67,6 +73,10 @@ class TemplateContentScan:
     post_header_workbook_value_count: int
     post_header_literal_record_count: int
     unreferenced_nonblank_sst_count: int
+    ole_property_value_count: int
+    ole_property_parse_error_count: int
+    file_sharing_username_count: int
+    write_access_username_count: int
 
     @property
     def clean(self) -> bool:
@@ -75,6 +85,29 @@ class TemplateContentScan:
                 self.post_header_workbook_value_count,
                 self.post_header_literal_record_count,
                 self.unreferenced_nonblank_sst_count,
+                self.ole_property_value_count,
+                self.ole_property_parse_error_count,
+                self.file_sharing_username_count,
+                self.write_access_username_count,
+            )
+        )
+
+
+@dataclass(frozen=True)
+class OleMetadataScan:
+    ole_property_value_count: int
+    ole_property_parse_error_count: int
+    file_sharing_username_count: int
+    write_access_username_count: int
+
+    @property
+    def clean(self) -> bool:
+        return not any(
+            (
+                self.ole_property_value_count,
+                self.ole_property_parse_error_count,
+                self.file_sharing_username_count,
+                self.write_access_username_count,
             )
         )
 
@@ -131,6 +164,50 @@ def probe_biff_features(file_contents: bytes) -> dict[str, dict[str, int | str]]
     }
 
 
+def scan_ole_metadata(file_contents: bytes) -> OleMetadataScan:
+    property_value_count = 0
+    property_parse_error_count = 0
+    try:
+        with olefile.OleFileIO(file_contents) as compound:
+            for stream_name in _OLE_PROPERTY_STREAMS:
+                if not compound.exists(stream_name):
+                    continue
+                try:
+                    properties = compound.getproperties(
+                        stream_name,
+                        convert_time=False,
+                    )
+                except Exception:
+                    property_parse_error_count += 1
+                    continue
+                property_value_count += sum(
+                    _count_nonblank_property_values(value)
+                    for property_id, value in properties.items()
+                    if property_id != 1  # Codepage is structural, not user metadata.
+                )
+    except Exception as exc:
+        raise ValueError("Invalid OLE workbook metadata") from exc
+
+    file_sharing_username_count = 0
+    write_access_username_count = 0
+    for record in iter_biff_records(file_contents):
+        if record.record_id == _FILESHARING:
+            file_sharing_username_count += int(
+                _file_sharing_username_is_nonblank(record.payload)
+            )
+        elif record.record_id == _WRITEACCESS:
+            write_access_username_count += int(
+                _write_access_username_is_nonblank(record.payload)
+            )
+
+    return OleMetadataScan(
+        ole_property_value_count=property_value_count,
+        ole_property_parse_error_count=property_parse_error_count,
+        file_sharing_username_count=file_sharing_username_count,
+        write_access_username_count=write_access_username_count,
+    )
+
+
 def scan_template_content(
     file_contents: bytes,
     *,
@@ -182,10 +259,15 @@ def scan_template_content(
         for index, value in enumerate(shared_strings)
         if index not in referenced_sst_indexes and not _is_blank(value)
     )
+    metadata = scan_ole_metadata(file_contents)
     return TemplateContentScan(
         post_header_workbook_value_count=workbook_value_count,
         post_header_literal_record_count=literal_record_count,
         unreferenced_nonblank_sst_count=unreferenced_nonblank,
+        ole_property_value_count=metadata.ole_property_value_count,
+        ole_property_parse_error_count=metadata.ole_property_parse_error_count,
+        file_sharing_username_count=metadata.file_sharing_username_count,
+        write_access_username_count=metadata.write_access_username_count,
     )
 
 
@@ -218,12 +300,8 @@ def scrub_template_copy(
         source_sheet,
         header_row_index=header_row_index,
     )
-
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_bytes(source_contents)
-    with olefile.OleFileIO(str(output_path), write_mode=True) as compound:
-        stream_name = "Workbook" if compound.exists("Workbook") else "Book"
-        compound.write_stream(stream_name, scrubbed_stream)
+    scrubbed_stream = _scrub_workbook_user_metadata(scrubbed_stream)
+    _write_scrubbed_ole_copy(source_contents, output_path, scrubbed_stream)
 
     output_contents = output_path.read_bytes()
     if probe_biff_features(output_contents) != source_probe:
@@ -233,8 +311,127 @@ def scrub_template_copy(
         header_row_index=header_row_index,
     )
     if not scan.clean:
-        raise ValueError("Scrubbing left post-header or residual binary values")
+        raise ValueError("Scrubbing left customer values or workbook metadata")
     return output_path
+
+
+def scrub_ole_metadata_copy(source_path: Path, output_path: Path) -> Path:
+    source_contents = source_path.read_bytes()
+    source_probe = probe_biff_features(source_contents)
+    scrubbed_stream = _scrub_workbook_user_metadata(workbook_stream(source_contents))
+    _write_scrubbed_ole_copy(source_contents, output_path, scrubbed_stream)
+
+    output_contents = output_path.read_bytes()
+    if not scan_ole_metadata(output_contents).clean:
+        raise ValueError("Scrubbing left OLE or workbook user metadata")
+    if probe_biff_features(output_contents) != source_probe:
+        raise ValueError("Metadata scrubbing changed protected BIFF feature records")
+    return output_path
+
+
+def _write_scrubbed_ole_copy(
+    source_contents: bytes,
+    output_path: Path,
+    scrubbed_workbook_stream: bytes,
+) -> None:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_bytes(source_contents)
+    with olefile.OleFileIO(str(output_path), write_mode=True) as compound:
+        stream_name = "Workbook" if compound.exists("Workbook") else "Book"
+        compound.write_stream(stream_name, scrubbed_workbook_stream)
+        for property_stream_name in _OLE_PROPERTY_STREAMS:
+            if not compound.exists(property_stream_name):
+                continue
+            source_stream = compound.openstream(property_stream_name).read()
+            compound.write_stream(
+                property_stream_name,
+                _canonical_property_stream(source_stream),
+            )
+
+
+def _canonical_property_stream(source_stream: bytes) -> bytes:
+    # Keep a valid, minimal property set and preserve stream length for OLE in-place writes.
+    if len(source_stream) < 72 or source_stream[:2] != b"\xfe\xff":
+        raise ValueError("OLE property stream cannot be scrubbed safely")
+    format_id = source_stream[28:44]
+    header = struct.pack("<HHI", 0xFFFE, 0, 0x00020006)
+    header += b"\0" * 16
+    header += struct.pack("<I", 1)
+    header += format_id
+    header += struct.pack("<I", 48)
+    section = struct.pack("<II", 24, 1)
+    section += struct.pack("<II", 1, 16)
+    section += struct.pack("<IhH", 2, 1252, 0)
+    scrubbed = header + section
+    return scrubbed + (b"\0" * (len(source_stream) - len(scrubbed)))
+
+
+def _count_nonblank_property_values(value: object) -> int:
+    if isinstance(value, str):
+        return int(bool(value.strip(" \t\r\n\0")))
+    if isinstance(value, bytes):
+        return int(bool(value.strip(b" \t\r\n\0")))
+    if isinstance(value, dict):
+        return sum(_count_nonblank_property_values(item) for item in value.values())
+    if isinstance(value, (list, tuple, set)):
+        return sum(_count_nonblank_property_values(item) for item in value)
+    return 0
+
+
+def _record_text_is_nonblank(payload: bytes) -> bool:
+    return bool(payload.replace(b"\0", b"").strip(b" \t\r\n"))
+
+
+def _file_sharing_username_is_nonblank(payload: bytes) -> bool:
+    if len(payload) < 6:
+        return True
+    character_count = payload[4]
+    character_width = 2 if payload[5] & 0x01 else 1
+    end = 6 + (character_count * character_width)
+    if end > len(payload):
+        return True
+    return _record_text_is_nonblank(payload[6:end])
+
+
+def _write_access_username_is_nonblank(payload: bytes) -> bool:
+    if len(payload) < 3:
+        return True
+    character_count = struct.unpack_from("<H", payload, 0)[0]
+    character_width = 2 if payload[2] & 0x01 else 1
+    end = 3 + (character_count * character_width)
+    if end > len(payload):
+        return True
+    return _record_text_is_nonblank(payload[3:end])
+
+
+def _scrub_workbook_user_metadata(stream: bytes) -> bytes:
+    patched = bytearray(stream)
+    for record in _iter_stream_records(stream):
+        payload_start = record.offset + 4
+        if record.record_id == _WRITEACCESS:
+            if len(record.payload) < 3:
+                raise ValueError("Malformed BIFF WRITEACCESS record")
+            replacement = b"\0\0\0" + (b" " * (len(record.payload) - 3))
+            patched[payload_start : payload_start + len(record.payload)] = replacement
+            continue
+        if record.record_id != _FILESHARING:
+            continue
+        if len(record.payload) < 6:
+            raise ValueError("Malformed BIFF FILESHARING record")
+        character_count = record.payload[4]
+        wide_characters = bool(record.payload[5] & 0x01)
+        character_width = 2 if wide_characters else 1
+        character_start = payload_start + 6
+        character_length = character_count * character_width
+        if 6 + character_length > len(record.payload):
+            raise ValueError("Malformed BIFF FILESHARING username")
+        replacement = (
+            b"\x20\x00" * character_count
+            if wide_characters
+            else b" " * character_count
+        )
+        patched[character_start : character_start + character_length] = replacement
+    return bytes(patched)
 
 
 def _scrub_workbook_stream(

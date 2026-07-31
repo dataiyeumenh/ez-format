@@ -10,7 +10,15 @@ python -m pip install -r requirements.txt
 
 Templates live in `fixtures/templates/`. Their reviewed SHA-256 and exact workbook
 schema live in the tracked, versioned `config/misa-template-manifest.json`.
-Test samples live in `fixtures/samples/`.
+Test samples live in `fixtures/samples/`. They are deterministic synthetic files
+with pinned hashes in `config/converter-fixture-manifest.json`; regenerate both
+files together with:
+
+```powershell
+python scripts/generate_synthetic_sales_fixtures.py `
+  --output-dir fixtures/samples `
+  --manifest config/converter-fixture-manifest.json
+```
 
 Production/local template configuration:
 
@@ -28,11 +36,12 @@ is rejected. Production imports verify every supported template and fail before
 the API starts when the manifest, filename, SHA-256, sheet, header row, or ordered
 header schema differs. Production also requires an explicitly configured accepted
 trust level. The committed templates are scrubbed structural derivatives of
-partner-provided samples. Post-header values and residual unreferenced BIFF shared
-strings are removed from the current bundled files. Acquisition date, MISA product,
-and MISA release remain unknown. No official MISA source is claimed. Historical
-commits may contain predecessor bytes; history rewriting is a separate destructive
-operation and is not performed by this template release.
+partner-provided samples. Post-header values, residual unreferenced BIFF shared
+strings, OLE author properties, and BIFF write-access/file-sharing usernames are
+removed from the current bundled files. Acquisition date, MISA product, and MISA
+release remain unknown. No official MISA source is claimed. Historical commits may
+contain predecessor bytes; history rewriting is a separate destructive operation
+and is not performed by this template release.
 
 Verify the active deployment assets:
 

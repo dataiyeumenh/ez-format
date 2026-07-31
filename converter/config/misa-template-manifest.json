@@ -1,11 +1,11 @@
 {
   "schema_version": 3,
-  "manifest_version": "2026-07-31.3",
+  "manifest_version": "2026-07-31.5",
   "templates": {
     "bsn_sales": {
       "canonical_filename": "BSN - Form import bán hàng.xls",
       "bundled_filename": "bsn_sales.xls",
-      "sha256": "9f798f8916b8ae4b40654dd79cb625d586254429768a2c2d033e3f80213a6bbc",
+      "sha256": "6e20b1a18af75de0c411df54a33b812225285fa7c73c881b1746338e0e7c7013",
       "sheet_name": "Ban hang",
       "header_row": 8,
       "column_count": 59,
@@ -71,15 +71,15 @@
         "Hàng hóa giữ hộ/bán hộ"
       ],
       "provenance": {
-        "source_kind": "partner_sample_derived",
-        "source_reference": "Sanitized structural derivative of a partner-provided sample committed as converter/fixtures/templates/bsn_sales.xls; no post-header customer values retained in this derivative",
+        "reviewer": "project-owner",
+        "official_status": "not_claimed_official",
+        "misa_release": "unknown",
+        "trust_level": "partner_sample_derived",
+        "review_status": "accepted_for_project_use",
         "acquisition_date": "unknown",
         "misa_product": "unknown",
-        "misa_release": "unknown",
-        "reviewer": "project-owner",
-        "review_status": "accepted_for_project_use",
-        "trust_level": "partner_sample_derived",
-        "official_status": "not_claimed_official"
+        "source_kind": "partner_sample_derived",
+        "source_reference": "Metadata-scrubbed structural derivatives of partner-provided samples; no raw customer rows, OLE author properties, or BIFF user metadata retained in committed files"
       },
       "biff_features": {
         "formulas": {
@@ -103,7 +103,7 @@
     "bsn_purchase": {
       "canonical_filename": "BSN - Form import mua hàng.xls",
       "bundled_filename": "bsn_purchase.xls",
-      "sha256": "37d0ff7eae686973b3d9b82808755aac5ac09a3b53c7699e7a67bc938f708dd0",
+      "sha256": "ecee216605b6631f73e0469084af506a34c7a2734ceb8fa719c853a885a17c7b",
       "sheet_name": "Mua hang trong nuoc ",
       "header_row": 8,
       "column_count": 39,
@@ -149,15 +149,15 @@
         "Nhóm HHDV mua vào"
       ],
       "provenance": {
-        "source_kind": "partner_sample_derived",
-        "source_reference": "Sanitized structural derivative of a partner-provided sample committed as converter/fixtures/templates/bsn_purchase.xls; no post-header customer values retained in this derivative",
+        "reviewer": "project-owner",
+        "official_status": "not_claimed_official",
+        "misa_release": "unknown",
+        "trust_level": "partner_sample_derived",
+        "review_status": "accepted_for_project_use",
         "acquisition_date": "unknown",
         "misa_product": "unknown",
-        "misa_release": "unknown",
-        "reviewer": "project-owner",
-        "review_status": "accepted_for_project_use",
-        "trust_level": "partner_sample_derived",
-        "official_status": "not_claimed_official"
+        "source_kind": "partner_sample_derived",
+        "source_reference": "Metadata-scrubbed structural derivatives of partner-provided samples; no raw customer rows, OLE author properties, or BIFF user metadata retained in committed files"
       },
       "biff_features": {
         "formulas": {
@@ -181,7 +181,7 @@
     "misa_purchase_domestic": {
       "canonical_filename": "mua_hang_trong_nuoc_full.xls",
       "bundled_filename": "mua_hang_trong_nuoc_full.xls",
-      "sha256": "e6f3cb1c57645aef4f7ec5d55cfc3fe548b261314df4276c0be20894e1007f57",
+      "sha256": "e9286fa897d0937c61813e9f43870c58eb3667cbbdec9239936077306f25223c",
       "sheet_name": "Mua hang trong nuoc",
       "header_row": 8,
       "column_count": 58,
@@ -246,15 +246,15 @@
         "CP không hợp lý"
       ],
       "provenance": {
-        "source_kind": "partner_sample_derived",
-        "source_reference": "Sanitized structural derivative of a partner-provided sample committed as converter/fixtures/templates/mua_hang_trong_nuoc_full.xls; no post-header customer values retained in this derivative",
+        "reviewer": "project-owner",
+        "official_status": "not_claimed_official",
+        "misa_release": "unknown",
+        "trust_level": "partner_sample_derived",
+        "review_status": "accepted_for_project_use",
         "acquisition_date": "unknown",
         "misa_product": "unknown",
-        "misa_release": "unknown",
-        "reviewer": "project-owner",
-        "review_status": "accepted_for_project_use",
-        "trust_level": "partner_sample_derived",
-        "official_status": "not_claimed_official"
+        "source_kind": "partner_sample_derived",
+        "source_reference": "Metadata-scrubbed structural derivatives of partner-provided samples; no raw customer rows, OLE author properties, or BIFF user metadata retained in committed files"
       },
       "biff_features": {
         "formulas": {
@@ -278,7 +278,7 @@
     "sales_goods": {
       "canonical_filename": "Form bán hàng hóa.xls",
       "bundled_filename": "sales_goods.xls",
-      "sha256": "6d64e1687448c4b21b2aade012b0f50f39c29bd9aedea44ab03bd3e6e64b0f5b",
+      "sha256": "0716a25837efb6e46f65dbb22bdf185e463ae9da0726cf8f5ae2ee7d9b23908a",
       "sheet_name": "Ban hang",
       "header_row": 8,
       "column_count": 52,
@@ -337,15 +337,15 @@
         "Hàng hóa giữ hộ/bán hộ"
       ],
       "provenance": {
-        "source_kind": "partner_sample_derived",
-        "source_reference": "Sanitized structural derivative of a partner-provided sample committed as converter/fixtures/templates/sales_goods.xls; no post-header customer values retained in this derivative",
+        "reviewer": "project-owner",
+        "official_status": "not_claimed_official",
+        "misa_release": "unknown",
+        "trust_level": "partner_sample_derived",
+        "review_status": "accepted_for_project_use",
         "acquisition_date": "unknown",
         "misa_product": "unknown",
-        "misa_release": "unknown",
-        "reviewer": "project-owner",
-        "review_status": "accepted_for_project_use",
-        "trust_level": "partner_sample_derived",
-        "official_status": "not_claimed_official"
+        "source_kind": "partner_sample_derived",
+        "source_reference": "Metadata-scrubbed structural derivatives of partner-provided samples; no raw customer rows, OLE author properties, or BIFF user metadata retained in committed files"
       },
       "biff_features": {
         "formulas": {
@@ -369,7 +369,7 @@
     "sales_service": {
       "canonical_filename": "Form bán hàng dịch vụ.xls",
       "bundled_filename": "sales_service.xls",
-      "sha256": "fc016b7fa849444ecac6e66be304fa0081a1e94083f537b2a74c502c15c1ccdd",
+      "sha256": "95716802b9cbaae6c92afef182b7af0d0be3a57f360d34805a666fff53db17d5",
       "sheet_name": "Ban dich vu",
       "header_row": 8,
       "column_count": 37,
@@ -413,15 +413,15 @@
         "HH không TH trên tờ khai thuế GTGT"
       ],
       "provenance": {
-        "source_kind": "partner_sample_derived",
-        "source_reference": "Sanitized structural derivative of a partner-provided sample committed as converter/fixtures/templates/sales_service.xls; no post-header customer values retained in this derivative",
+        "reviewer": "project-owner",
+        "official_status": "not_claimed_official",
+        "misa_release": "unknown",
+        "trust_level": "partner_sample_derived",
+        "review_status": "accepted_for_project_use",
         "acquisition_date": "unknown",
         "misa_product": "unknown",
-        "misa_release": "unknown",
-        "reviewer": "project-owner",
-        "review_status": "accepted_for_project_use",
-        "trust_level": "partner_sample_derived",
-        "official_status": "not_claimed_official"
+        "source_kind": "partner_sample_derived",
+        "source_reference": "Metadata-scrubbed structural derivatives of partner-provided samples; no raw customer rows, OLE author properties, or BIFF user metadata retained in committed files"
       },
       "biff_features": {
         "formulas": {
@@ -445,7 +445,7 @@
     "purchase_goods": {
       "canonical_filename": "Form mua hàng hóa.xls",
       "bundled_filename": "purchase_goods.xls",
-      "sha256": "6eae108f8f27d958d828632bdc20cc07fd2f82bca9614eefff3d11c0f13d5df5",
+      "sha256": "cd91e744aae6c2ec9bb6e905c51601706fb18a29ac01b59eaae4b9154f667526",
       "sheet_name": "Mua hang trong nuoc",
       "header_row": 8,
       "column_count": 58,
@@ -510,15 +510,15 @@
         "CP không hợp lý"
       ],
       "provenance": {
-        "source_kind": "partner_sample_derived",
-        "source_reference": "Sanitized structural derivative of a partner-provided sample committed as converter/fixtures/templates/purchase_goods.xls; no post-header customer values retained in this derivative",
+        "reviewer": "project-owner",
+        "official_status": "not_claimed_official",
+        "misa_release": "unknown",
+        "trust_level": "partner_sample_derived",
+        "review_status": "accepted_for_project_use",
         "acquisition_date": "unknown",
         "misa_product": "unknown",
-        "misa_release": "unknown",
-        "reviewer": "project-owner",
-        "review_status": "accepted_for_project_use",
-        "trust_level": "partner_sample_derived",
-        "official_status": "not_claimed_official"
+        "source_kind": "partner_sample_derived",
+        "source_reference": "Metadata-scrubbed structural derivatives of partner-provided samples; no raw customer rows, OLE author properties, or BIFF user metadata retained in committed files"
       },
       "biff_features": {
         "formulas": {
@@ -542,7 +542,7 @@
     "purchase_service": {
       "canonical_filename": "Form mua dịch vụ.xls",
       "bundled_filename": "purchase_service.xls",
-      "sha256": "d560ef100229224455de40afa9b8f63c9c6aec6fd32edde4a41853f449dcdd2e",
+      "sha256": "7db6090b5b0c14dde3cf48b7ad765f8dcb6c61a7c39b548d8b1f3e52c6055d50",
       "sheet_name": "Mua dich vu",
       "header_row": 8,
       "column_count": 37,
@@ -586,15 +586,15 @@
         "Địa chỉ NCC"
       ],
       "provenance": {
-        "source_kind": "partner_sample_derived",
-        "source_reference": "Sanitized structural derivative of a partner-provided sample committed as converter/fixtures/templates/purchase_service.xls; no post-header customer values retained in this derivative",
+        "reviewer": "project-owner",
+        "official_status": "not_claimed_official",
+        "misa_release": "unknown",
+        "trust_level": "partner_sample_derived",
+        "review_status": "accepted_for_project_use",
         "acquisition_date": "unknown",
         "misa_product": "unknown",
-        "misa_release": "unknown",
-        "reviewer": "project-owner",
-        "review_status": "accepted_for_project_use",
-        "trust_level": "partner_sample_derived",
-        "official_status": "not_claimed_official"
+        "source_kind": "partner_sample_derived",
+        "source_reference": "Metadata-scrubbed structural derivatives of partner-provided samples; no raw customer rows, OLE author properties, or BIFF user metadata retained in committed files"
       },
       "biff_features": {
         "formulas": {

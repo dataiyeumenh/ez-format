@@ -134,9 +134,11 @@ def test_convert_raw_sales_to_bsn_sales_xls_matches_golden_key_fields(tmp_path):
         )
 
     converted_row = _find_row_by_value(
-        converted_sheet, converted_headers["Số chứng từ (*)"], "HD046174"
+        converted_sheet, converted_headers["Số chứng từ (*)"], "SYN-INV-000010"
     )
-    golden_row = _find_row_by_value(golden_sheet, golden_headers["Số chứng từ (*)"], "HD046174")
+    golden_row = _find_row_by_value(
+        golden_sheet, golden_headers["Số chứng từ (*)"], "SYN-INV-000010"
+    )
     assert converted_sheet.cell_value(converted_row, converted_headers["Số lượng"]) == 10
     assert converted_sheet.cell_value(
         converted_row, converted_headers["Tiền chiết khấu"]

@@ -104,10 +104,10 @@ AI_REQUIRED=false
 ```
 
 Các template hiện tại là bản dẫn xuất cấu trúc đã xóa toàn bộ dữ liệu sau header
-từ mẫu do đối tác cung cấp; các file template hiện tại không chứa giá trị khách
-hàng sau header. Chưa rõ ngày tiếp nhận, sản phẩm và release MISA; dự án không
-tuyên bố đây là file tải từ nguồn MISA chính thức. Commit lịch sử có thể còn byte
-tiền nhiệm; rewrite lịch sử cần một thao tác được phê duyệt riêng.
+từ mẫu do đối tác cung cấp; OLE author metadata và BIFF write-access/file-sharing
+username cũng đã được làm trống. Chưa rõ ngày tiếp nhận, sản phẩm và release MISA;
+dự án không tuyên bố đây là file tải từ nguồn MISA chính thức. Commit lịch sử có
+thể còn byte tiền nhiệm; rewrite lịch sử cần một thao tác được phê duyệt riêng.
 
 `xlutils.copy` hiện không giữ được formula, defined name, drawing/object và data
 validation trong BIFF `.xls`. Chạy

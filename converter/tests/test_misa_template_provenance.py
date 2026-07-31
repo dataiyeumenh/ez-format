@@ -1,16 +1,18 @@
 import json
 import os
 import shutil
+import struct
 import subprocess
 import sys
 from pathlib import Path
 
+import olefile
 import pytest
 import xlrd
 import xlwt
 
 from app.conversion_types import CONVERSION_TYPES
-from app import misa_templates
+from app import misa_biff, misa_templates
 from app.excel_io import write_xls_from_template
 from app.misa_templates import DISPLAY_FILENAMES, get_misa_template, list_misa_templates
 
@@ -53,6 +55,45 @@ def _configure_trusted_copy(tmp_path, monkeypatch, template_id, payload):
     )
     monkeypatch.setenv("MISA_TEMPLATE_DIR", str(tmp_path))
     monkeypatch.setenv("MISA_TEMPLATE_MANIFEST_PATH", str(manifest_path))
+
+
+def _property_stream_with_author(source_stream: bytes) -> bytes:
+    author = b"private-fixture-user\0"
+    author_value = struct.pack("<II", 30, len(author)) + author
+    author_value += b"\0" * ((-len(author_value)) % 4)
+    section_size = 32 + len(author_value)
+    header = struct.pack("<HHI", 0xFFFE, 0, 0x00020006)
+    header += b"\0" * 16
+    header += struct.pack("<I", 1)
+    header += source_stream[28:44]
+    header += struct.pack("<I", 48)
+    section = struct.pack("<II", section_size, 2)
+    section += struct.pack("<IIII", 1, 24, 4, 32)
+    section += struct.pack("<IhH", 2, 1252, 0)
+    section += author_value
+    payload = header + section
+    assert len(payload) <= len(source_stream)
+    return payload + (b"\0" * (len(source_stream) - len(payload)))
+
+
+def _add_private_ole_metadata(path: Path) -> None:
+    contents = path.read_bytes()
+    workbook_stream = bytearray(misa_templates.workbook_stream(contents))
+    for record in misa_templates.iter_misa_biff_records(contents):
+        if record.record_id != 0x005C:
+            continue
+        value = b"private-fixture-user"
+        start = record.offset + 4
+        encoded = struct.pack("<H", len(value)) + b"\0" + value
+        workbook_stream[start : start + len(record.payload)] = encoded.ljust(
+            len(record.payload), b" "
+        )
+    with olefile.OleFileIO(str(path), write_mode=True) as compound:
+        stream_name = "Workbook" if compound.exists("Workbook") else "Book"
+        compound.write_stream(stream_name, bytes(workbook_stream))
+        summary = "\x05SummaryInformation"
+        source_summary = compound.openstream(summary).read()
+        compound.write_stream(summary, _property_stream_with_author(source_summary))
 
 
 def test_same_header_workbook_without_trusted_hash_is_rejected(tmp_path, monkeypatch):
@@ -184,9 +225,9 @@ def test_manifest_truthfully_labels_scrubbed_partner_sample_derivatives():
         assert provenance == {
             "source_kind": "partner_sample_derived",
             "source_reference": (
-                "Sanitized structural derivative of a partner-provided sample committed as "
-                f"converter/fixtures/templates/{entry['bundled_filename']}; "
-                "no post-header customer values retained in this derivative"
+                "Metadata-scrubbed structural derivatives of partner-provided samples; "
+                "no raw customer rows, OLE author properties, or BIFF user metadata "
+                "retained in committed files"
             ),
             "acquisition_date": "unknown",
             "misa_product": "unknown",
@@ -210,6 +251,10 @@ def test_bundled_templates_have_no_post_header_values_or_binary_pii():
         assert scan.post_header_workbook_value_count == 0, template.id
         assert scan.post_header_literal_record_count == 0, template.id
         assert scan.unreferenced_nonblank_sst_count == 0, template.id
+        assert scan.ole_property_value_count == 0, template.id
+        assert scan.ole_property_parse_error_count == 0, template.id
+        assert scan.file_sharing_username_count == 0, template.id
+        assert scan.write_access_username_count == 0, template.id
 
 
 def test_scrubber_removes_values_without_changing_protected_biff_records(tmp_path):
@@ -238,11 +283,12 @@ def test_scrubber_removes_values_without_changing_protected_biff_records(tmp_pat
 
     output_bytes = output_path.read_bytes()
     assert b"synthetic-customer@example.invalid" not in output_bytes
-    assert "synthetic-customer@example.invalid".encode("utf-16le") not in output_bytes
     scan = misa_templates.scan_misa_template_content(
         output_bytes,
         header_row_index=1,
     )
+    assert scan.write_access_username_count == 0
+    assert "synthetic-customer@example.invalid".encode("utf-16le") not in output_bytes
     assert scan.clean
     assert misa_templates.probe_misa_template_biff(output_bytes) == (
         misa_templates.probe_misa_template_biff(source_bytes)
@@ -261,6 +307,46 @@ def test_scrubber_removes_values_without_changing_protected_biff_records(tmp_pat
     assert output_sheet.rowinfo_map.keys() == source_sheet.rowinfo_map.keys()
     assert output_sheet.colinfo_map[0].width == source_sheet.colinfo_map[0].width
     assert output_sheet.rowinfo_map[2].height == source_sheet.rowinfo_map[2].height
+
+
+def test_ole_metadata_scrubber_removes_property_and_workbook_user_metadata(tmp_path):
+    scrubber = getattr(misa_templates, "scrub_misa_ole_metadata_copy", None)
+    template = get_misa_template("sales_goods")
+    source = tmp_path / "writer-output-with-metadata.xls"
+    output = tmp_path / "metadata-scrubbed.xls"
+    shutil.copyfile(template.path, source)
+    _add_private_ole_metadata(source)
+    source_bytes = source.read_bytes()
+    source_probe = misa_templates.probe_misa_template_biff(source_bytes)
+
+    assert scrubber is not None
+    source_scan = misa_templates.scan_misa_template_content(
+        source_bytes,
+        header_row_index=template.workbook.header_row_index,
+    )
+    assert source_scan.ole_property_value_count > 0
+    assert source_scan.write_access_username_count > 0
+
+    scrubber(source, output)
+
+    output_bytes = output.read_bytes()
+    output_scan = misa_templates.scan_misa_template_content(
+        output_bytes,
+        header_row_index=template.workbook.header_row_index,
+    )
+    assert output_scan.clean
+    assert misa_templates.probe_misa_template_biff(output_bytes) == source_probe
+
+
+def test_biff_file_sharing_username_is_blank_after_metadata_scrub():
+    username = b"private-fixture-user"
+    payload = struct.pack("<HHBB", 0, 0, len(username), 0) + username
+    record = struct.pack("<HH", 0x005B, len(payload)) + payload
+
+    assert misa_biff._file_sharing_username_is_nonblank(payload)
+    scrubbed = misa_biff._scrub_workbook_user_metadata(record)
+    scrubbed_payload = scrubbed[4:]
+    assert not misa_biff._file_sharing_username_is_nonblank(scrubbed_payload)
 
 
 def test_manifest_biff_probes_match_preserved_binary_records():

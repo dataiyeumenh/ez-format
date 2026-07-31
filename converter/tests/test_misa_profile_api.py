@@ -2,6 +2,7 @@ import io
 import json
 import os
 import sqlite3
+from datetime import datetime
 from pathlib import Path
 
 import xlrd
@@ -236,19 +237,19 @@ def test_analyze_preview_confirm_export_learns_profile(tmp_path, monkeypatch):
     preview_payload = preview.json()
     assert preview_payload["stats"] == {"source_rows": 1930, "output_rows": 1930}
     first = preview_payload["rows"][0]
-    assert first["Số chứng từ (*)"] == "HD046178"
-    assert first["Số phiếu xuất"] == "XK_HD046178"
-    assert first["Mã hàng (*)"] == "SP094030"
+    assert first["Số chứng từ (*)"] == "SYN-INV-000001"
+    assert first["Số phiếu xuất"] == "XK_SYN-INV-000001"
+    assert first["Mã hàng (*)"] == "SYN-ITEM-001"
     assert first["Số lượng"] == 1
-    assert first["Đơn giá"] == 700000
-    assert first["Thành tiền"] == 700000
-    assert first["Tiền chiết khấu"] == 315000
-    assert first["Số lô"] == "01072029"
-    assert first["Hạn sử dụng"] == "2029-07-01T00:00:00"
-    assert preview_payload["rows"][35]["ĐVT"] == "Hộp"
+    assert first["Đơn giá"] == 100000
+    assert first["Thành tiền"] == 100000
+    assert first["Tiền chiết khấu"] == 5000
+    assert first["Số lô"] == "SYN-LOT-001"
+    assert first["Hạn sử dụng"] == "2030-01-01T00:00:00"
+    assert preview_payload["rows"][35]["ĐVT"] == "SYN-UNIT"
     assert preview_payload["rows"][113]["Mã khách hàng"] == ""
-    assert preview_payload["rows"][1870]["Số chứng từ (*)"] == "HDO1764925151999"
-    assert preview_payload["rows"][1870]["Số phiếu xuất"] == "XK_HDO1764925151999"
+    assert preview_payload["rows"][1870]["Số chứng từ (*)"] == "SYN-INV-001871"
+    assert preview_payload["rows"][1870]["Số phiếu xuất"] == "XK_SYN-INV-001871"
 
     confirm = client.post(
         "/api/v1/mappings/confirm",
@@ -293,16 +294,22 @@ def test_analyze_preview_confirm_export_learns_profile(tmp_path, monkeypatch):
     headers = preview_payload["headers"]
     assert sheet.cell_value(6, headers.index("TK thuế GTGT")) == ""
     assert sheet.cell_value(6, headers.index("Mã kho")) == "Chi tiết giá vốn"
-    assert sheet.cell_value(8, headers.index("Số chứng từ (*)")) == "HD046178"
+    assert sheet.cell_value(8, headers.index("Số chứng từ (*)")) == "SYN-INV-000001"
     assert sheet.cell_value(8, headers.index("Địa chỉ")) == ""
-    assert sheet.cell_value(8, headers.index("Hạn sử dụng")) == 47300
-    assert sheet.cell_value(8, headers.index("Ngày hạch toán (*)")) == 46016.724817905095
-    assert sheet.cell_value(9, headers.index("Mã hàng (*)")) == "SP094013"
+    exported_expiry = xlrd.xldate_as_datetime(
+        sheet.cell_value(8, headers.index("Hạn sử dụng")), workbook.datemode
+    )
+    assert exported_expiry == datetime(2030, 1, 1)
+    exported_date = xlrd.xldate_as_datetime(
+        sheet.cell_value(8, headers.index("Ngày hạch toán (*)")), workbook.datemode
+    )
+    assert exported_date == datetime(2026, 1, 1, 8, 0)
+    assert sheet.cell_value(9, headers.index("Mã hàng (*)")) == "SYN-ITEM-002"
     assert sheet.cell_value(9, headers.index("ĐVT")) == ""
-    assert sheet.cell_value(43, headers.index("ĐVT")) == "Hộp"
+    assert sheet.cell_value(43, headers.index("ĐVT")) == "SYN-UNIT"
     assert sheet.cell_value(121, headers.index("Mã khách hàng")) == ""
-    assert sheet.cell_value(1878, headers.index("Số chứng từ (*)")) == "HDO1764925151999"
-    assert sheet.cell_value(1878, headers.index("Số phiếu xuất")) == "XK_HDO1764925151999"
+    assert sheet.cell_value(1878, headers.index("Số chứng từ (*)")) == "SYN-INV-001871"
+    assert sheet.cell_value(1878, headers.index("Số phiếu xuất")) == "XK_SYN-INV-001871"
 
     with (SAMPLES / "raw_sales_sample.xlsx").open("rb") as handle:
         reanalyze = client.post(
