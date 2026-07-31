@@ -14,13 +14,25 @@ from typing import Any
 
 from app.conversion_types import BACKEND_ROOT, CONVERSION_TYPES
 from app.excel_io import TemplateWorkbook, read_template
+from app.misa_biff import (
+    advanced_biff_feature_names,
+    probe_biff_features,
+    scan_template_content,
+    scrub_template_copy,
+)
 
 
 DEFAULT_TEMPLATE_DIR = BACKEND_ROOT / "fixtures" / "templates"
 DEFAULT_MANIFEST_PATH = BACKEND_ROOT / "config" / "misa-template-manifest.json"
-MANIFEST_SCHEMA_VERSION = 2
+MANIFEST_SCHEMA_VERSION = 3
 _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 _TRUST_LEVEL_PATTERN = re.compile(r"^[a-z][a-z0-9_-]{1,63}$")
+_BIFF_FEATURE_NAMES = {
+    "formulas",
+    "defined_names",
+    "drawings_objects",
+    "data_validations",
+}
 _PROVENANCE_FIELDS = {
     "source_kind",
     "source_reference",
@@ -71,6 +83,7 @@ class TemplateProvenance:
     column_count: int
     headers: tuple[str, ...]
     trust: TemplateTrustMetadata
+    biff_features: dict[str, dict[str, int | str]]
 
 
 @dataclass(frozen=True)
@@ -116,12 +129,21 @@ def template_path_for(template_id: str) -> Path:
     return _template_path_for(template_id, configured_template_dir(), provenance)
 
 
-def get_misa_template(template_id: str) -> MisaTemplate:
+def get_misa_template(
+    template_id: str,
+    *,
+    require_export_safe: bool = False,
+) -> MisaTemplate:
     if template_id not in CONVERSION_TYPES:
         raise ValueError(f"Unsupported target_template_id: {template_id}")
     provenance = _template_provenance(template_id, configured_manifest_path())
     path = _template_path_for(template_id, configured_template_dir(), provenance)
-    workbook = _verified_workbook(template_id, path, provenance)
+    workbook = _verified_workbook(
+        template_id,
+        path,
+        provenance,
+        require_export_safe=(require_export_safe or _is_production()),
+    )
     definition = CONVERSION_TYPES[template_id]
     return MisaTemplate(
         id=template_id,
@@ -137,12 +159,31 @@ def list_misa_templates() -> list[MisaTemplate]:
     return [get_misa_template(template_id) for template_id in CONVERSION_TYPES]
 
 
-def verify_all_misa_templates() -> dict[str, str]:
+def verify_all_misa_templates(
+    *,
+    require_export_safe: bool = False,
+) -> dict[str, str]:
     verified: dict[str, str] = {}
     for template_id in CONVERSION_TYPES:
-        template = get_misa_template(template_id)
+        template = get_misa_template(
+            template_id,
+            require_export_safe=require_export_safe,
+        )
+        scan = scan_misa_template_content(
+            template.workbook.file_contents,
+            header_row_index=template.workbook.header_row_index,
+        )
+        if not scan.clean:
+            raise MisaTemplateProvenanceError(
+                f"MISA template contains post-header or residual binary values: {template_id}"
+            )
         verified[template_id] = template.sha256
     return verified
+
+
+probe_misa_template_biff = probe_biff_features
+scan_misa_template_content = scan_template_content
+scrub_misa_template_copy = scrub_template_copy
 
 
 def regenerate_manifest_candidate(
@@ -168,10 +209,28 @@ def regenerate_manifest_candidate(
     for template_id in CONVERSION_TYPES:
         provenance = _template_provenance_from_manifest(template_id, active)
         path = _template_path_for(template_id, template_dir, provenance)
-        workbook = _verified_workbook(template_id, path, provenance, verify_hash=False)
+        workbook = _verified_workbook(
+            template_id,
+            path,
+            provenance,
+            verify_hash=False,
+            verify_biff=False,
+        )
+        scan = scan_misa_template_content(
+            workbook.file_contents,
+            header_row_index=workbook.header_row_index,
+        )
+        if not scan.clean:
+            raise MisaTemplateProvenanceError(
+                f"MISA template rotation contains post-header or residual binary values: "
+                f"{template_id}"
+            )
         candidate["templates"][template_id]["sha256"] = hashlib.sha256(
             workbook.file_contents
         ).hexdigest()
+        candidate["templates"][template_id]["biff_features"] = probe_biff_features(
+            workbook.file_contents
+        )
         candidate["templates"][template_id]["provenance"] = _trust_payload(trust)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     try:
@@ -193,7 +252,7 @@ def review_manifest_candidate(*, template_dir: Path, candidate_path: Path) -> No
     for template_id in CONVERSION_TYPES:
         active_entry = active["templates"][template_id]
         candidate_entry = candidate["templates"][template_id]
-        for field in set(active_entry) - {"sha256", "provenance"}:
+        for field in set(active_entry) - {"sha256", "provenance", "biff_features"}:
             if candidate_entry.get(field) != active_entry[field]:
                 raise MisaTemplateProvenanceError(
                     f"Candidate auto-learned {field} for {template_id}; "
@@ -255,6 +314,7 @@ def _template_provenance_from_manifest(
         "column_count",
         "headers",
         "provenance",
+        "biff_features",
     }
     if not isinstance(raw_entry, dict) or set(raw_entry) != expected_fields:
         raise MisaTemplateProvenanceError(
@@ -282,6 +342,7 @@ def _template_provenance_from_manifest(
     column_count = raw_entry["column_count"]
     headers = raw_entry["headers"]
     trust = _trust_metadata(template_id, raw_entry["provenance"])
+    biff_features = _biff_features_metadata(template_id, raw_entry["biff_features"])
     if not isinstance(sha256, str) or not _SHA256_PATTERN.fullmatch(sha256):
         raise MisaTemplateProvenanceError(
             f"MISA template SHA-256 is invalid for {template_id}"
@@ -327,6 +388,7 @@ def _template_provenance_from_manifest(
         column_count=column_count,
         headers=tuple(headers),
         trust=trust,
+        biff_features=biff_features,
     )
 
 
@@ -340,7 +402,12 @@ def _trust_metadata(template_id: str, value: Any) -> TemplateTrustMetadata:
             f"MISA template provenance metadata is incomplete for {template_id}"
         )
     trust = TemplateTrustMetadata(**{field: value[field].strip() for field in value})
-    if trust.source_kind not in {"partner_supplied", "vendor_download", "internal_reviewed"}:
+    if trust.source_kind not in {
+        "partner_sample_derived",
+        "partner_supplied",
+        "vendor_download",
+        "internal_reviewed",
+    }:
         raise MisaTemplateProvenanceError(
             f"MISA template source kind is invalid for {template_id}"
         )
@@ -377,7 +444,7 @@ def _trust_metadata(template_id: str, value: Any) -> TemplateTrustMetadata:
         raise MisaTemplateProvenanceError(
             f"MISA template official status is invalid for {template_id}"
         )
-    if trust.source_kind == "partner_supplied" and (
+    if trust.source_kind in {"partner_sample_derived", "partner_supplied"} and (
         trust.official_status != "not_claimed_official"
     ):
         raise MisaTemplateProvenanceError(
@@ -400,11 +467,42 @@ def _trust_payload(trust: TemplateTrustMetadata) -> dict[str, str]:
     return {field: getattr(trust, field) for field in _PROVENANCE_FIELDS}
 
 
+def _biff_features_metadata(
+    template_id: str,
+    value: Any,
+) -> dict[str, dict[str, int | str]]:
+    if not isinstance(value, dict) or set(value) != _BIFF_FEATURE_NAMES:
+        raise MisaTemplateProvenanceError(
+            f"MISA template BIFF feature probe is invalid for {template_id}"
+        )
+    normalized: dict[str, dict[str, int | str]] = {}
+    for feature in _BIFF_FEATURE_NAMES:
+        details = value[feature]
+        if not isinstance(details, dict) or set(details) != {"record_count", "sha256"}:
+            raise MisaTemplateProvenanceError(
+                f"MISA template BIFF feature probe is invalid for {template_id}"
+            )
+        record_count = details["record_count"]
+        digest = details["sha256"]
+        if (
+            isinstance(record_count, bool)
+            or not isinstance(record_count, int)
+            or record_count < 0
+            or not isinstance(digest, str)
+            or not _SHA256_PATTERN.fullmatch(digest)
+        ):
+            raise MisaTemplateProvenanceError(
+                f"MISA template BIFF feature probe is invalid for {template_id}"
+            )
+        normalized[feature] = {"record_count": record_count, "sha256": digest}
+    return normalized
+
+
 def _enforce_production_trust(
     template_id: str,
     trust: TemplateTrustMetadata,
 ) -> None:
-    if os.getenv("NODE_ENV", "").strip().lower() != "production":
+    if not _is_production():
         return
     accepted = {
         item.strip()
@@ -418,6 +516,22 @@ def _enforce_production_trust(
     if trust.review_status != "accepted_for_project_use":
         raise MisaTemplateProvenanceError(
             f"MISA template review status is not accepted for {template_id}"
+        )
+
+
+def _is_production() -> bool:
+    return os.getenv("NODE_ENV", "").strip().lower() == "production"
+
+
+def _enforce_biff_export_capability(
+    template_id: str,
+    probe: dict[str, dict[str, int | str]],
+) -> None:
+    unsupported = advanced_biff_feature_names(probe)
+    if unsupported:
+        raise MisaTemplateProvenanceError(
+            "MISA template BIFF preservation is unavailable with the current "
+            f"xlutils.copy writer for {template_id}: {', '.join(unsupported)}"
         )
 
 
@@ -460,6 +574,8 @@ def _verified_workbook(
     provenance: TemplateProvenance,
     *,
     verify_hash: bool = True,
+    verify_biff: bool = True,
+    require_export_safe: bool = False,
 ) -> TemplateWorkbook:
     try:
         file_contents = path.read_bytes()
@@ -494,13 +610,28 @@ def _verified_workbook(
         raise MisaTemplateProvenanceError(
             f"MISA template headers invariant mismatch for {template_id}"
         )
+    actual_biff_features = probe_biff_features(file_contents)
+    if verify_biff and actual_biff_features != provenance.biff_features:
+        raise MisaTemplateProvenanceError(
+            f"MISA template BIFF feature probe mismatch for {template_id}"
+        )
+    if require_export_safe:
+        _enforce_biff_export_capability(template_id, actual_biff_features)
     return workbook
 
 
 def _main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Verify and rotate trusted MISA templates")
     subparsers = parser.add_subparsers(dest="command", required=True)
-    subparsers.add_parser("verify", help="Verify all configured templates and hashes")
+    verify = subparsers.add_parser(
+        "verify",
+        help="Verify all configured templates and hashes",
+    )
+    verify.add_argument(
+        "--require-export-safe",
+        action="store_true",
+        help="Fail when the current writer cannot preserve detected BIFF features",
+    )
 
     regenerate = subparsers.add_parser(
         "regenerate-manifest",
@@ -529,7 +660,14 @@ def _main(argv: list[str] | None = None) -> int:
 
     try:
         if args.command == "verify":
-            print(json.dumps(verify_all_misa_templates(), sort_keys=True))
+            print(
+                json.dumps(
+                    verify_all_misa_templates(
+                        require_export_safe=args.require_export_safe,
+                    ),
+                    sort_keys=True,
+                )
+            )
         elif args.command == "regenerate-manifest":
             output = regenerate_manifest_candidate(
                 template_dir=_configured_path(args.template_dir, DEFAULT_TEMPLATE_DIR),
@@ -556,8 +694,8 @@ def _main(argv: list[str] | None = None) -> int:
     return 0
 
 
-if os.getenv("NODE_ENV", "").strip().lower() == "production":
-    verify_all_misa_templates()
+if _is_production():
+    verify_all_misa_templates(require_export_safe=True)
 
 
 if __name__ == "__main__":

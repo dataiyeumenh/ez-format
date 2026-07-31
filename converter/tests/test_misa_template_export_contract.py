@@ -3,6 +3,7 @@ from datetime import datetime
 import xlrd
 
 from app.excel_io import write_xls_from_template
+from app import misa_templates
 from app.misa_templates import list_misa_templates
 
 
@@ -133,9 +134,9 @@ def test_export_preserves_preamble_alignment_for_all_misa_templates(tmp_path):
                 )
 
 
-def test_literal_export_preserves_full_structure_for_all_misa_templates(tmp_path):
+def test_export_preserves_supported_layout_structure_for_all_misa_templates(tmp_path):
     for template in list_misa_templates():
-        output_path = tmp_path / f"literal-{template.id}.xls"
+        output_path = tmp_path / f"layout-{template.id}.xls"
         row = {header: "" for header in template.headers}
 
         write_xls_from_template(template.workbook, [row], output_path)
@@ -151,6 +152,64 @@ def test_literal_export_preserves_full_structure_for_all_misa_templates(tmp_path
             template.workbook.header_row_index,
             len(template.headers),
         )
+
+
+def test_multi_row_export_uses_corresponding_template_row_styles_with_fallback(tmp_path):
+    for template in list_misa_templates():
+        output_path = tmp_path / f"multi-row-{template.id}.xls"
+        rows = [{header: "" for header in template.headers} for _ in range(4)]
+        source_book = xlrd.open_workbook(
+            file_contents=template.workbook.file_contents,
+            formatting_info=True,
+        )
+        source_sheet = source_book.sheet_by_index(0)
+        data_start = template.workbook.header_row_index + 1
+
+        write_xls_from_template(template.workbook, rows, output_path)
+
+        output_book = xlrd.open_workbook(str(output_path), formatting_info=True)
+        output_sheet = output_book.sheet_by_index(0)
+        for offset in range(len(rows)):
+            output_row = data_start + offset
+            source_row = output_row if output_row < source_sheet.nrows else data_start
+            assert _style_signatures(
+                output_book,
+                output_sheet,
+                output_row,
+                len(template.headers),
+            ) == _style_signatures(
+                source_book,
+                source_sheet,
+                source_row,
+                len(template.headers),
+            ), (template.id, offset)
+            assert output_sheet.rowinfo_map[output_row].height == (
+                source_sheet.rowinfo_map[source_row].height
+            ), (template.id, offset)
+
+
+def test_record_probe_exposes_xlutils_advanced_biff_loss(tmp_path):
+    template = next(item for item in list_misa_templates() if item.id == "sales_goods")
+    output_path = tmp_path / "biff-capability-probe.xls"
+
+    write_xls_from_template(
+        template.workbook,
+        [{header: "" for header in template.headers}],
+        output_path,
+    )
+
+    source_probe = misa_templates.probe_misa_template_biff(
+        template.workbook.file_contents
+    )
+    output_probe = misa_templates.probe_misa_template_biff(output_path.read_bytes())
+    for feature in (
+        "formulas",
+        "defined_names",
+        "drawings_objects",
+        "data_validations",
+    ):
+        assert source_probe[feature]["record_count"] > 0
+        assert output_probe[feature]["record_count"] == 0
 
 
 def test_bsn_sales_augmented_lot_expiry_do_not_shift_cost_preamble(tmp_path):
@@ -236,7 +295,7 @@ def test_export_clears_stale_template_data_rows(tmp_path):
         assert sheet.cell_value(stale_row, invoice_col) == ""
 
 
-def test_export_preserves_literal_template_tail(tmp_path):
+def test_export_preserves_template_tail_layout(tmp_path):
     template = next(item for item in list_misa_templates() if item.id == "bsn_sales")
     output_path = tmp_path / "trimmed_tail.xls"
     row = {header: "" for header in template.headers}

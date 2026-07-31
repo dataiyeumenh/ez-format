@@ -93,7 +93,7 @@ E:\0. EXE2\ez-format\.artifacts\ngrok-ai\vps-ai.env
 ```env
 MISA_TEMPLATE_DIR=fixtures/templates
 MISA_TEMPLATE_MANIFEST_PATH=config/misa-template-manifest.json
-MISA_TEMPLATE_ACCEPTED_TRUST_LEVELS=partner_supplied
+MISA_TEMPLATE_ACCEPTED_TRUST_LEVELS=partner_sample_derived
 MAPPING_DB_PATH=data/mapping_profiles.sqlite
 
 AI_PROVIDER=remote_http
@@ -103,10 +103,17 @@ AI_TIMEOUT_SECONDS=120
 AI_REQUIRED=false
 ```
 
-Các template hiện tại do đối tác cung cấp, chưa rõ ngày tiếp nhận, sản phẩm và
-release MISA; dự án không tuyên bố đây là file tải từ nguồn MISA chính thức.
-Production chỉ khởi động khi trust level trong manifest được chấp nhận rõ ràng
-qua `MISA_TEMPLATE_ACCEPTED_TRUST_LEVELS`.
+Các template hiện tại là bản dẫn xuất cấu trúc đã xóa toàn bộ dữ liệu sau header
+từ mẫu do đối tác cung cấp; các file template hiện tại không chứa giá trị khách
+hàng sau header. Chưa rõ ngày tiếp nhận, sản phẩm và release MISA; dự án không
+tuyên bố đây là file tải từ nguồn MISA chính thức. Commit lịch sử có thể còn byte
+tiền nhiệm; rewrite lịch sử cần một thao tác được phê duyệt riêng.
+
+`xlutils.copy` hiện không giữ được formula, defined name, drawing/object và data
+validation trong BIFF `.xls`. Chạy
+`python -m app.misa_templates verify --require-export-safe` trước release.
+Template có các record này sẽ làm production fail-closed; không có cơ chế bypass
+và không phụ thuộc Excel COM trên Render.
 
 Không đưa `AI_TOKEN` lên Vercel frontend.
 

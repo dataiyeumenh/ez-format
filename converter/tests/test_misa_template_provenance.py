@@ -6,12 +6,13 @@ import sys
 from pathlib import Path
 
 import pytest
+import xlrd
 import xlwt
 
 from app.conversion_types import CONVERSION_TYPES
 from app import misa_templates
 from app.excel_io import write_xls_from_template
-from app.misa_templates import DISPLAY_FILENAMES, get_misa_template
+from app.misa_templates import DISPLAY_FILENAMES, get_misa_template, list_misa_templates
 
 
 def _manifest_payload():
@@ -21,7 +22,7 @@ def _manifest_payload():
 def _rotation_metadata_args():
     return [
         "--source-kind",
-        "partner_supplied",
+        "partner_sample_derived",
         "--source-reference",
         "partner-template-test-reference",
         "--acquisition-date",
@@ -35,7 +36,7 @@ def _rotation_metadata_args():
         "--review-status",
         "accepted_for_project_use",
         "--trust-level",
-        "partner_supplied",
+        "partner_sample_derived",
         "--official-status",
         "not_claimed_official",
     ]
@@ -174,26 +175,106 @@ def test_committed_bsn_sales_provenance_preserves_59_column_schema():
     assert template.headers[lot_column : lot_column + 2] == ["Số lô", "Hạn sử dụng"]
 
 
-def test_manifest_truthfully_labels_current_templates_as_partner_supplied():
+def test_manifest_truthfully_labels_scrubbed_partner_sample_derivatives():
     payload = _manifest_payload()
 
-    assert payload["schema_version"] == 2
+    assert payload["schema_version"] == 3
     for template_id, entry in payload["templates"].items():
         provenance = entry["provenance"]
         assert provenance == {
-            "source_kind": "partner_supplied",
+            "source_kind": "partner_sample_derived",
             "source_reference": (
-                "Partner-provided workbook committed as "
-                f"converter/fixtures/templates/{entry['bundled_filename']}"
+                "Sanitized structural derivative of a partner-provided sample committed as "
+                f"converter/fixtures/templates/{entry['bundled_filename']}; "
+                "no post-header customer values retained in this derivative"
             ),
             "acquisition_date": "unknown",
             "misa_product": "unknown",
             "misa_release": "unknown",
             "reviewer": "project-owner",
             "review_status": "accepted_for_project_use",
-            "trust_level": "partner_supplied",
+            "trust_level": "partner_sample_derived",
             "official_status": "not_claimed_official",
         }, template_id
+
+
+def test_bundled_templates_have_no_post_header_values_or_binary_pii():
+    scanner = getattr(misa_templates, "scan_misa_template_content", None)
+
+    assert scanner is not None
+    for template in list_misa_templates():
+        scan = scanner(
+            template.workbook.file_contents,
+            header_row_index=template.workbook.header_row_index,
+        )
+        assert scan.post_header_workbook_value_count == 0, template.id
+        assert scan.post_header_literal_record_count == 0, template.id
+        assert scan.unreferenced_nonblank_sst_count == 0, template.id
+
+
+def test_scrubber_removes_values_without_changing_protected_biff_records(tmp_path):
+    scrubber = getattr(misa_templates, "scrub_misa_template_copy", None)
+    source_path = tmp_path / "source.xls"
+    output_path = tmp_path / "scrubbed.xls"
+    workbook = xlwt.Workbook()
+    sheet = workbook.add_sheet("Template")
+    style = xlwt.easyxf("font: bold on; align: vert centre")
+    sheet.write_merge(0, 0, 0, 1, "Synthetic template", style)
+    sheet.write(1, 0, "Customer", style)
+    sheet.write(1, 1, "Calculated", style)
+    sheet.write(2, 0, "synthetic-customer@example.invalid", style)
+    sheet.write(2, 1, xlwt.Formula("1+1"), style)
+    sheet.col(0).width = 6400
+    sheet.row(2).height = 420
+    workbook.save(str(source_path))
+    source_bytes = source_path.read_bytes()
+
+    assert scrubber is not None
+    scrubber(
+        source_path,
+        output_path,
+        header_row_index=1,
+    )
+
+    output_bytes = output_path.read_bytes()
+    assert b"synthetic-customer@example.invalid" not in output_bytes
+    assert "synthetic-customer@example.invalid".encode("utf-16le") not in output_bytes
+    scan = misa_templates.scan_misa_template_content(
+        output_bytes,
+        header_row_index=1,
+    )
+    assert scan.clean
+    assert misa_templates.probe_misa_template_biff(output_bytes) == (
+        misa_templates.probe_misa_template_biff(source_bytes)
+    )
+    source_sheet = xlrd.open_workbook(
+        file_contents=source_bytes,
+        formatting_info=True,
+    ).sheet_by_index(0)
+    output_sheet = xlrd.open_workbook(
+        file_contents=output_bytes,
+        formatting_info=True,
+    ).sheet_by_index(0)
+    assert output_sheet.merged_cells == source_sheet.merged_cells
+    assert output_sheet.default_row_height == source_sheet.default_row_height
+    assert output_sheet.colinfo_map.keys() == source_sheet.colinfo_map.keys()
+    assert output_sheet.rowinfo_map.keys() == source_sheet.rowinfo_map.keys()
+    assert output_sheet.colinfo_map[0].width == source_sheet.colinfo_map[0].width
+    assert output_sheet.rowinfo_map[2].height == source_sheet.rowinfo_map[2].height
+
+
+def test_manifest_biff_probes_match_preserved_binary_records():
+    probe = getattr(misa_templates, "probe_misa_template_biff", None)
+    payload = _manifest_payload()
+
+    assert probe is not None
+    advanced_template_count = 0
+    for template in list_misa_templates():
+        actual = probe(template.workbook.file_contents)
+        assert payload["templates"][template.id]["biff_features"] == actual
+        if any(feature["record_count"] for feature in actual.values()):
+            advanced_template_count += 1
+    assert advanced_template_count > 0
 
 
 def test_production_requires_configured_accepted_template_trust_level(monkeypatch):
@@ -204,11 +285,63 @@ def test_production_requires_configured_accepted_template_trust_level(monkeypatc
         get_misa_template("sales_goods")
 
 
-def test_production_accepts_explicit_partner_supplied_trust_level(monkeypatch):
+def test_production_accepts_explicit_derived_trust_for_feature_free_template(monkeypatch):
     monkeypatch.setenv("NODE_ENV", "production")
-    monkeypatch.setenv("MISA_TEMPLATE_ACCEPTED_TRUST_LEVELS", "partner_supplied")
+    monkeypatch.setenv("MISA_TEMPLATE_ACCEPTED_TRUST_LEVELS", "partner_sample_derived")
 
-    assert get_misa_template("sales_goods").id == "sales_goods"
+    assert get_misa_template("bsn_sales").id == "bsn_sales"
+
+
+def test_production_release_fails_when_writer_cannot_preserve_advanced_biff(monkeypatch):
+    monkeypatch.setenv("NODE_ENV", "production")
+    monkeypatch.setenv("MISA_TEMPLATE_ACCEPTED_TRUST_LEVELS", "partner_sample_derived")
+
+    with pytest.raises(RuntimeError, match="BIFF preservation"):
+        misa_templates.verify_all_misa_templates(require_export_safe=True)
+
+
+def test_release_capability_cli_fails_closed_for_current_writer():
+    converter_root = CONVERSION_TYPES["sales_goods"].template_path.parents[2]
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "app.misa_templates",
+            "verify",
+            "--require-export-safe",
+        ],
+        cwd=converter_root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert "BIFF preservation" in result.stderr
+
+
+def test_production_startup_fails_closed_on_unsupported_biff_writer():
+    converter_root = CONVERSION_TYPES["sales_goods"].template_path.parents[2]
+    env = dict(os.environ)
+    env.update(
+        {
+            "NODE_ENV": "production",
+            "MISA_TEMPLATE_ACCEPTED_TRUST_LEVELS": "partner_sample_derived",
+            "PYTHONIOENCODING": "utf-8",
+        }
+    )
+
+    result = subprocess.run(
+        [sys.executable, "-c", "import app.main"],
+        cwd=converter_root,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert "BIFF preservation" in result.stderr
 
 
 def test_verifier_checks_every_supported_template():
@@ -230,7 +363,7 @@ def test_production_import_fails_closed_on_untrusted_templates(tmp_path, failure
         {
             "NODE_ENV": "production",
             "MISA_TEMPLATE_MANIFEST_PATH": str(manifest_path),
-            "MISA_TEMPLATE_ACCEPTED_TRUST_LEVELS": "partner_supplied",
+            "MISA_TEMPLATE_ACCEPTED_TRUST_LEVELS": "partner_sample_derived",
             "PYTHONIOENCODING": "utf-8",
         }
     )

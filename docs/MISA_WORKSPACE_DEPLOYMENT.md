@@ -44,7 +44,7 @@ MASTER_DATA_CONTEXT_CACHE_SECONDS=300
 MAPPING_PROFILE_TIMEOUT_SECONDS=15
 MISA_TEMPLATE_DIR=fixtures/templates
 MISA_TEMPLATE_MANIFEST_PATH=config/misa-template-manifest.json
-MISA_TEMPLATE_ACCEPTED_TRUST_LEVELS=partner_supplied
+MISA_TEMPLATE_ACCEPTED_TRUST_LEVELS=partner_sample_derived
 ```
 
 Package both configured paths in the converter deployment image. Relative paths
@@ -52,10 +52,20 @@ resolve from the converter directory. Startup verifies canonical filenames,
 SHA-256 values, sheet names, header rows, column counts, and ordered headers for
 every export target; a missing or mismatched template/manifest prevents startup.
 Production also fails closed unless every template's reviewed trust level is in
-`MISA_TEMPLATE_ACCEPTED_TRUST_LEVELS`. The committed templates are labeled
-partner-supplied, with unknown acquisition date, MISA product, and MISA release;
-they are not claimed to be official MISA downloads. Do not point production at
-an unreviewed local template folder.
+`MISA_TEMPLATE_ACCEPTED_TRUST_LEVELS`. The committed templates are scrubbed
+structural derivatives of partner samples. Raw customer rows and unreferenced
+BIFF shared strings are absent from the current template files. Acquisition date,
+MISA product, and MISA release are unknown; these files are not claimed to be
+official MISA downloads. Historical commits may contain predecessor bytes;
+history rewriting requires a separate authorized operation. Do not point
+production at an unreviewed local template folder.
+
+The current `xlutils.copy` exporter does not preserve formulas, defined names,
+drawings/objects, or data validations. The manifest records byte-level probes for
+those features. Run `python -m app.misa_templates verify --require-export-safe`
+before release. Current feature-bearing templates deliberately fail that gate,
+and `NODE_ENV=production` fails startup for the same reason. Do not bypass the
+gate; deploy a BIFF-preserving writer first. Excel COM is not a Render dependency.
 
 Before deployment, run `python -m app.misa_templates verify` from `converter/`.
 For an intentional rotation, use the documented `regenerate-manifest` and

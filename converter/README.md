@@ -17,7 +17,7 @@ Production/local template configuration:
 ```powershell
 $env:MISA_TEMPLATE_DIR='fixtures/templates'
 $env:MISA_TEMPLATE_MANIFEST_PATH='config/misa-template-manifest.json'
-$env:MISA_TEMPLATE_ACCEPTED_TRUST_LEVELS='partner_supplied'
+$env:MISA_TEMPLATE_ACCEPTED_TRUST_LEVELS='partner_sample_derived'
 $env:MAPPING_DB_PATH='converter\data\mapping_profiles.sqlite'
 ```
 
@@ -27,15 +27,32 @@ canonical filename recorded as `canonical_filename`; a same-header replacement
 is rejected. Production imports verify every supported template and fail before
 the API starts when the manifest, filename, SHA-256, sheet, header row, or ordered
 header schema differs. Production also requires an explicitly configured accepted
-trust level. The current templates are partner-supplied; their acquisition date,
-MISA product, and MISA release are unknown, and the project does not claim that
-they came from an official MISA source.
+trust level. The committed templates are scrubbed structural derivatives of
+partner-provided samples. Post-header values and residual unreferenced BIFF shared
+strings are removed from the current bundled files. Acquisition date, MISA product,
+and MISA release remain unknown. No official MISA source is claimed. Historical
+commits may contain predecessor bytes; history rewriting is a separate destructive
+operation and is not performed by this template release.
 
 Verify the active deployment assets:
 
 ```powershell
 python -m app.misa_templates verify
 ```
+
+The normal verifier checks hashes, schema, scrubbed content, and protected BIFF
+record fingerprints. Release preflight is stricter:
+
+```powershell
+python -m app.misa_templates verify --require-export-safe
+```
+
+The current `xlutils.copy` writer preserves the tested cell styles, merges,
+column widths, and row heights, but drops formulas, defined names,
+drawings/objects, and data validations. Six committed templates contain at least
+one such BIFF feature. Therefore release preflight and production startup fail
+closed until a writer that passes the committed byte-level record probes is
+deployed. There is no Excel COM dependency or bypass setting.
 
 Template rotation is never learned automatically. Replace reviewed template
 files intentionally, generate a candidate without overwriting the active
@@ -46,14 +63,14 @@ python -m app.misa_templates regenerate-manifest `
   --template-dir fixtures/templates `
   --output ../.artifacts/misa-template-manifest.candidate.json `
   --manifest-version 2026-08-01.1 `
-  --source-kind partner_supplied `
-  --source-reference "Partner-provided workbook rotation review" `
+  --source-kind partner_sample_derived `
+  --source-reference "Sanitized derivative of reviewed partner sample; no customer values in derivative" `
   --acquisition-date 2026-08-01 `
   --misa-product unknown `
   --misa-release unknown `
   --reviewer reviewer-name `
   --review-status accepted_for_project_use `
-  --trust-level partner_supplied `
+  --trust-level partner_sample_derived `
   --official-status not_claimed_official
 python -m app.misa_templates review-manifest `
   --template-dir fixtures/templates `

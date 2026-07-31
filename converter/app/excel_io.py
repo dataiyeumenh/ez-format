@@ -379,29 +379,26 @@ def write_xls_from_template(
         max_col_count=len(template.headers),
         fallback_row=data_start_row,
     )
-    data_styles = [
-        _style_for_cell(
-            source_sheet,
-            styles,
-            data_start_row,
-            col_idx,
-            fallback_row=data_start_row,
-        )
-        for col_idx in range(len(template.headers))
-    ]
-
     for record_idx, record in enumerate(output_rows, start=data_start_row):
-        if record_idx >= source_sheet.nrows:
+        source_row_idx = record_idx if record_idx < source_sheet.nrows else data_start_row
+        if source_row_idx != record_idx:
             _copy_row_layout(source_sheet, sheet, record_idx, fallback_row=data_start_row)
         for col_idx, header in enumerate(template.headers):
             if not header:
                 continue
+            style = _style_for_cell(
+                source_sheet,
+                styles,
+                source_row_idx,
+                col_idx,
+                fallback_row=data_start_row,
+            )
             value = record.get(header, "")
             sheet.write(
                 record_idx,
                 col_idx,
-                _xls_cell_value(value, data_styles[col_idx]),
-                data_styles[col_idx],
+                _xls_cell_value(value, style),
+                style,
             )
 
     output_path.parent.mkdir(parents=True, exist_ok=True)

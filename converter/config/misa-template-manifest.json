@@ -1,6 +1,6 @@
 {
-  "schema_version": 2,
-  "manifest_version": "2026-07-31.2",
+  "schema_version": 3,
+  "manifest_version": "2026-07-31.3",
   "templates": {
     "bsn_sales": {
       "canonical_filename": "BSN - Form import bán hàng.xls",
@@ -71,21 +71,39 @@
         "Hàng hóa giữ hộ/bán hộ"
       ],
       "provenance": {
-        "source_kind": "partner_supplied",
-        "source_reference": "Partner-provided workbook committed as converter/fixtures/templates/bsn_sales.xls",
+        "source_kind": "partner_sample_derived",
+        "source_reference": "Sanitized structural derivative of a partner-provided sample committed as converter/fixtures/templates/bsn_sales.xls; no post-header customer values retained in this derivative",
         "acquisition_date": "unknown",
         "misa_product": "unknown",
         "misa_release": "unknown",
         "reviewer": "project-owner",
         "review_status": "accepted_for_project_use",
-        "trust_level": "partner_supplied",
+        "trust_level": "partner_sample_derived",
         "official_status": "not_claimed_official"
+      },
+      "biff_features": {
+        "formulas": {
+          "record_count": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "defined_names": {
+          "record_count": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "drawings_objects": {
+          "record_count": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "data_validations": {
+          "record_count": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
       }
     },
     "bsn_purchase": {
       "canonical_filename": "BSN - Form import mua hàng.xls",
       "bundled_filename": "bsn_purchase.xls",
-      "sha256": "4c9c0e4a37b04f1f2c6fd2c8184d9d271592cb4136f8d1a326bb53342354f483",
+      "sha256": "37d0ff7eae686973b3d9b82808755aac5ac09a3b53c7699e7a67bc938f708dd0",
       "sheet_name": "Mua hang trong nuoc ",
       "header_row": 8,
       "column_count": 39,
@@ -131,21 +149,39 @@
         "Nhóm HHDV mua vào"
       ],
       "provenance": {
-        "source_kind": "partner_supplied",
-        "source_reference": "Partner-provided workbook committed as converter/fixtures/templates/bsn_purchase.xls",
+        "source_kind": "partner_sample_derived",
+        "source_reference": "Sanitized structural derivative of a partner-provided sample committed as converter/fixtures/templates/bsn_purchase.xls; no post-header customer values retained in this derivative",
         "acquisition_date": "unknown",
         "misa_product": "unknown",
         "misa_release": "unknown",
         "reviewer": "project-owner",
         "review_status": "accepted_for_project_use",
-        "trust_level": "partner_supplied",
+        "trust_level": "partner_sample_derived",
         "official_status": "not_claimed_official"
+      },
+      "biff_features": {
+        "formulas": {
+          "record_count": 8,
+          "sha256": "28793738f6312af12822b29f26112e4644c7edf7b3296db504ebc98f3515f447"
+        },
+        "defined_names": {
+          "record_count": 1,
+          "sha256": "abc61e9aebef2a265628d4637f58b62487fb3ea98e6f635bbc1700f9a6b761a6"
+        },
+        "drawings_objects": {
+          "record_count": 2,
+          "sha256": "8b2f4aefea99e3e0b450e5b79a75456f5282bd506bb56edfb53cede82829c8db"
+        },
+        "data_validations": {
+          "record_count": 46,
+          "sha256": "dfff8c14594aabcaa83dca056841975455ef5d7ac21690dcfcec59f9125636af"
+        }
       }
     },
     "misa_purchase_domestic": {
       "canonical_filename": "mua_hang_trong_nuoc_full.xls",
       "bundled_filename": "mua_hang_trong_nuoc_full.xls",
-      "sha256": "e4772c711d38da6203a3d00721ae2af4d0324c587e008f55da684db9e896e93b",
+      "sha256": "e6f3cb1c57645aef4f7ec5d55cfc3fe548b261314df4276c0be20894e1007f57",
       "sheet_name": "Mua hang trong nuoc",
       "header_row": 8,
       "column_count": 58,
@@ -210,21 +246,39 @@
         "CP không hợp lý"
       ],
       "provenance": {
-        "source_kind": "partner_supplied",
-        "source_reference": "Partner-provided workbook committed as converter/fixtures/templates/mua_hang_trong_nuoc_full.xls",
+        "source_kind": "partner_sample_derived",
+        "source_reference": "Sanitized structural derivative of a partner-provided sample committed as converter/fixtures/templates/mua_hang_trong_nuoc_full.xls; no post-header customer values retained in this derivative",
         "acquisition_date": "unknown",
         "misa_product": "unknown",
         "misa_release": "unknown",
         "reviewer": "project-owner",
         "review_status": "accepted_for_project_use",
-        "trust_level": "partner_supplied",
+        "trust_level": "partner_sample_derived",
         "official_status": "not_claimed_official"
+      },
+      "biff_features": {
+        "formulas": {
+          "record_count": 2,
+          "sha256": "0b18425b914f8735797c9ecedaf982da7aa7d58ef2b4779718f47136b12c654d"
+        },
+        "defined_names": {
+          "record_count": 1,
+          "sha256": "32a455e59db57232aeb7192019f2314e08775c903072a4154706bf4a72648077"
+        },
+        "drawings_objects": {
+          "record_count": 3,
+          "sha256": "30e790c4bf7dc9f0e0360951c84b86bb80cc1ce711aeb2e33498cd47e36a9b67"
+        },
+        "data_validations": {
+          "record_count": 68,
+          "sha256": "a95e57b3ca8f278ae1b379a8ed46bb92cf2c74203b294f4c87e8ed7c2de976d4"
+        }
       }
     },
     "sales_goods": {
       "canonical_filename": "Form bán hàng hóa.xls",
       "bundled_filename": "sales_goods.xls",
-      "sha256": "f9cd25fb05803c8cf49b83de05245cefcd6b206aa0a94cfd32be426d956492c3",
+      "sha256": "6d64e1687448c4b21b2aade012b0f50f39c29bd9aedea44ab03bd3e6e64b0f5b",
       "sheet_name": "Ban hang",
       "header_row": 8,
       "column_count": 52,
@@ -283,21 +337,39 @@
         "Hàng hóa giữ hộ/bán hộ"
       ],
       "provenance": {
-        "source_kind": "partner_supplied",
-        "source_reference": "Partner-provided workbook committed as converter/fixtures/templates/sales_goods.xls",
+        "source_kind": "partner_sample_derived",
+        "source_reference": "Sanitized structural derivative of a partner-provided sample committed as converter/fixtures/templates/sales_goods.xls; no post-header customer values retained in this derivative",
         "acquisition_date": "unknown",
         "misa_product": "unknown",
         "misa_release": "unknown",
         "reviewer": "project-owner",
         "review_status": "accepted_for_project_use",
-        "trust_level": "partner_supplied",
+        "trust_level": "partner_sample_derived",
         "official_status": "not_claimed_official"
+      },
+      "biff_features": {
+        "formulas": {
+          "record_count": 8,
+          "sha256": "512859b2cec9a52413bf466d175e645c8d0a803a153c99d69ba86de617f455b9"
+        },
+        "defined_names": {
+          "record_count": 1,
+          "sha256": "abc61e9aebef2a265628d4637f58b62487fb3ea98e6f635bbc1700f9a6b761a6"
+        },
+        "drawings_objects": {
+          "record_count": 3,
+          "sha256": "83214b9d1ccf61dfca257c0c3b3d01a912d510b4b793b0823ee4f9821dfa166f"
+        },
+        "data_validations": {
+          "record_count": 64,
+          "sha256": "31f75efc79162989b5cff66822dc030fc2e9a8b8c001d6abc595b54d60c07987"
+        }
       }
     },
     "sales_service": {
       "canonical_filename": "Form bán hàng dịch vụ.xls",
       "bundled_filename": "sales_service.xls",
-      "sha256": "a9168b51c8c57be5979574f5e69b32662aeaf4795a7761d2856821e228b73475",
+      "sha256": "fc016b7fa849444ecac6e66be304fa0081a1e94083f537b2a74c502c15c1ccdd",
       "sheet_name": "Ban dich vu",
       "header_row": 8,
       "column_count": 37,
@@ -341,21 +413,39 @@
         "HH không TH trên tờ khai thuế GTGT"
       ],
       "provenance": {
-        "source_kind": "partner_supplied",
-        "source_reference": "Partner-provided workbook committed as converter/fixtures/templates/sales_service.xls",
+        "source_kind": "partner_sample_derived",
+        "source_reference": "Sanitized structural derivative of a partner-provided sample committed as converter/fixtures/templates/sales_service.xls; no post-header customer values retained in this derivative",
         "acquisition_date": "unknown",
         "misa_product": "unknown",
         "misa_release": "unknown",
         "reviewer": "project-owner",
         "review_status": "accepted_for_project_use",
-        "trust_level": "partner_supplied",
+        "trust_level": "partner_sample_derived",
         "official_status": "not_claimed_official"
+      },
+      "biff_features": {
+        "formulas": {
+          "record_count": 1,
+          "sha256": "7fcb9fab54cde18999ed083af09a8fc9c2dfb52301b0365c5a9fee53349a683b"
+        },
+        "defined_names": {
+          "record_count": 1,
+          "sha256": "abc61e9aebef2a265628d4637f58b62487fb3ea98e6f635bbc1700f9a6b761a6"
+        },
+        "drawings_objects": {
+          "record_count": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "data_validations": {
+          "record_count": 47,
+          "sha256": "c574c4903617dc112fb9742e0f2af114cc84b4f807e9048a87bf5d1229ad5888"
+        }
       }
     },
     "purchase_goods": {
       "canonical_filename": "Form mua hàng hóa.xls",
       "bundled_filename": "purchase_goods.xls",
-      "sha256": "e400e9d38fb4381f5d5bb83128874913fe3515e14e2af849b3f7ce7c0c0158be",
+      "sha256": "6eae108f8f27d958d828632bdc20cc07fd2f82bca9614eefff3d11c0f13d5df5",
       "sheet_name": "Mua hang trong nuoc",
       "header_row": 8,
       "column_count": 58,
@@ -420,21 +510,39 @@
         "CP không hợp lý"
       ],
       "provenance": {
-        "source_kind": "partner_supplied",
-        "source_reference": "Partner-provided workbook committed as converter/fixtures/templates/purchase_goods.xls",
+        "source_kind": "partner_sample_derived",
+        "source_reference": "Sanitized structural derivative of a partner-provided sample committed as converter/fixtures/templates/purchase_goods.xls; no post-header customer values retained in this derivative",
         "acquisition_date": "unknown",
         "misa_product": "unknown",
         "misa_release": "unknown",
         "reviewer": "project-owner",
         "review_status": "accepted_for_project_use",
-        "trust_level": "partner_supplied",
+        "trust_level": "partner_sample_derived",
         "official_status": "not_claimed_official"
+      },
+      "biff_features": {
+        "formulas": {
+          "record_count": 2,
+          "sha256": "0b18425b914f8735797c9ecedaf982da7aa7d58ef2b4779718f47136b12c654d"
+        },
+        "defined_names": {
+          "record_count": 1,
+          "sha256": "32a455e59db57232aeb7192019f2314e08775c903072a4154706bf4a72648077"
+        },
+        "drawings_objects": {
+          "record_count": 3,
+          "sha256": "30e790c4bf7dc9f0e0360951c84b86bb80cc1ce711aeb2e33498cd47e36a9b67"
+        },
+        "data_validations": {
+          "record_count": 68,
+          "sha256": "a95e57b3ca8f278ae1b379a8ed46bb92cf2c74203b294f4c87e8ed7c2de976d4"
+        }
       }
     },
     "purchase_service": {
       "canonical_filename": "Form mua dịch vụ.xls",
       "bundled_filename": "purchase_service.xls",
-      "sha256": "193b8f4a99f7f5522013573cc6ed9acc5c4e46a287a13f345b107877eecef0c9",
+      "sha256": "d560ef100229224455de40afa9b8f63c9c6aec6fd32edde4a41853f449dcdd2e",
       "sheet_name": "Mua dich vu",
       "header_row": 8,
       "column_count": 37,
@@ -478,15 +586,33 @@
         "Địa chỉ NCC"
       ],
       "provenance": {
-        "source_kind": "partner_supplied",
-        "source_reference": "Partner-provided workbook committed as converter/fixtures/templates/purchase_service.xls",
+        "source_kind": "partner_sample_derived",
+        "source_reference": "Sanitized structural derivative of a partner-provided sample committed as converter/fixtures/templates/purchase_service.xls; no post-header customer values retained in this derivative",
         "acquisition_date": "unknown",
         "misa_product": "unknown",
         "misa_release": "unknown",
         "reviewer": "project-owner",
         "review_status": "accepted_for_project_use",
-        "trust_level": "partner_supplied",
+        "trust_level": "partner_sample_derived",
         "official_status": "not_claimed_official"
+      },
+      "biff_features": {
+        "formulas": {
+          "record_count": 3,
+          "sha256": "12dbe21ff6284d745415ccf5e7a8b7d41571e8a78cb006ad60fcad2e91a90eb9"
+        },
+        "defined_names": {
+          "record_count": 1,
+          "sha256": "32a455e59db57232aeb7192019f2314e08775c903072a4154706bf4a72648077"
+        },
+        "drawings_objects": {
+          "record_count": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "data_validations": {
+          "record_count": 44,
+          "sha256": "6df885949b25a413dcc3d30ea56a4d0e5c4abc3a2830e2405e7fdbfbf3b8ee45"
+        }
       }
     }
   }

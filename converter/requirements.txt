@@ -3,6 +3,7 @@ uvicorn
 python-multipart
 python-dotenv
 openpyxl
+olefile==0.47
 xlrd
 xlwt
 xlutils
