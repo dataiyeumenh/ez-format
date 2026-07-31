@@ -11,6 +11,8 @@ const {
   createMongooseArtifactRepository,
   createMongooseOperationLifecycleRepository,
   ensureConversionArtifactIndexes,
+  migrateConversionOperationLifecycles,
+  normalizeArtifactLifecycleMigrationMode,
   startConversionArtifactSweeper,
 } = require("../services/conversionArtifactService");
 
@@ -218,6 +220,223 @@ test("artifact index setup removes the legacy TTL before creating the durable pe
   assert.deepEqual(result.droppedIndexes, ["purgeAt_1"]);
 });
 
+test("Mongo lease renewal remains in the cast update", () => {
+  const mongoose = require("mongoose");
+  const Model = mongoose.models.ConversionOperationLifecycle;
+  const leaseExpiresAt = new Date("2026-08-02T00:00:00.000Z");
+  const query = Model.updateOne(
+    { operationKey: "a".repeat(64), "writeLeases.leaseId": "lease-1" },
+    { $set: { "writeLeases.$.leaseExpiresAt": leaseExpiresAt } },
+  );
+
+  const cast = query._castUpdate(query.getUpdate());
+
+  assert.equal(
+    cast.$set["writeLeases.$.leaseExpiresAt"].toISOString(),
+    leaseExpiresAt.toISOString(),
+  );
+});
+
+test("artifact lifecycle migration modes are explicit", () => {
+  assert.equal(normalizeArtifactLifecycleMigrationMode(), "off");
+  assert.equal(normalizeArtifactLifecycleMigrationMode(" DRY-RUN "), "dry-run");
+  assert.equal(normalizeArtifactLifecycleMigrationMode("apply"), "apply");
+  assert.throws(
+    () => normalizeArtifactLifecycleMigrationMode("rollback"),
+    /off, dry-run, or apply/,
+  );
+});
+
+function lifecycleMigrationHarness(initialDocuments) {
+  const documents = initialDocuments.map((document) => ({ ...document }));
+  const oldIndexName = "ownerScope_1_userId_1_sessionId_1_uploadId_1_runId_1_targetTemplateId_1";
+  const oldIndex = {
+    name: oldIndexName,
+    unique: true,
+    key: {
+      ownerScope: 1,
+      userId: 1,
+      sessionId: 1,
+      uploadId: 1,
+      runId: 1,
+      targetTemplateId: 1,
+    },
+  };
+  const events = [];
+  let indexes = [{ name: "_id_", key: { _id: 1 } }, oldIndex];
+  const hasRawBinding = (document) => [
+    "ownerScope", "userId", "sessionId", "uploadId", "runId", "targetTemplateId",
+  ].some((field) => Object.hasOwn(document, field));
+  const cursorFor = (filter) => {
+    let limit = 100;
+    const minimumId = filter?._id?.$gt;
+    const matches = documents
+      .filter(hasRawBinding)
+      .filter((document) => minimumId == null || document._id > minimumId)
+      .sort((left, right) => left._id - right._id);
+    return {
+      sort() { return this; },
+      limit(value) { limit = value; return this; },
+      async toArray() { return matches.slice(0, limit).map((document) => ({ ...document })); },
+    };
+  };
+  const collection = {
+    find: cursorFor,
+    async countDocuments() { return documents.filter(hasRawBinding).length; },
+    async indexes() { return indexes.map((index) => ({ ...index, key: { ...index.key } })); },
+    async dropIndex(name) {
+      events.push(`drop:${name}`);
+      indexes = indexes.filter((index) => index.name !== name);
+    },
+    async bulkWrite(operations) {
+      const phase = operations.some((operation) => operation.updateOne.update.$unset)
+        ? "unset"
+        : "set";
+      events.push(`bulk:${phase}`);
+      for (const operation of operations) {
+        const document = documents.find((item) => item._id === operation.updateOne.filter._id);
+        assert.ok(document);
+        Object.assign(document, operation.updateOne.update.$set || {});
+        for (const field of Object.keys(operation.updateOne.update.$unset || {})) delete document[field];
+      }
+      return { matchedCount: operations.length, modifiedCount: operations.length };
+    },
+  };
+  return {
+    collection,
+    documents,
+    events,
+    model: {
+      collection,
+      async createIndexes() { events.push("create:indexes"); },
+    },
+  };
+}
+
+test("artifact lifecycle migration dry-run reports legacy fences without writes", async () => {
+  const harness = lifecycleMigrationHarness([{
+    _id: 1,
+    ownerScope: "user:user-1",
+    userId: "user-1",
+    sessionId: "session-1",
+    uploadId: "upload-1",
+    runId: "run-1",
+    targetTemplateId: "bsn_sales",
+    status: "active",
+  }]);
+
+  const off = await migrateConversionOperationLifecycles({
+    model: new Proxy({}, { get() { throw new Error("off mode touched Mongo"); } }),
+    mode: "off",
+  });
+  const dryRun = await migrateConversionOperationLifecycles({
+    model: harness.model,
+    mode: "dry-run",
+    hmacSecret: "artifact-lifecycle-test-secret-at-least-32-characters",
+  });
+
+  assert.equal(off.mode, "off");
+  assert.equal(dryRun.legacyDocuments, 1);
+  assert.equal(dryRun.oldUniqueIndexPresent, true);
+  assert.deepEqual(harness.events, []);
+  assert.equal(Object.hasOwn(harness.documents[0], "operationKey"), false);
+});
+
+test("artifact lifecycle apply HMAC-backfills and preserves purged fences before exact index replacement", async () => {
+  const now = new Date("2026-08-01T00:00:00.000Z");
+  const harness = lifecycleMigrationHarness([
+    {
+      _id: 1,
+      ownerScope: "user:user-1",
+      userId: "user-1",
+      sessionId: "active-session",
+      uploadId: "upload-1",
+      runId: "run-1",
+      targetTemplateId: "bsn_sales",
+      status: "active",
+      writeLeases: [{
+        leaseId: "legacy-lease",
+        expiresAt: new Date("2026-08-01T00:01:00.000Z"),
+      }],
+    },
+    {
+      _id: 2,
+      ownerScope: "user:user-1",
+      userId: "user-1",
+      sessionId: "purged-session",
+      uploadId: "upload-2",
+      runId: "run-2",
+      targetTemplateId: "bsn_sales",
+      status: "purged",
+      purgedAt: new Date("2026-07-31T00:00:00.000Z"),
+      retainUntil: new Date("2026-08-10T00:00:00.000Z"),
+    },
+  ]);
+
+  const report = await migrateConversionOperationLifecycles({
+    model: harness.model,
+    mode: "apply",
+    hmacSecret: "artifact-lifecycle-test-secret-at-least-32-characters",
+    now: () => now,
+    batchSize: 1,
+  });
+
+  assert.equal(report.migratedDocuments, 2);
+  assert.equal(report.remainingLegacyDocuments, 0);
+  assert.deepEqual(report.droppedIndexes, [
+    "ownerScope_1_userId_1_sessionId_1_uploadId_1_runId_1_targetTemplateId_1",
+  ]);
+  assert.deepEqual(harness.events, [
+    "bulk:set",
+    "bulk:set",
+    "drop:ownerScope_1_userId_1_sessionId_1_uploadId_1_runId_1_targetTemplateId_1",
+    "bulk:unset",
+    "bulk:unset",
+    "create:indexes",
+  ]);
+  for (const document of harness.documents) {
+    assert.match(document.operationKey, /^[a-f0-9]{64}$/);
+    for (const field of ["ownerScope", "userId", "sessionId", "uploadId", "runId", "targetTemplateId"]) {
+      assert.equal(Object.hasOwn(document, field), false);
+    }
+  }
+  assert.equal(harness.documents[1].status, "purged");
+  assert.ok(harness.documents[1].purgeAt >= harness.documents[1].retainUntil);
+  assert.equal(harness.documents[0].writeLeases[0].leaseId, "legacy-lease");
+  assert.equal(Object.hasOwn(harness.documents[0].writeLeases[0], "expiresAt"), false);
+  assert.ok(harness.documents[0].writeLeases[0].leaseExpiresAt instanceof Date);
+
+  harness.events.length = 0;
+  const reapplied = await migrateConversionOperationLifecycles({
+    model: harness.model,
+    mode: "apply",
+    hmacSecret: "artifact-lifecycle-test-secret-at-least-32-characters",
+    now: () => now,
+    batchSize: 1,
+  });
+  assert.equal(reapplied.migratedDocuments, 0);
+  assert.deepEqual(harness.events, ["create:indexes"]);
+});
+
+test("artifact lifecycle migration never drops an index with the legacy name but wrong contract", async () => {
+  const harness = lifecycleMigrationHarness([]);
+  harness.collection.indexes = async () => [{
+    name: "ownerScope_1_userId_1_sessionId_1_uploadId_1_runId_1_targetTemplateId_1",
+    unique: false,
+    key: { ownerScope: 1 },
+  }];
+
+  await assert.rejects(
+    migrateConversionOperationLifecycles({
+      model: harness.model,
+      mode: "apply",
+      hmacSecret: "artifact-lifecycle-test-secret-at-least-32-characters",
+    }),
+    /legacy lifecycle index contract/i,
+  );
+  assert.deepEqual(harness.events, []);
+});
+
 test("scheduled sweeper records only redacted candidate failures", async () => {
   const logs = [];
   const sweeper = startConversionArtifactSweeper({
@@ -370,6 +589,74 @@ test("artifact write heartbeat renews its lease until publication", async () => 
   const lifecycle = [...repo.lifecycles.values()][0];
   assert.ok(lifecycle.renewals >= 2);
   assert.equal(lifecycle.activeLeases, 0);
+});
+
+test("Mongo-backed heartbeat keeps a write alive beyond its original lease", async () => {
+  let document = null;
+  let renewals = 0;
+  let initialLeaseExpiry = null;
+  const clone = (value) => value && {
+    ...value,
+    writeLeases: value.writeLeases.map((lease) => ({ ...lease })),
+  };
+  const activeLease = (filter) => {
+    const condition = filter?.writeLeases?.$elemMatch;
+    if (!document || document.status !== filter.status || !condition) return null;
+    return document.writeLeases.find((lease) =>
+      lease.leaseId === condition.leaseId &&
+      lease.leaseExpiresAt > condition.leaseExpiresAt.$gt
+    );
+  };
+  const model = {
+    async findOneAndUpdate(filter, update) {
+      if (!document) return null;
+      if (update.$push?.writeLeases) {
+        if (document.status !== "active") return null;
+        document.writeLeases.push({ ...update.$push.writeLeases });
+        return clone(document);
+      }
+      const lease = activeLease(filter);
+      if (!lease) return null;
+      lease.leaseExpiresAt = update.$set["writeLeases.$.leaseExpiresAt"];
+      renewals += 1;
+      return clone(document);
+    },
+    async create(payload) {
+      document = clone(payload);
+      initialLeaseExpiry = document.writeLeases[0].leaseExpiresAt;
+      return clone(document);
+    },
+    async findOne(filter) {
+      return activeLease(filter) ? clone(document) : null;
+    },
+    async updateOne(_filter, update) {
+      const leaseId = update.$pull.writeLeases.leaseId;
+      document.writeLeases = document.writeLeases.filter((lease) => lease.leaseId !== leaseId);
+    },
+  };
+  const lifecycle = createMongooseOperationLifecycleRepository(model, {
+    hmacSecret: "artifact-lifecycle-test-secret-at-least-32-characters",
+    leaseLifetimeMs: 250,
+  });
+  const backend = storage();
+  const originalPut = backend.putArtifact.bind(backend);
+  backend.putArtifact = async (input) => {
+    await new Promise((resolve) => setTimeout(resolve, 650));
+    return originalPut(input);
+  };
+  const service = createConversionArtifactService({
+    repository: repository(),
+    lifecycleRepository: lifecycle,
+    storageAdapter: backend,
+    leaseHeartbeatIntervalMs: 25,
+  });
+
+  const published = await service.putArtifact({ ...binding, content: Buffer.from("renewed") });
+
+  assert.equal(published.status, "available");
+  assert.ok(Date.now() > initialLeaseExpiry.getTime());
+  assert.ok(renewals >= 2);
+  assert.equal(document.writeLeases.length, 0);
 });
 
 test("final lifecycle fence rejects publication and removes provisional state", async () => {

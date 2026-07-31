@@ -145,7 +145,9 @@ CONVERTER_MONGODB_GRIDFS_BUCKET=conversion_artifacts
 MASTER_DATA_WORKSPACES_ENABLED=false
 MISA_IMPORT_REPAIR_ENABLED=false
 STUDENT_ASSISTANT_ENABLED=false
+STUDENT_PRIVACY_RETENTION_ENABLED=true
 STUDENT_PRIVACY_MIGRATION_MODE=off
+ARTIFACT_LIFECYCLE_MIGRATION_MODE=off
 VOUCHER_RECONSTRUCTION_ENABLED=false
 FEATURE_MAPPING_PROFILE_V2=false
 FEATURE_ANOMALY_DETECTION=false
@@ -201,6 +203,7 @@ CORS_ORIGINS=https://<vercel-domain>
 AI_PROVIDER=disabled
 AI_REQUIRED=false
 STUDENT_ASSISTANT_ENABLED=false
+STUDENT_PRIVACY_RETENTION_ENABLED=true
 STUDENT_FILE_QA_ENABLED=false
 STUDENT_FILE_EXPLAIN_ENABLED=false
 STUDENT_ACCOUNTING_MAP_ENABLED=false
@@ -523,11 +526,32 @@ least 32 characters with at least 12 distinct characters, not a documented
 example/default/placeholder, and distinct from `CONVERSION_CONTEXT_SECRET`
 and `CONVERTER_SERVICE_TOKEN`.
 
+Keep `STUDENT_PRIVACY_RETENTION_ENABLED=true` on Node and converter whenever
+Student data may exist. This safety control is independent of
+`STUDENT_ASSISTANT_ENABLED`; disabling the product must not disable expiry,
+deletion retries, or coordinated raw-state purge.
+
+Before enabling Stage 3, run the artifact lifecycle migration gate on Node:
+
+1. Take and record the approved Mongo backup. Set
+   `ARTIFACT_LIFECYCLE_MIGRATION_MODE=dry-run`, deploy the immutable candidate,
+   and retain its redacted `artifact-lifecycle-migration-completed` report. A
+   fail-closed startup caused by remaining legacy rows is expected in dry-run.
+2. Review the count and confirm every legacy binding can be converted to an HMAC
+   `operationKey`. Set `ARTIFACT_LIFECYCLE_MIGRATION_MODE=apply` for one bounded
+   migration deployment only.
+3. Require zero remaining plaintext binding fields, preserved `purged` statuses,
+   and the exact legacy lifecycle index contract before its named unique index is
+   dropped. Verify the new `operationKey` unique index and purged-only TTL index.
+4. Return `ARTIFACT_LIFECYCLE_MIGRATION_MODE=off`, redeploy the same candidate,
+   then continue. Never use a broad index drop or treat a partial report as pass.
+
 Converter first:
 
 ```env
 STUDENT_ANONYMIZATION_SECRET=<private-distinct-secret-at-least-32-characters>
 STUDENT_ASSISTANT_ENABLED=true
+STUDENT_PRIVACY_RETENTION_ENABLED=true
 STUDENT_FILE_EXPLAIN_ENABLED=true
 STUDENT_FILE_QA_ENABLED=true
 STUDENT_ACCOUNTING_MAP_ENABLED=true
@@ -541,6 +565,7 @@ Node second:
 
 ```env
 STUDENT_ASSISTANT_ENABLED=true
+STUDENT_PRIVACY_RETENTION_ENABLED=true
 STUDENT_FILE_EXPLAIN_ENABLED=true
 STUDENT_FILE_QA_ENABLED=true
 STUDENT_CHECK_WORK_ENABLED=false

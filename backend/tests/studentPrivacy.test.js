@@ -1876,18 +1876,49 @@ test("Student product startup fails closed when privacy retention is disabled", 
   );
 });
 
-test("rollback runbook keeps Student privacy retention enabled", () => {
+test("production data safety requires Student privacy retention after the product is disabled", async () => {
+  await assert.rejects(
+    createStartServer(startupOptions({
+      studentEnabled: false,
+      studentDataMayExist: true,
+      studentPrivacyRetentionEnabled: false,
+    }))(),
+    /STUDENT_PRIVACY_RETENTION_ENABLED=true.*data may exist/i,
+  );
+});
+
+test("backend environment and release runbooks keep Student privacy retention independent", () => {
   const root = path.resolve(__dirname, "../..");
   const envExample = readFileSync(path.join(root, ".env.example"), "utf8");
+  const backendEnvExample = readFileSync(
+    path.join(root, "backend/.env.example"),
+    "utf8",
+  );
+  const release = readFileSync(
+    path.join(root, "docs/deployment/main-experimental-release-runbook.md"),
+    "utf8",
+  );
   const rollback = readFileSync(
     path.join(root, "docs/deployment/main-experimental-rollback-runbook.md"),
     "utf8",
   );
   assert.match(envExample, /^STUDENT_PRIVACY_RETENTION_ENABLED=true$/m);
+  assert.match(backendEnvExample, /^STUDENT_PRIVACY_RETENTION_ENABLED=true$/m);
   assert.match(
     rollback,
     /STUDENT_ASSISTANT_ENABLED=false[\s\S]{0,200}STUDENT_PRIVACY_RETENTION_ENABLED=true/,
   );
+  assert.match(
+    release,
+    /STUDENT_PRIVACY_RETENTION_ENABLED=true[\s\S]{0,400}independent of\s+`STUDENT_ASSISTANT_ENABLED`/i,
+  );
+  assert.match(envExample, /^ARTIFACT_LIFECYCLE_MIGRATION_MODE=off$/m);
+  assert.match(backendEnvExample, /^ARTIFACT_LIFECYCLE_MIGRATION_MODE=off$/m);
+  assert.match(
+    release,
+    /ARTIFACT_LIFECYCLE_MIGRATION_MODE=dry-run[\s\S]{0,1000}ARTIFACT_LIFECYCLE_MIGRATION_MODE=apply/,
+  );
+  assert.match(release, /exact legacy lifecycle index/i);
 });
 
 test("feature-off startup performs zero Student migration or model loading", async () => {

@@ -34,6 +34,8 @@ const {
   assertArtifactStorageConfigured,
   assertArtifactStorageReachable,
   ensureConversionArtifactIndexes,
+  migrateConversionOperationLifecycles,
+  normalizeArtifactLifecycleMigrationMode,
   startConversionArtifactSweeper,
 } = require("./services/conversionArtifactService");
 const {
@@ -206,12 +208,16 @@ function createStartServer({
   migrateMappingProfilesV2 = migrateMappingProfilesV1ToV2,
   runMappingProfileMigrations = runProductionMigrationPreflight,
   studentEnabled = studentAssistantEnabled,
+  studentDataMayExist = studentEnabled || String(process.env.NODE_ENV || "").toLowerCase() === "production",
   studentPrivacyRetentionEnabled: privacyRetentionEnabled = studentPrivacyRetentionEnabled,
   migrateStudentPrivacy: runStudentPrivacyMigration = migrateStudentPrivacy,
   ensureStudentPrivacyIndexes: ensurePrivacyIndexes = ensureStudentPrivacyIndexes,
   loadStudentPrivacyModels: loadPrivacyModels = loadStudentPrivacyModels,
   repairEnabled = misaImportRepairEnabled,
   ensureRepairIndexes = ensureMisaImportRepairIndexes,
+  gatewayUsageReady = converterGatewayUsageReady,
+  ensureArtifactIndexes = ensureConversionArtifactIndexes,
+  migrateArtifactLifecycles = migrateConversionOperationLifecycles,
   startArtifactSweeper = startConversionArtifactSweeper,
   startRepairSweeper = startMisaImportRepairSweeper,
   startStudentDeletionSweeper: startStudentDeleteSweeper = startStudentDeletionSweeper,
@@ -219,11 +225,14 @@ function createStartServer({
   logger = console,
 } = {}) {
   return async function startServer() {
-    if (studentEnabled && !privacyRetentionEnabled) {
+    if (studentDataMayExist && !privacyRetentionEnabled) {
       throw new Error(
-        "STUDENT_PRIVACY_RETENTION_ENABLED=true is required when Student Assistant is enabled",
+        "STUDENT_PRIVACY_RETENTION_ENABLED=true is required whenever Student data may exist",
       );
     }
+    const artifactLifecycleMigrationMode = normalizeArtifactLifecycleMigrationMode(
+      process.env.ARTIFACT_LIFECYCLE_MIGRATION_MODE,
+    );
     const privacyMigrationMode = normalizeStudentPrivacyMigrationMode(
       process.env.STUDENT_PRIVACY_MIGRATION_MODE,
     );
@@ -240,16 +249,33 @@ function createStartServer({
         "MAPPING_PROFILE_V2_MIGRATION_MODE must be off, dry-run, or apply during startup",
       );
     }
-    if (converterGatewayUsageReady) {
+    if (gatewayUsageReady) {
       assertConversionContextConfig();
       assertConverterGatewayStartupConfig();
       assertArtifactStorageConfigured();
     }
     const connection = await connectDatabase();
-    if (converterGatewayUsageReady) {
+    if (gatewayUsageReady) {
       const mongoConnection = connection || mongoose.connection;
       await assertArtifactStorageReachable({ connection: mongoConnection });
-      await ensureConversionArtifactIndexes();
+      try {
+        const lifecycleReport = await migrateArtifactLifecycles({
+          mode: artifactLifecycleMigrationMode,
+        });
+        logger.log(JSON.stringify({
+          event: "artifact-lifecycle-migration-completed",
+          report: lifecycleReport,
+        }));
+        await ensureArtifactIndexes();
+      } catch (error) {
+        if (error?.report) {
+          logger.error(JSON.stringify({
+            event: "artifact-lifecycle-migration-failed",
+            report: error.report,
+          }));
+        }
+        throw error;
+      }
     }
     if (repairEnabled) {
       const repairIndexes = await ensureRepairIndexes();
@@ -308,7 +334,7 @@ function createStartServer({
         throw error;
       }
     }
-    const artifactSweeper = converterGatewayUsageReady
+    const artifactSweeper = gatewayUsageReady
       ? startArtifactSweeper()
       : null;
     const studentDeletionSweeper = privacyRetentionEnabled

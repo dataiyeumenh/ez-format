@@ -736,6 +736,169 @@ def test_purged_fence_is_hmac_minimized_and_swept_only_after_safe_horizon(
     assert not lock_path.exists()
 
 
+def test_purged_fence_ignores_early_purge_after_before_retention_horizon(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv(
+        "OPERATION_FENCE_HMAC_SECRET",
+        "operation-fence-test-secret-at-least-32-characters",
+    )
+    root = tmp_path / "sessions"
+    store = OperationStore(root=root)
+    session = _create_test_operation_session(store)
+    store.purge_session_state(session.session_id)
+    state_path = store._lifecycle_state_path(session.session_id)
+    payload = json.loads(state_path.read_text(encoding="utf-8"))
+    current_time = datetime.now(timezone.utc)
+    payload["purge_after"] = (current_time - timedelta(days=1)).isoformat()
+    store._atomic_write(state_path, payload)
+
+    cleanup_expired_operation_sessions(
+        root=root,
+        now=current_time,
+        batch_size=1,
+    )
+
+    assert state_path.is_file()
+
+
+def test_schema_v1_plaintext_purged_fence_migrates_without_allowing_reuse(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv(
+        "OPERATION_FENCE_HMAC_SECRET",
+        "operation-fence-test-secret-at-least-32-characters",
+    )
+    monkeypatch.setenv("CONVERTER_ARTIFACT_TTL_SECONDS", "172800")
+    root = tmp_path / "sessions"
+    store = OperationStore(root=root)
+    session_id = "legacy-purged-session"
+    legacy_path = store._lifecycle_root / f"{session_id}.json"
+    legacy_lock = store._lifecycle_root / f"{session_id}.lock"
+    legacy_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "session_id": session_id,
+                "status": "purged",
+                "updated_at": "2026-07-30T00:00:00+00:00",
+            }
+        ),
+        encoding="utf-8",
+    )
+    legacy_lock.write_bytes(b"\0")
+
+    payload = store._read_lifecycle_state(session_id)
+
+    state_path = store._lifecycle_state_path(session_id)
+    serialized = state_path.read_text(encoding="utf-8")
+    assert payload["schema_version"] == 2
+    assert payload["status"] == "purged"
+    assert session_id not in state_path.name
+    assert session_id not in serialized
+    assert "session_id" not in payload
+    assert not legacy_path.exists()
+    assert not legacy_lock.exists()
+    purge_after = datetime.fromisoformat(payload["purge_after"])
+    assert purge_after >= datetime.now(timezone.utc) + timedelta(hours=47)
+
+    restarted = OperationStore(root=root)
+    with pytest.raises(OperationStoreError, match="purged|purging"):
+        with restarted._write_lease(session_id, initialize=True):
+            pass
+
+
+def test_schema_v1_purged_fence_wins_over_hmac_active_state(tmp_path, monkeypatch):
+    monkeypatch.setenv(
+        "OPERATION_FENCE_HMAC_SECRET",
+        "operation-fence-test-secret-at-least-32-characters",
+    )
+    root = tmp_path / "sessions"
+    store = OperationStore(root=root)
+    session_id = "legacy-conflicting-session"
+    store._write_lifecycle_state(session_id, "active")
+    legacy_path = store._lifecycle_root / f"{session_id}.json"
+    legacy_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "session_id": session_id,
+                "status": "purged",
+                "updated_at": "2026-07-30T00:00:00+00:00",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    payload = store._read_lifecycle_state(session_id)
+
+    assert payload["status"] == "purged"
+    assert not legacy_path.exists()
+
+
+def test_operation_cleanup_uses_independent_session_and_fence_budgets(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv(
+        "OPERATION_FENCE_HMAC_SECRET",
+        "operation-fence-test-secret-at-least-32-characters",
+    )
+    root = tmp_path / "sessions"
+    store = OperationStore(root=root)
+    first = _create_test_operation_session(store, ttl_seconds=3600)
+    second = _create_test_operation_session(store, ttl_seconds=3600)
+    ordered = sorted(
+        (first, second),
+        key=lambda session: store._lifecycle_state_path(session.session_id).name,
+    )
+    purged, active = ordered
+    store.purge_session_state(purged.session_id)
+    fence_path = store._lifecycle_state_path(purged.session_id)
+    payload = json.loads(fence_path.read_text(encoding="utf-8"))
+    current_time = datetime.now(timezone.utc)
+    payload["updated_at"] = (current_time - timedelta(days=3)).isoformat()
+    payload["retain_until"] = (current_time - timedelta(days=2)).isoformat()
+    payload["purge_after"] = (current_time - timedelta(days=1)).isoformat()
+    store._atomic_write(fence_path, payload)
+
+    deleted = cleanup_expired_operation_sessions(
+        root=root,
+        now=current_time,
+        batch_size=1,
+    )
+
+    assert deleted == []
+    assert (root / active.session_id).is_dir()
+    assert not fence_path.exists()
+
+
+def test_expired_context_cannot_reuse_operation_id_after_fence_horizon(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv("OPERATION_STORE_PROVIDER", "node")
+    monkeypatch.setenv("CONVERSION_CONTEXT_SECRET", "test-secret")
+    expired = _context_token(
+        {
+            "purpose": "misa_conversion",
+            "user_id": "user-1",
+            "owner_scope": "user:user-1",
+            "workspace_id": None,
+            "conversion_run_id": "run-expired",
+            "operation_session_id": "purged-session",
+            "upload_id": "upload-expired",
+            "target_template_id": "bsn_sales",
+            "exp": int(time.time()) - 1,
+        }
+    )
+
+    with pytest.raises(OperationStoreError, match="không hợp lệ"):
+        OperationStore(root=tmp_path / "sessions", conversion_context_token=expired)
+
+
 def test_operation_sweeper_cleans_crashed_staging_after_creation_grace(
     tmp_path,
     monkeypatch,

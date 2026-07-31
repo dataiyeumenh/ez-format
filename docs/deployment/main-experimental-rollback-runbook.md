@@ -56,6 +56,8 @@ CONVERTER_GATEWAY_USAGE_READY=false
 MASTER_DATA_WORKSPACES_ENABLED=false
 MISA_IMPORT_REPAIR_ENABLED=false
 STUDENT_ASSISTANT_ENABLED=false
+STUDENT_PRIVACY_RETENTION_ENABLED=true
+ARTIFACT_LIFECYCLE_MIGRATION_MODE=off
 VOUCHER_RECONSTRUCTION_ENABLED=false
 FEATURE_MAPPING_PROFILE_V2=false
 FEATURE_ANOMALY_DETECTION=false
@@ -73,6 +75,7 @@ OPERATION_STORE_PROVIDER=node
 OPERATION_STORE_ALLOW_LOCAL=false
 ALLOW_UNAUTHENTICATED_LOCAL_OPERATIONS=false
 STUDENT_ASSISTANT_ENABLED=false
+STUDENT_PRIVACY_RETENTION_ENABLED=true
 STUDENT_FILE_QA_ENABLED=false
 STUDENT_FILE_EXPLAIN_ENABLED=false
 STUDENT_ACCOUNTING_MAP_ENABLED=false
@@ -103,6 +106,8 @@ VITE_VOUCHER_RECONSTRUCTION_ENABLED=false
 Redeploy the affected service after saving its environment revision. Then
 repeat the converter health, Node health, and existing-main-product smoke
 checks. If core behavior is healthy, stop here; do not restore MongoDB.
+Keep Student privacy retention enabled until coordinated expiry purge reports
+no remaining Student raw state or metadata, even while the product feature is off.
 
 ## Code rollback to the approved ref
 
