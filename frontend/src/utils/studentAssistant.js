@@ -177,7 +177,7 @@ export function resolveStudentEvidenceNavigation(evidence = {}, analysis = {}) {
     previewRow,
     view: visibleInPreview ? "preview" : "mapping",
     visibleInPreview,
-    requiresSourceRowFetch: Boolean(sourceRow && sourceField),
+    requiresSourceRowFetch: Boolean(sourceRow),
   };
 }
 

@@ -10,7 +10,7 @@
     "test:converter-gateway-integration": "playwright test tests/converter-gateway.integration.spec.mjs --workers=1 --reporter=line",
     "test:converter-gateway-api-integration": "playwright test tests/converter-gateway.api.integration.spec.mjs --workers=1 --reporter=line",
     "test:misa-import-repair": "playwright test tests/misa-import-repair.integration.spec.mjs --workers=1 --reporter=line",
-    "test:student-rendered": "vitest run src/components/Navbar.studentAssistant.test.jsx src/hooks/useStudentAssistantAvailability.test.jsx",
+    "test:student-rendered": "vitest run src/components/Navbar.studentAssistant.test.jsx src/components/student/AccountingMapPanel.test.jsx src/hooks/useStudentAssistantAvailability.test.jsx",
     "build": "vite build",
     "preview": "vite preview",
     "lint": "eslint .",

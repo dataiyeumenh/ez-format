@@ -441,6 +441,49 @@ test("outside-preview evidence requires exact source-row fetch instead of field 
   });
 });
 
+test("fieldless accounting evidence fetches its row and keeps target navigation", () => {
+  const evidence = {
+    row: 5,
+    target_field: "TK Nợ",
+  };
+  const previewAnalysis = {
+    detected: { header_row: 1 },
+    student_preview: {
+      headers: ["TK Nợ"],
+      rows: Array.from({ length: 5 }, () => ({})),
+    },
+  };
+
+  assert.deepEqual(resolveStudentEvidenceNavigation(evidence, previewAnalysis), {
+    sourceRow: 5,
+    sourceField: null,
+    targetField: "TK Nợ",
+    previewRow: 4,
+    view: "preview",
+    visibleInPreview: true,
+    requiresSourceRowFetch: true,
+  });
+
+  assert.deepEqual(
+    resolveStudentEvidenceNavigation(evidence, {
+      ...previewAnalysis,
+      student_preview: {
+        headers: ["TK Có"],
+        rows: previewAnalysis.student_preview.rows,
+      },
+    }),
+    {
+      sourceRow: 5,
+      sourceField: null,
+      targetField: "TK Nợ",
+      previewRow: 4,
+      view: "mapping",
+      visibleInPreview: false,
+      requiresSourceRowFetch: true,
+    },
+  );
+});
+
 test("source-row panel items select the exact evidence field", () => {
   assert.deepEqual(
     buildStudentSourceRowItems(
