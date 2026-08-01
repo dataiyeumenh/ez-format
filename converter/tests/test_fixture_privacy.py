@@ -67,8 +67,8 @@ def _allow_uncertified_test_exports(monkeypatch):
 def test_converter_fixture_manifest_pins_only_deterministic_synthetic_samples():
     manifest = json.loads(FIXTURE_MANIFEST.read_text(encoding="utf-8"))
 
-    assert manifest["schema_version"] == 1
-    assert manifest["fixture_version"] == "2026-07-31.1"
+    assert manifest["schema_version"] == 2
+    assert manifest["fixture_version"] == "2026-08-01.1"
     assert set(manifest["fixtures"]) == {
         "golden_sales_import.xls",
         "raw_sales_sample.xlsx",
@@ -76,8 +76,15 @@ def test_converter_fixture_manifest_pins_only_deterministic_synthetic_samples():
     for filename, entry in manifest["fixtures"].items():
         path = SAMPLES / filename
         assert entry["source_kind"] == "deterministic_synthetic"
+        assert entry["fixture_kind"] == "synthetic"
+        assert entry["privacy_classification"] == "synthetic_no_customer_data"
         assert entry["contains_customer_data"] is False
         assert entry["generator"] == "scripts/generate_synthetic_sales_fixtures.py"
+        assert entry["reviewer"] == "fixture-privacy-reviewer"
+        assert entry["approval_status"] == "approved"
+        assert entry["approved_at_utc"] == "2026-08-01T00:00:00+00:00"
+        assert entry["synthetic_fixture_id"].startswith("synthetic-sales-")
+        assert entry["path"] == f"converter/fixtures/samples/{filename}"
         assert entry["sha256"] == _sha256(path)
 
 

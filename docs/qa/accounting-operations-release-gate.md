@@ -28,6 +28,8 @@ FEATURE_AI_EXPLANATION=false
 - Real MISA template fidelity checks.
 - Independent `ke-toan` review with no implementation involvement.
 - Three consecutive clean accounting-operation gate runs.
+- Four explicit repository-contained synthetic fixtures whose hashes and privacy
+  approval are bound by one repository-contained schema-v2 fixture manifest.
 
 ## Independent Report Contract
 
@@ -56,12 +58,21 @@ Run with a unique release ID when preserving multiple evidence bundles:
 ```powershell
 pwsh -File scripts/qa-accounting-operations.ps1 `
   -ReleaseId <release-id> `
+  -SyntheticFixtureManifest converter/config/<approved-manifest>.json `
+  -SalesRawFixture converter/fixtures/<approved-sales-raw> `
+  -SalesMisaFixture converter/fixtures/<approved-sales-misa> `
+  -PurchaseRawFixture converter/fixtures/<approved-purchase-raw> `
+  -PurchaseMisaFixture converter/fixtures/<approved-purchase-misa> `
   -AccountingQaReport <absolute-report-path>
 ```
 
-Evidence is written under `.artifacts/qa/<release-id>/` and includes runtime,
-git state, feature flags, every command log, the independent report and
-`summary.json`.
+No Downloads, external-drive, or customer-workbook fallback exists. Missing
+local fixtures are reported as skipped only with `-AllowIncompleteDiagnostics`;
+release eligibility remains false. Otherwise missing or invalid approval fails
+closed. Evidence under `.artifacts/qa/<release-id>/` contains hashes, statuses,
+sanitized command logs, a redacted independent-review receipt, and `summary.json`.
+It excludes fixture paths, customer identifiers, accounting totals, and raw
+review files.
 
 ## Rollout
 

@@ -357,6 +357,13 @@ path below, redeploy it read-only, run both template verification commands, and
 require `/healthz` `status=ok` plus all seven template capabilities `certified`.
 Keep both Node converter gateway flags off until this post-provision gate passes.
 
+The exact-SHA promotion packet must list the dedicated private
+`MISA_IMPORT_REPAIR_TEST_MONGO_URI` reference and seven immutable certification
+records/bundles generated from that candidate SHA: `bsn_sales`, `bsn_purchase`,
+`misa_purchase_domestic`, `sales_goods`, `sales_service`, `purchase_goods`, and
+`purchase_service`. Record each certification path and SHA-256; a directory name
+or aggregate claim without all seven records is insufficient.
+
 Roles are mandatory:
 
 | Role | Responsibility |
@@ -747,9 +754,8 @@ Required gates:
   ambiguous/unknown blockers, full failed-document retry groups, and zero
   additional credit on retry/re-download.
 
-Do not pass this stage without a real Mongo run using the private
-`MISA_IMPORT_REPAIR_TEST_MONGO_URI` or approved `MONGO_URI` and zero MISA repair
-test skips.
+Do not pass this stage without a real Mongo run using the dedicated private
+`MISA_IMPORT_REPAIR_TEST_MONGO_URI` test database and zero MISA repair test skips.
 
 ## MISA certification provisioning and export preflight
 
@@ -764,19 +770,29 @@ converter gateway flags off until provisioning and post-provision preflight pass
    `MISA_TEMPLATE_MANIFEST_PATH=config/misa-template-manifest.json`,
    `MISA_TEMPLATE_CERTIFICATION_DIR=config/misa-template-certifications`, and
    `MISA_TEMPLATE_ACCEPTED_TRUST_LEVELS=partner_sample_derived`.
-2. For each of the seven template IDs, generate a synthetic non-customer input and
-   its deterministic `.xls` output from this exact build. Print the writer binding:
+2. For each of the seven template IDs, generate a deterministic synthetic input
+   and `.xls` output from this exact build. Create a schema-version `1` fixture
+   attestation binding both hashes, a stable `synthetic-...` fixture ID,
+   `fixture_kind=synthetic`,
+   `privacy_classification=synthetic_no_customer_data`,
+   `contains_customer_data=false`, generator, independent reviewer,
+   `approval_status=approved`, and timezone-aware approval time. Create one
+   schema-version `2` fixture manifest covering the exact input/output hashes for
+   all seven runs. Every manifest entry must carry the same synthetic-only privacy,
+   reviewer, and approval controls. Print the writer binding:
 
 ```powershell
 python -c "from app.misa_certification import current_writer_build_sha256; print(current_writer_build_sha256())"
 ```
 
-3. Import that output into a real controlled MISA sandbox. Retain an independent
-   MISA import log, report, or screenshot. Create schema-version `2` import-result
-   JSON with exact template/input/output/result-artifact SHA-256 values,
-   `status=misa_import_passed`, MISA product/release, timezone-aware completion,
-   distinct reviewer/approver, the writer hash, and template provenance vocabulary.
-   Placeholder/self-asserted evidence is forbidden.
+3. Import that output into a real controlled MISA sandbox. Convert the observed
+   outcome into the bounded schema-version `1` redacted JSON receipt. Raw logs and
+   screenshots are forbidden. Create schema-version `3` import-result JSON binding
+   template/input/output/receipt/fixture-attestation SHA-256 values, synthetic
+   fixture ID, privacy classification, `status=misa_import_passed`, MISA
+   product/release, timezone-aware completion, distinct reviewer/approver, writer
+   hash, and template provenance vocabulary. Placeholder/self-asserted evidence is
+   forbidden.
 4. Provision each immutable bundle from `converter/`:
 
 ```powershell
@@ -786,15 +802,19 @@ python -m app.misa_certification create `
   --input ../.artifacts/misa-certification/<template-id>-input.csv `
   --output ../.artifacts/misa-certification/<template-id>-output.xls `
   --import-result ../.artifacts/misa-certification/<template-id>-import-result.json `
-  --result-artifact ../.artifacts/misa-certification/<template-id>-misa-result.log `
+  --result-artifact ../.artifacts/misa-certification/<template-id>-receipt.json `
+  --fixture-attestation ../.artifacts/misa-certification/<template-id>-fixture-attestation.json `
+  --fixture-manifest ../.artifacts/misa-certification/approved-synthetic-fixtures.json `
   --artifact-dir config/misa-template-certifications `
   --expires-at <timezone-aware-expiry>
 ```
 
 5. Package `config/misa-template-certifications/` read-only in the converter image
    and redeploy the exact candidate SHA with that immutable bundle.
-   Evidence paths must remain relative under `evidence/sha256/`. Do not use S3. Do
-   not bundle customer files.
+   Evidence paths must remain relative under `evidence/sha256/`. The bundle contains
+   only the manifest-approved synthetic output, fixture manifest, attestation,
+   import-result JSON, and redacted receipt. Template/input workbooks remain hash
+   bindings only. Do not use S3. Never supply or bundle customer files.
 6. Run both gates inside the built converter artifact:
 
 ```powershell
@@ -833,7 +853,74 @@ Production promotion is currently `BLOCKED`. When all live staging rows pass:
    exact SHA to staging for converter, Node, and Vercel.
 3. On a clean checkout of `STAGING_TESTED_SHA`, run
    `npm run qa:main-integration` in release mode with real replica MongoDB,
-   GridFS, live gateway, fixture, and credential inputs. Exit `0`,
+   repair MongoDB, GridFS, live gateway, approved synthetic fixture, and
+   credential inputs. Supply and verify the exact SHA-256 for each of the seven
+   certification records before starting the gate:
+
+```powershell
+$stagingTestedSha = "<40-character-STAGING_TESTED_SHA>"
+$actualSha = (git rev-parse HEAD).Trim()
+if ($LASTEXITCODE -ne 0 -or $actualSha -cne $stagingTestedSha) {
+  throw "checkout is not STAGING_TESTED_SHA"
+}
+if (-not [string]::IsNullOrWhiteSpace((git status --porcelain))) {
+  throw "exact-SHA promotion requires a clean checkout"
+}
+
+$requiredPrivateInputs = @(
+  "PAYMENT_REPLICA_SET_TEST_URI",
+  "MISA_IMPORT_REPAIR_TEST_MONGO_URI",
+  "GRIDFS_INTEGRATION_TEST_URI",
+  "QA_FRONTEND_URL",
+  "QA_GATEWAY_URL",
+  "QA_CONVERTER_URL",
+  "QA_RELEASE_ID",
+  "QA_OWNER_EMAIL",
+  "QA_OWNER_PASSWORD",
+  "QA_OWNER_JWT"
+)
+foreach ($name in $requiredPrivateInputs) {
+  if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($name))) {
+    throw "$name was not injected by the private release system"
+  }
+}
+
+$env:MISA_TEMPLATE_CERTIFICATION_DIR = (Resolve-Path -LiteralPath `
+  "converter/config/misa-template-certifications").Path
+$env:QA_EXPECT_LIVE = "true"
+$env:QA_RAW_FIXTURE = (Resolve-Path -LiteralPath `
+  "converter/fixtures/samples/raw_sales_sample.xlsx").Path
+$env:QA_SYNTHETIC_FIXTURE_MANIFEST = (Resolve-Path -LiteralPath `
+  "converter/config/converter-fixture-manifest.json").Path
+
+$certifications = @(
+  @{ Id = "bsn_sales"; Path = "bsn_sales_misa_certification.json"; Sha256 = "<64-lowercase-hex>" },
+  @{ Id = "bsn_purchase"; Path = "bsn_purchase_misa_certification.json"; Sha256 = "<64-lowercase-hex>" },
+  @{ Id = "misa_purchase_domestic"; Path = "misa_purchase_domestic_misa_certification.json"; Sha256 = "<64-lowercase-hex>" },
+  @{ Id = "sales_goods"; Path = "sales_goods_misa_certification.json"; Sha256 = "<64-lowercase-hex>" },
+  @{ Id = "sales_service"; Path = "sales_service_misa_certification.json"; Sha256 = "<64-lowercase-hex>" },
+  @{ Id = "purchase_goods"; Path = "purchase_goods_misa_certification.json"; Sha256 = "<64-lowercase-hex>" },
+  @{ Id = "purchase_service"; Path = "purchase_service_misa_certification.json"; Sha256 = "<64-lowercase-hex>" }
+)
+foreach ($certification in $certifications) {
+  if ($certification.Sha256 -cnotmatch "^[0-9a-f]{64}$") {
+    throw "$($certification.Id) expected SHA-256 is missing or malformed"
+  }
+  $record = Join-Path $env:MISA_TEMPLATE_CERTIFICATION_DIR $certification.Path
+  $actualRecordSha256 = (Get-FileHash -LiteralPath $record -Algorithm SHA256).Hash.ToLowerInvariant()
+  if ($actualRecordSha256 -cne $certification.Sha256) {
+    throw "$($certification.Id) certification SHA-256 mismatch"
+  }
+}
+
+npm run qa:main-integration
+if ($LASTEXITCODE -ne 0) { throw "main integration release gate failed" }
+```
+
+   Start the shell through the private release system so it injects every member
+   of `$requiredPrivateInputs`; never paste those values into Git or shell
+   history. Replace the candidate SHA and seven non-secret expected record hashes
+   from the exact promotion packet. Exit `0`,
    `status: RELEASE_READY`, `releaseEligible: true`, `missing: []`, zero failed
    checks, and zero skipped mandatory checks are required. No alternate success
    token is valid.
@@ -859,7 +946,7 @@ outcomes:
 
 | Invocation/evidence | Required status | Exit | Promotion meaning |
 |---|---|---:|---|
-| `-Mode Release`, all replica/GridFS/live inputs present | `RELEASE_READY` | `0` | Eligible for the separate backup, live-stage, rollback, and exact-SHA attestations. |
+| Exact-SHA command above with valid `PAYMENT_REPLICA_SET_TEST_URI`, dedicated `MISA_IMPORT_REPAIR_TEST_MONGO_URI`, `GRIDFS_INTEGRATION_TEST_URI`, exact `QA_RAW_FIXTURE`/`QA_SYNTHETIC_FIXTURE_MANIFEST`, and all seven named certification record paths plus expected SHA-256 values | `RELEASE_READY` | `0` | Eligible for the separate backup, live-stage, rollback, and exact-SHA attestations. |
 | `-Mode Release`, any required input missing or invalid | `RELEASE_BLOCKED` | `2` | Stop; never promote. |
 | `-Mode LocalIncomplete` | `LOCAL_INCOMPLETE` | `0` | Local diagnostics only; `releaseEligible=false`. |
 
@@ -939,13 +1026,17 @@ authorized until all inputs below are available in the private release system:
 - Mongo cluster/database, successful backup timestamp/ID/method, validation,
   exact private restore command, restore target, and DBA approval;
 - real replica Mongo evidence with `PAYMENT_REPLICA_SET_TEST_URI`, real MISA
-  Mongo evidence with `MISA_IMPORT_REPAIR_TEST_MONGO_URI` or approved
-  `MONGO_URI`, and real GridFS evidence with `GRIDFS_INTEGRATION_TEST_URI`, all
+  Mongo evidence with dedicated `MISA_IMPORT_REPAIR_TEST_MONGO_URI`, and real
+  GridFS evidence with `GRIDFS_INTEGRATION_TEST_URI`, all
   showing the mandatory tests ran with zero relevant skips;
+- seven immutable MISA certification record/bundle paths and SHA-256 values for
+  `bsn_sales`, `bsn_purchase`, `misa_purchase_domestic`, `sales_goods`,
+  `sales_service`, `purchase_goods`, and `purchase_service`, all generated from
+  the exact promotion candidate SHA;
 - TLS Redis service/access and private `rediss://` reference for restart-safe
   Smart Voucher staging;
 - `QA_EXPECT_LIVE=true`, `QA_FRONTEND_URL`, `QA_GATEWAY_URL`,
-  `QA_CONVERTER_URL`, release ID, owner/foreign auth inputs, approved real raw
+  `QA_CONVERTER_URL`, release ID, owner/foreign auth inputs, approved synthetic
   fixture, live contract, and charge-audit before/after files;
 - flags-off health/smoke evidence, per-stage receipts, complete rollback drill,
   and `npm run qa:main-integration` release-mode `RELEASE_READY` evidence bound

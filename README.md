@@ -58,9 +58,10 @@ Chi tiết: [docs/QA_AUTOMATION.md](docs/QA_AUTOMATION.md)
 
 ### QA gates
 
-- `npm run qa:release` is the only strict release gate. It requires the disposable replica-set test URI and runs the full release QA flow.
-- `npm run qa:main-integration` is non-release local/full QA. It may report the explicit replica-set suite as skipped when `PAYMENT_REPLICA_SET_TEST_URI` is unavailable.
+- `npm run qa:release` is the strict release gate. It requires disposable payment, GridFS, and MISA import-repair test Mongo URIs; valid export-safe certification for all seven templates; live-gateway evidence; zero mandatory skips.
+- `npm run qa:main-integration` runs the same strict `Release` mode. Use `npm run qa:main-integration:local-incomplete` for local diagnostics; it reports missing evidence as `LOCAL_INCOMPLETE` and never marks the run release-eligible.
 - `npm run qa:main-contracts` is the focused local contract check; replica-set coverage remains an honest skip unless its URI is configured.
+- `npm run qa:accounting-operations` accepts only explicit repository-contained fixtures bound by an approved synthetic fixture manifest. No customer-workbook fallback exists.
 
 ### Cải tiến UI (sau QA)
 

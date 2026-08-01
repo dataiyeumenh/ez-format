@@ -10,7 +10,8 @@ param(
     [string]$SalesRawFixture,
     [string]$PurchaseRawFixture,
     [string]$SalesMisaFixture,
-    [string]$PurchaseMisaFixture
+    [string]$PurchaseMisaFixture,
+    [string]$SyntheticFixtureManifest
 )
 
 $ErrorActionPreference = "Stop"
@@ -22,17 +23,19 @@ $failed = [System.Collections.Generic.List[string]]::new()
 $skipped = [System.Collections.Generic.List[string]]::new()
 
 function Resolve-FixtureSetting {
-    param([string]$Value, [string]$EnvironmentName, [string]$Default)
+    param([string]$Value, [string]$EnvironmentName)
     if (-not [string]::IsNullOrWhiteSpace($Value)) { return $Value }
     $environmentValue = [Environment]::GetEnvironmentVariable($EnvironmentName)
     if (-not [string]::IsNullOrWhiteSpace($environmentValue)) { return $environmentValue }
-    return $Default
+    return $null
 }
 
-$SalesRawFixture = Resolve-FixtureSetting $SalesRawFixture "QA_SALES_RAW_FIXTURE" "E:\0. EXE2\Chi tiết bán hàng 05.12 - 25.12.xlsx"
-$PurchaseRawFixture = Resolve-FixtureSetting $PurchaseRawFixture "QA_PURCHASE_RAW_FIXTURE" (Join-Path $env:USERPROFILE "Downloads\MUA_VAO_0317262773 (7).xlsx")
-$SalesMisaFixture = Resolve-FixtureSetting $SalesMisaFixture "QA_SALES_MISA_FIXTURE" "E:\0. EXE2\Import misa 05.12 - 25.12.xls"
-$PurchaseMisaFixture = Resolve-FixtureSetting $PurchaseMisaFixture "QA_PURCHASE_MISA_FIXTURE" (Join-Path $env:USERPROFILE "Downloads\mua_hang_trong_nuoc_full.xls")
+$SalesRawFixture = Resolve-FixtureSetting $SalesRawFixture "QA_SALES_RAW_FIXTURE"
+$PurchaseRawFixture = Resolve-FixtureSetting $PurchaseRawFixture "QA_PURCHASE_RAW_FIXTURE"
+$SalesMisaFixture = Resolve-FixtureSetting $SalesMisaFixture "QA_SALES_MISA_FIXTURE"
+$PurchaseMisaFixture = Resolve-FixtureSetting $PurchaseMisaFixture "QA_PURCHASE_MISA_FIXTURE"
+$SyntheticFixtureManifest = Resolve-FixtureSetting `
+    $SyntheticFixtureManifest "QA_SYNTHETIC_FIXTURE_MANIFEST"
 
 function Write-EvidenceFile {
     param([string]$Name, [object]$Value)
@@ -45,13 +48,30 @@ function Write-EvidenceFile {
     return $path
 }
 
+function Protect-EvidenceText {
+    param([AllowNull()][object]$Value)
+
+    $text = [string]$Value
+    foreach ($privateRoot in @($RepoRoot, $artifactRoot, $HOME)) {
+        if (-not [string]::IsNullOrWhiteSpace($privateRoot)) {
+            $text = $text -replace [regex]::Escape([string]$privateRoot), "<redacted-path>"
+        }
+    }
+    $text = $text -replace '(?i)\b[A-Z]:\\[^\r\n]+', '<redacted-path>'
+    $text = $text -replace '(?i)\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b', '<redacted-email>'
+    $text = $text -replace '(?<![A-Za-z0-9])[+]?[0-9][0-9 .()-]{7,}[0-9](?![A-Za-z0-9])', '<redacted-number>'
+    return $text
+}
+
 function Add-GateResult {
     param([string]$Name, [ValidateSet("pass", "fail", "skip")][string]$Status, [string]$Reason = "", [string]$Log = $null, [double]$Seconds = 0)
     if ($Status -eq "fail") { $failed.Add($Name) }
     if ($Status -eq "skip") { $skipped.Add($Name) }
-    $results.Add([ordered]@{ name = $Name; status = $Status; seconds = [math]::Round($Seconds, 3); reason = $Reason; log = $Log })
+    $safeReason = Protect-EvidenceText $Reason
+    $safeLog = if ($Log) { [IO.Path]::GetFileName($Log) } else { $null }
+    $results.Add([ordered]@{ name = $Name; status = $Status; seconds = [math]::Round($Seconds, 3); reason = $safeReason; log = $safeLog })
     $colour = @{ pass = "Green"; fail = "Red"; skip = "Yellow" }[$Status]
-    Write-Host "$($Status.ToUpperInvariant()) $Name $Reason" -ForegroundColor $colour
+    Write-Host "$($Status.ToUpperInvariant()) $Name $safeReason" -ForegroundColor $colour
 }
 
 function Invoke-GateStep {
@@ -60,12 +80,17 @@ function Invoke-GateStep {
     $watch = [Diagnostics.Stopwatch]::StartNew()
     Push-Location $WorkingDirectory
     try {
-        & $Executable @Arguments 2>&1 | Tee-Object -FilePath $logPath
-        if ($LASTEXITCODE -ne 0) { throw "$Executable exited with code $LASTEXITCODE" }
+        $rawOutput = @(& $Executable @Arguments 2>&1)
+        $exitCode = $LASTEXITCODE
+        $safeOutput = @($rawOutput | ForEach-Object { Protect-EvidenceText $_ })
+        $safeOutput | Set-Content -LiteralPath $logPath -Encoding utf8
+        $safeOutput | ForEach-Object { Write-Output $_ }
+        if ($exitCode -ne 0) { throw "Gate command exited with code $exitCode" }
         Add-GateResult $Name pass -Log $logPath -Seconds $watch.Elapsed.TotalSeconds
     } catch {
-        $_ | Out-String | Add-Content -LiteralPath $logPath -Encoding utf8
-        Add-GateResult $Name fail $_.Exception.Message $logPath $watch.Elapsed.TotalSeconds
+        $safeError = Protect-EvidenceText $_.Exception.Message
+        $safeError | Add-Content -LiteralPath $logPath -Encoding utf8
+        Add-GateResult $Name fail $safeError $logPath $watch.Elapsed.TotalSeconds
     } finally {
         Pop-Location
         $watch.Stop()
@@ -88,6 +113,68 @@ function Get-TextSha256 {
     return [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($bytes)).ToLowerInvariant()
 }
 
+function Assert-RepoContainedFixture {
+    param([string]$Value, [string]$Role)
+
+    if ([string]::IsNullOrWhiteSpace($Value)) {
+        throw "Approved synthetic fixture is not configured for $Role"
+    }
+    $resolved = (Resolve-Path -LiteralPath $Value -ErrorAction Stop).Path
+    if (-not (Test-Path -LiteralPath $resolved -PathType Leaf)) {
+        throw "Approved synthetic fixture is unavailable for $Role"
+    }
+    $relative = [IO.Path]::GetRelativePath($RepoRoot, $resolved)
+    if ([IO.Path]::IsPathRooted($relative) -or $relative -eq ".." -or $relative.StartsWith("..$([IO.Path]::DirectorySeparatorChar)")) {
+        throw "Approved synthetic fixture must be repository-contained for $Role"
+    }
+    $portable = $relative.Replace([IO.Path]::DirectorySeparatorChar, '/')
+    if ($portable -match '^(?:\.git|\.artifacts|node_modules)/') {
+        throw "Approved synthetic fixture location is forbidden for $Role"
+    }
+    return [pscustomobject]@{ path = $resolved; repository_path = $portable }
+}
+
+function Assert-ApprovedSyntheticFixtures {
+    param([object]$ManifestFile, [System.Collections.IDictionary]$FixtureFiles)
+
+    $manifest = [IO.File]::ReadAllText($ManifestFile.path) | ConvertFrom-Json
+    if ([int]$manifest.schema_version -lt 2 -or $null -eq $manifest.fixtures) {
+        throw "Approved synthetic fixture manifest schema is invalid"
+    }
+    $hashes = [ordered]@{}
+    foreach ($item in $FixtureFiles.GetEnumerator()) {
+        $entry = @($manifest.fixtures.PSObject.Properties | Where-Object {
+            [string]$_.Value.path -ceq [string]$item.Value.repository_path
+        })
+        if ($entry.Count -ne 1) {
+            throw "Approved synthetic fixture manifest entry is missing for $($item.Key)"
+        }
+        $value = $entry[0].Value
+        if (
+            [string]$value.fixture_kind -cne "synthetic" -or
+            [string]$value.privacy_classification -cne "synthetic_no_customer_data" -or
+            $value.contains_customer_data -ne $false -or
+            [string]$value.approval_status -cne "approved" -or
+            [string]::IsNullOrWhiteSpace([string]$value.synthetic_fixture_id) -or
+            -not ([string]$value.synthetic_fixture_id).StartsWith("synthetic-") -or
+            [string]::IsNullOrWhiteSpace([string]$value.generator) -or
+            [string]::IsNullOrWhiteSpace([string]$value.reviewer) -or
+            [string]$value.generator -ceq [string]$value.reviewer
+        ) {
+            throw "Approved synthetic fixture attestation is invalid for $($item.Key)"
+        }
+        $actualHash = Get-FileSha256 $item.Value.path
+        if ([string]$value.sha256 -cne $actualHash) {
+            throw "Approved synthetic fixture hash mismatch for $($item.Key)"
+        }
+        $hashes[$item.Key] = $actualHash
+    }
+    return [pscustomobject]@{
+        fixture_sha256 = [pscustomobject]$hashes
+        manifest_sha256 = Get-FileSha256 $ManifestFile.path
+    }
+}
+
 function Assert-RequiredFile {
     param([string]$RelativePath)
     if (-not (Test-Path -LiteralPath (Join-Path $RepoRoot $RelativePath) -PathType Leaf)) {
@@ -106,15 +193,36 @@ function Get-WorkingTreeHash {
 }
 
 function Invoke-AccountingFixtureValidation {
-    $fixtureMap = [ordered]@{
+    $fixtureSettings = [ordered]@{
         sales_raw = $SalesRawFixture
         purchase_raw = $PurchaseRawFixture
         sales_misa = $SalesMisaFixture
         purchase_misa = $PurchaseMisaFixture
     }
-    $missing = @($fixtureMap.GetEnumerator() | Where-Object { -not (Test-Path -LiteralPath $_.Value -PathType Leaf) })
+    $missing = @($fixtureSettings.GetEnumerator() | Where-Object {
+        [string]::IsNullOrWhiteSpace([string]$_.Value)
+    })
+    if ([string]::IsNullOrWhiteSpace($SyntheticFixtureManifest)) {
+        Add-ExternalPrerequisite "fixture-manifest" "Approved synthetic fixture manifest was not supplied"
+    }
     if ($missing.Count -gt 0) {
-        foreach ($item in $missing) { Add-ExternalPrerequisite "fixture-$($item.Key)" "Missing fixture: $($item.Value)" }
+        foreach ($item in $missing) {
+            Add-ExternalPrerequisite "fixture-$($item.Key)" "Explicit approved synthetic fixture was not supplied"
+        }
+    }
+    if ($missing.Count -gt 0 -or [string]::IsNullOrWhiteSpace($SyntheticFixtureManifest)) {
+        return $null
+    }
+
+    try {
+        $manifestFile = Assert-RepoContainedFixture $SyntheticFixtureManifest "manifest"
+        $fixtureMap = [ordered]@{}
+        foreach ($item in $fixtureSettings.GetEnumerator()) {
+            $fixtureMap[$item.Key] = Assert-RepoContainedFixture $item.Value $item.Key
+        }
+        $approvedEvidence = Assert-ApprovedSyntheticFixtures $manifestFile $fixtureMap
+    } catch {
+        Add-ExternalPrerequisite "approved-synthetic-fixtures" "Synthetic fixture approval, repository boundary, or hash validation failed"
         return $null
     }
 
@@ -221,13 +329,7 @@ def validate_template(external: Path, template_id: str) -> dict[str, object]:
         data_xf_indexes = [fixture_sheet.cell_xf_index(data_row, col) for col in range(width_limit)]
         require(any(index > 0 for index in data_xf_indexes), f"{template_id}: data-row styles are missing")
     require(len(fixture_book.xf_list) > 1 and bool(fixture_sheet.colinfo_map), f"{template_id}: formatting metadata is missing")
-    return {
-        "headers": width_limit,
-        "merged": len(fixture_sheet.merged_cells),
-        "xf": len(fixture_book.xf_list),
-        "header_style_count": len(set(header_xf_indexes)),
-        "style_mismatches": len(style_mismatches),
-    }
+    return {"status": "pass"}
 
 
 def validate_sales(raw_path: Path, misa_path: Path) -> dict[str, object]:
@@ -261,10 +363,10 @@ def validate_sales(raw_path: Path, misa_path: Path) -> dict[str, object]:
     for document, rows in raw_groups.items():
         line_sum = sum((decimal(row.get("Thành tiền")) for row in rows), Decimal("0"))
         document_values = {decimal(row.get("Tổng tiền hàng")) for row in rows}
-        require(len(document_values) == 1 and abs(line_sum - next(iter(document_values))) <= 1, f"sales document total mismatch: {document}")
+        require(len(document_values) == 1 and abs(line_sum - next(iter(document_values))) <= 1, "sales document total mismatch")
         first = rows[0]
         expected_payable = decimal(first.get("Tổng tiền hàng")) - decimal(first.get("Giảm giá hóa đơn")) + decimal(first.get("VAT")) + decimal(first.get("Thu khác"))
-        require(abs(expected_payable - decimal(first.get("Khách cần trả"))) <= 1, f"sales payable mismatch: {document}")
+        require(abs(expected_payable - decimal(first.get("Khách cần trả"))) <= 1, "sales payable mismatch")
 
     misa_groups: dict[tuple[str, ...], list[dict[str, object]]] = defaultdict(list)
     for row in misa.rows:
@@ -275,8 +377,8 @@ def validate_sales(raw_path: Path, misa_path: Path) -> dict[str, object]:
     for document, rows in misa_groups.items():
         net = sum((decimal(row.get("Thành tiền")) - decimal(row.get("Tiền chiết khấu")) for row in rows), Decimal("0"))
         raw_total = decimal(raw_groups[document][0].get("Tổng tiền hàng"))
-        require(abs(net - raw_total) <= 1, f"sales converted net total mismatch: {document}")
-    return {"rows": len(raw.rows), "documents": len(raw_groups), "sum_total": raw_totals.sum_total}
+        require(abs(net - raw_total) <= 1, "sales converted net total mismatch")
+    return {"status": "pass"}
 
 
 def validate_purchase(raw_path: Path) -> dict[str, object]:
@@ -300,15 +402,15 @@ def validate_purchase(raw_path: Path) -> dict[str, object]:
         base = decimal(row.get("TTVND"))
         vat = decimal(row.get("THUEVND"))
         total = decimal(row.get("TTVND_TT"))
-        require(abs(base + vat - total) <= 1, f"purchase row total mismatch: {document}")
+        require(abs(base + vat - total) <= 1, "purchase row total mismatch")
         raw_rate = str(row.get("TS_GTGT") or "").strip().upper()
         if raw_rate in {"KCT", "KKKNT", "KHÔNG CHỊU THUẾ", "KHÔNG KÊ KHAI NỘP THUẾ", "0", "0%"}:
-            require(vat == 0, f"purchase non-taxable/0% row has VAT: {document}")
+            require(vat == 0, "purchase non-taxable/0% row has VAT")
         elif raw_rate:
             rate = decimal(raw_rate.replace("%", "")) / Decimal("100")
-            require(rate in {Decimal("0.05"), Decimal("0.08"), Decimal("0.10")}, f"unsupported purchase VAT rate: {raw_rate}")
+            require(rate in {Decimal("0.05"), Decimal("0.08"), Decimal("0.10")}, "unsupported purchase VAT rate")
             expected_vat = (base * rate).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
-            require(abs(expected_vat - vat) <= 1, f"purchase VAT mismatch: {document}")
+            require(abs(expected_vat - vat) <= 1, "purchase VAT mismatch")
 
     deduplicated_rows = []
     expected_sum = Decimal("0")
@@ -318,10 +420,10 @@ def validate_purchase(raw_path: Path) -> dict[str, object]:
         for _ in range(2):
             deduplicated_rows.append({"document": "|".join(document), "total": total})
     duplicate_report = aggregate_document_totals(deduplicated_rows, document_key_fields=["document"], line_amount_field=None, document_total_field="total")
-    require(duplicate_report.status == "complete", f"purchase duplicate-total validation failed: {duplicate_report.issues}")
+    require(duplicate_report.status == "complete", "purchase duplicate-total validation failed")
     require(duplicate_report.document_count == len(groups), "purchase document count mismatch")
     require(decimal(duplicate_report.sum_total) == expected_sum, "purchase duplicate totals were double-counted")
-    return {"rows": len(raw.rows), "documents": len(groups), "sum_total": str(expected_sum)}
+    return {"status": "pass"}
 
 
 sales_raw, purchase_raw, sales_misa, purchase_misa, output_path = map(Path, sys.argv[1:6])
@@ -347,13 +449,22 @@ print(json.dumps(result, ensure_ascii=False))
     $env:PYTHONPATH = Join-Path $RepoRoot "converter"
     try {
         Invoke-GateStep "external-accounting-fixtures" (Join-Path $RepoRoot "converter") "python" @(
-            $validatorPath, $SalesRawFixture, $PurchaseRawFixture, $SalesMisaFixture, $PurchaseMisaFixture, $reportPath
+            $validatorPath, $fixtureMap.sales_raw.path, $fixtureMap.purchase_raw.path,
+            $fixtureMap.sales_misa.path, $fixtureMap.purchase_misa.path, $reportPath
         )
     } finally {
         $env:PYTHONPATH = $previousPythonPath
     }
     if (-not (Test-Path -LiteralPath $reportPath -PathType Leaf)) { return $null }
-    return [IO.File]::ReadAllText($reportPath) | ConvertFrom-Json
+    $report = [IO.File]::ReadAllText($reportPath) | ConvertFrom-Json
+    foreach ($fixture in $approvedEvidence.fixture_sha256.PSObject.Properties) {
+        if ([string]$report.fixture_sha256.($fixture.Name) -cne [string]$fixture.Value) {
+            Add-ExternalPrerequisite "approved-synthetic-fixtures" "Synthetic fixture validation hash mismatch"
+            return $null
+        }
+    }
+    $report | Add-Member -NotePropertyName manifest_sha256 -NotePropertyValue $approvedEvidence.manifest_sha256
+    return $report
 }
 
 function Assert-AccountingQaReport {
@@ -400,8 +511,18 @@ function Assert-AccountingQaReport {
     if ([string]$artifact.release_id -ne $ReleaseId -or [string]$artifact.status -ne "pass") { throw "QA artifact release/status mismatch" }
     $artifactGeneratedAt = [DateTimeOffset]::Parse([string]$artifact.generated_at)
     if ($reviewedAt -lt $artifactGeneratedAt) { throw "QA report predates its QA artifact" }
-    Copy-Item -LiteralPath $resolved -Destination (Join-Path $artifactRoot "independent-accounting-qa.json")
-    Copy-Item -LiteralPath $artifactPath -Destination (Join-Path $artifactRoot "independent-accounting-qa-artifact.json")
+    Write-EvidenceFile "independent-accounting-qa-receipt.json" ([ordered]@{
+        schema_version = 1
+        status = "pass"
+        reviewed_at = $reviewedAt.ToUniversalTime().ToString("o")
+        report_sha256 = Get-FileSha256 $resolved
+        qa_artifact_sha256 = Get-FileSha256 $artifactPath
+        attestations = [ordered]@{
+            fixture_validation = "PASS"
+            accounting_logic = "PASS"
+            production_readiness = "PASS"
+        }
+    }) | Out-Null
 }
 
 $requiredFiles = @(
@@ -426,12 +547,14 @@ $commitHash = (git -C $RepoRoot rev-parse HEAD).Trim()
 $treeHash = (git -C $RepoRoot rev-parse "HEAD^{tree}").Trim()
 $workingTreeHash = Get-WorkingTreeHash
 $fixtureHashes = if ($fixtureReport) { $fixtureReport.fixture_sha256 } else { [pscustomobject]@{} }
+$fixtureManifestHash = if ($fixtureReport) { [string]$fixtureReport.manifest_sha256 } else { $null }
 $manifestSeed = [ordered]@{
     release_id = $ReleaseId
     commit_hash = $commitHash
     tree_hash = $treeHash
     working_tree_hash = $workingTreeHash
     fixture_sha256 = $fixtureHashes
+    fixture_manifest_sha256 = $fixtureManifestHash
 }
 $manifest = [ordered]@{
     schema_version = 1
@@ -442,6 +565,7 @@ $manifest = [ordered]@{
     working_tree_hash = $workingTreeHash
     qa_input_hash = Get-TextSha256 ($manifestSeed | ConvertTo-Json -Depth 8 -Compress)
     fixture_sha256 = $fixtureHashes
+    fixture_manifest_sha256 = $fixtureManifestHash
 }
 Write-EvidenceFile "release-manifest.json" $manifest | Out-Null
 Write-EvidenceFile "runtime.json" ([ordered]@{ node = (& node --version); npm = (& npm --version); python = (& python --version 2>&1); runs = $Runs; skip_broad_tests = $SkipBroadTests.IsPresent; skip_performance = $SkipPerformance.IsPresent }) | Out-Null
@@ -506,16 +630,16 @@ Write-EvidenceFile "summary.json" $summary | Out-Null
 
 if ($failed.Count -gt 0) {
     Write-Host "`nACCOUNTING OPERATIONS GATE FAILED: $($failed -join ', ')" -ForegroundColor Red
-    Write-Host "Evidence: $artifactRoot" -ForegroundColor Yellow
+    Write-Host "Evidence: .artifacts/qa/$ReleaseId" -ForegroundColor Yellow
     exit 1
 }
 if (-not $releaseEligible) {
     Write-Host "`nACCOUNTING OPERATIONS GATE INCOMPLETE" -ForegroundColor Yellow
-    Write-Host "Evidence: $artifactRoot" -ForegroundColor Yellow
+    Write-Host "Evidence: .artifacts/qa/$ReleaseId" -ForegroundColor Yellow
     if ($AllowIncompleteDiagnostics) { exit 0 }
     exit 2
 }
 
 Write-Host "`nACCOUNTING OPERATIONS RELEASE GATE PASSED" -ForegroundColor Green
-Write-Host "Evidence: $artifactRoot" -ForegroundColor Gray
+Write-Host "Evidence: .artifacts/qa/$ReleaseId" -ForegroundColor Gray
 exit 0

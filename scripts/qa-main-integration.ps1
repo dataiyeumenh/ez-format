@@ -15,9 +15,11 @@ if ($LASTEXITCODE -ne 0) {
 
 if ($Mode -eq "Release") {
     $env:REQUIRE_REPLICA_TESTS = "1"
+    $env:REQUIRE_MISA_IMPORT_REPAIR_TESTS = "1"
 } else {
     # Local incomplete mode may document real-Mongo skips instead of certifying them.
     $env:REQUIRE_REPLICA_TESTS = ""
+    $env:REQUIRE_MISA_IMPORT_REPAIR_TESTS = ""
 }
 
 function Invoke-QaStep {
@@ -64,6 +66,9 @@ Write-Output "[QA] Worktree: $Root"
 if ([string]::IsNullOrWhiteSpace($env:PAYMENT_REPLICA_SET_TEST_URI)) {
     Write-Output "[QA] SKIPPED replica Mongo/payment tests: PAYMENT_REPLICA_SET_TEST_URI is not set."
 }
+if ([string]::IsNullOrWhiteSpace($env:MISA_IMPORT_REPAIR_TEST_MONGO_URI)) {
+    Write-Output "[QA] SKIPPED real Mongo MISA import-repair tests: MISA_IMPORT_REPAIR_TEST_MONGO_URI is not set."
+}
 if ($env:QA_EXPECT_LIVE -ne "true") {
     Write-Output "[QA] SKIPPED live gateway URLs and live browser journeys: QA_EXPECT_LIVE=true is not set."
 }
@@ -74,6 +79,12 @@ Invoke-QaStep "Main contracts" $Root {
 
 Invoke-QaStep "Full backend node tests" (Join-Path $Root "backend") {
     node --test
+}
+
+if (-not [string]::IsNullOrWhiteSpace($env:MISA_IMPORT_REPAIR_TEST_MONGO_URI)) {
+    Invoke-QaStep "Real Mongo MISA import-repair evidence" (Join-Path $Root "backend") {
+        node --test --test-name-pattern "real Mongo" tests/misaImportRepairModels.test.js
+    }
 }
 
 Invoke-QaStep "Full converter pytest" (Join-Path $Root "converter") {

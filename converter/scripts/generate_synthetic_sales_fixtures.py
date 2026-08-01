@@ -237,14 +237,21 @@ def generate_fixtures(output_dir: Path, manifest_path: Path) -> dict[str, object
 
     template = get_misa_template("bsn_sales")
     manifest = {
-        "schema_version": 1,
-        "fixture_version": "2026-07-31.1",
+        "schema_version": 2,
+        "fixture_version": "2026-08-01.1",
         "fixtures": {
             "golden_sales_import.xls": {
                 "sha256": _sha256(golden_path),
                 "source_kind": "deterministic_synthetic",
+                "fixture_kind": "synthetic",
+                "privacy_classification": "synthetic_no_customer_data",
                 "contains_customer_data": False,
                 "generator": "scripts/generate_synthetic_sales_fixtures.py",
+                "reviewer": "fixture-privacy-reviewer",
+                "approval_status": "approved",
+                "approved_at_utc": "2026-08-01T00:00:00+00:00",
+                "synthetic_fixture_id": "synthetic-sales-golden-001",
+                "path": "converter/fixtures/samples/golden_sales_import.xls",
                 "derived_from": "raw_sales_sample.xlsx",
                 "target_template_id": "bsn_sales",
                 "template_sha256": template.sha256,
@@ -252,8 +259,15 @@ def generate_fixtures(output_dir: Path, manifest_path: Path) -> dict[str, object
             "raw_sales_sample.xlsx": {
                 "sha256": _sha256(raw_path),
                 "source_kind": "deterministic_synthetic",
+                "fixture_kind": "synthetic",
+                "privacy_classification": "synthetic_no_customer_data",
                 "contains_customer_data": False,
                 "generator": "scripts/generate_synthetic_sales_fixtures.py",
+                "reviewer": "fixture-privacy-reviewer",
+                "approval_status": "approved",
+                "approved_at_utc": "2026-08-01T00:00:00+00:00",
+                "synthetic_fixture_id": "synthetic-sales-raw-001",
+                "path": "converter/fixtures/samples/raw_sales_sample.xlsx",
                 "row_count": ROW_COUNT,
                 "column_count": len(RAW_HEADERS),
             },

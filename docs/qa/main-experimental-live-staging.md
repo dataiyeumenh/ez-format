@@ -55,14 +55,27 @@ All are currently absent:
       restore target, and DBA approval.
 - [ ] Replica Mongo payment evidence from `PAYMENT_REPLICA_SET_TEST_URI` with no
       payment settlement skips.
-- [ ] Real MISA Mongo evidence from `MISA_IMPORT_REPAIR_TEST_MONGO_URI` or the
-      approved private `MONGO_URI` with no MISA repair Mongo skips.
+- [ ] Real MISA Mongo evidence from the dedicated disposable
+      `MISA_IMPORT_REPAIR_TEST_MONGO_URI` with no MISA repair Mongo skips.
 - [ ] Real GridFS round-trip evidence from `GRIDFS_INTEGRATION_TEST_URI` with no
       GridFS integration skip.
 - [ ] Private TLS Redis service/reference for restart-safe Smart Voucher state.
 - [ ] `QA_EXPECT_LIVE=true`, `QA_FRONTEND_URL`, `QA_GATEWAY_URL`,
-      `QA_CONVERTER_URL`, release ID, owner/foreign auth inputs, approved raw
-      fixture, live contract, and charge-audit snapshots.
+      `QA_CONVERTER_URL`, release ID, owner/foreign auth inputs, live contract,
+      and charge-audit snapshots.
+- [ ] `QA_RAW_FIXTURE` is the exact repository-contained approved synthetic Excel
+      path from the candidate checkout; customer, external, `.artifacts`, and
+      arbitrary repository workbooks are forbidden.
+- [ ] `QA_SYNTHETIC_FIXTURE_MANIFEST` is the exact repository-contained schema-v2
+      manifest path from that checkout. It contains exactly one matching fixture
+      path with `source_kind=deterministic_synthetic`, `fixture_kind=synthetic`,
+      `privacy_classification=synthetic_no_customer_data`,
+      `contains_customer_data=false`, `approval_status=approved`, distinct
+      generator/reviewer identities, and a non-future approval time.
+- [ ] `Get-FileHash -Algorithm SHA256` for `QA_RAW_FIXTURE` exactly matches the
+      lowercase 64-hex `sha256` on its manifest entry. Path membership, approval,
+      and hash are all mandatory; filename similarity or an aggregate claim is
+      insufficient.
 - [ ] Approved HTTPS AI endpoint/token if AI Explanation is in release scope;
       otherwise its flags remain false.
 
@@ -354,6 +367,21 @@ release_qa_missing: PENDING
 release_qa_exit_code: PENDING
 release_qa_failed_checks: PENDING
 release_qa_skipped_checks: PENDING
+misa_import_repair_test_mongo_uri_reference: PENDING_PRIVATE
+bsn_sales_certification_path: PENDING_PRIVATE
+bsn_sales_certification_sha256: PENDING
+bsn_purchase_certification_path: PENDING_PRIVATE
+bsn_purchase_certification_sha256: PENDING
+misa_purchase_domestic_certification_path: PENDING_PRIVATE
+misa_purchase_domestic_certification_sha256: PENDING
+sales_goods_certification_path: PENDING_PRIVATE
+sales_goods_certification_sha256: PENDING
+sales_service_certification_path: PENDING_PRIVATE
+sales_service_certification_sha256: PENDING
+purchase_goods_certification_path: PENDING_PRIVATE
+purchase_goods_certification_sha256: PENDING
+purchase_service_certification_path: PENDING_PRIVATE
+purchase_service_certification_sha256: PENDING
 converter_staging_sha: PENDING
 node_staging_sha: PENDING
 vercel_staging_sha: PENDING
@@ -371,6 +399,10 @@ approved_at_utc: PENDING
       `staging_tested_sha`.
 - [ ] The machine JSON status is the literal `RELEASE_READY`; no alternate
       success token is accepted.
+- [ ] Dedicated `MISA_IMPORT_REPAIR_TEST_MONGO_URI` evidence ran with zero repair
+      Mongo skips.
+- [ ] All seven certification paths and exact SHA-256 values above match the
+      immutable records validated by the export-safe certification gate.
 - [ ] Missing/invalid release evidence returns literal `RELEASE_BLOCKED`, exit
       `2`; it never returns a promotable result.
 - [ ] `-Mode LocalIncomplete` remains literal `LOCAL_INCOMPLETE`, exit `0`,

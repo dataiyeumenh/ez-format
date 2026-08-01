@@ -253,9 +253,9 @@ test("human confirmation tokens persist immutable action, payload, ownership, an
 });
 
 test("human confirmation consumption is atomic in real Mongo", {
-  skip: !(process.env.MISA_IMPORT_REPAIR_TEST_MONGO_URI || process.env.MONGO_URI),
+  skip: !process.env.MISA_IMPORT_REPAIR_TEST_MONGO_URI,
 }, async () => {
-  const uri = process.env.MISA_IMPORT_REPAIR_TEST_MONGO_URI || process.env.MONGO_URI;
+  const uri = process.env.MISA_IMPORT_REPAIR_TEST_MONGO_URI;
   const wasConnected = mongoose.connection.readyState === 1;
   if (!wasConnected) await mongoose.connect(uri, { serverSelectionTimeoutMS: 5000 });
   const collectionName = `misa_repair_confirmation_${Date.now()}_${process.pid}`;
@@ -413,9 +413,9 @@ test("repair idempotency startup migration drops legacy index and unsets persist
 });
 
 test("repair idempotency permits no-key siblings and arbitrates keyed races in real Mongo", {
-  skip: !(process.env.MISA_IMPORT_REPAIR_TEST_MONGO_URI || process.env.MONGO_URI),
+  skip: !process.env.MISA_IMPORT_REPAIR_TEST_MONGO_URI,
 }, async () => {
-  const uri = process.env.MISA_IMPORT_REPAIR_TEST_MONGO_URI || process.env.MONGO_URI;
+  const uri = process.env.MISA_IMPORT_REPAIR_TEST_MONGO_URI;
   const wasConnected = mongoose.connection.readyState === 1;
   if (!wasConnected) await mongoose.connect(uri, { serverSelectionTimeoutMS: 5000 });
   const collectionName = `misa_repair_idempotency_${Date.now()}_${process.pid}`;

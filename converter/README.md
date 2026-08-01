@@ -69,13 +69,16 @@ environment bypass exists; tests isolate writer behavior by monkeypatching the
 private capability boundary inside pytest fixtures only. Release preflight remains
 blocked until every required template is certified. There is no Excel COM dependency.
 
-Certification is evidence-bound, portable, and immutable. Use a synthetic,
-non-customer input. Perform a real MISA sandbox/controlled import, then retain a
-MISA-generated log, report, or screenshot separate from the JSON attestation. The
-import-result JSON schema is version `2` and binds template, input, output, result
-artifact, current deterministic writer build, product/release, reviewer, approver,
-provenance vocabulary, and timezone-aware completion time. Print the current writer
-build hash with the exact candidate environment. The hash binds writer source,
+Certification is evidence-bound, portable, immutable, and synthetic-only. Before
+issuance, the converter scans workbook metadata/cells and the result receipt for
+obvious customer/PII markers. A fixture attestation must bind the exact input/output
+hashes, identify the deterministic synthetic fixture, classify it as
+`synthetic_no_customer_data`, and record an independent reviewer plus `approved`
+status. A schema-v2 fixture manifest must independently approve both exact hashes;
+every manifest entry must be deterministic synthetic, customer-free, independently
+reviewed, and approved. Missing, mismatched, placeholder, unapproved, or customer
+fixtures fail closed. Print the current writer build hash with the exact candidate environment.
+The hash binds writer source,
 `requirements.txt` bytes, resolved `xlrd`/`xlwt`/`xlutils`/`olefile` versions, and
 the Python major/minor version:
 
@@ -83,18 +86,42 @@ the Python major/minor version:
 python -c "from app.misa_certification import current_writer_build_sha256; print(current_writer_build_sha256())"
 ```
 
-The import-result JSON must contain exactly:
+The fixture attestation must contain exactly:
 
 ```json
 {
-  "schema_version": 2,
+  "schema_version": 1,
+  "synthetic_fixture_id": "synthetic-<stable-id>",
+  "fixture_kind": "synthetic",
+  "privacy_classification": "synthetic_no_customer_data",
+  "contains_customer_data": false,
+  "generator": "<deterministic generator>",
+  "reviewer": "<independent reviewer>",
+  "approval_status": "approved",
+  "approved_at_utc": "<timezone-aware ISO-8601>",
+  "input_sha256": "<64 lowercase hex>",
+  "output_sha256": "<64 lowercase hex>"
+}
+```
+
+The bounded result artifact must be a redacted JSON receipt, never a screenshot
+or raw log. It contains exactly schema/version, receipt type, success status,
+`redacted=true`, synthetic fixture ID, imported-row count, and warning count.
+The import-result JSON schema is version `3` and must contain exactly:
+
+```json
+{
+  "schema_version": 3,
   "evidence_origin": "misa_sandbox_import",
-  "result_artifact_kind": "misa_import_log",
+  "result_artifact_kind": "redacted_json_receipt",
   "status": "misa_import_passed",
   "template_sha256": "<64 lowercase hex>",
   "input_sha256": "<64 lowercase hex>",
   "output_sha256": "<64 lowercase hex>",
   "result_artifact_sha256": "<64 lowercase hex>",
+  "fixture_attestation_sha256": "<64 lowercase hex>",
+  "synthetic_fixture_id": "synthetic-<stable-id>",
+  "privacy_classification": "synthetic_no_customer_data",
   "misa_product": "<explicit product>",
   "misa_release": "<explicit release>",
   "completed_at_utc": "<timezone-aware ISO-8601>",
@@ -118,14 +145,19 @@ python -m app.misa_certification create `
   --input ../.artifacts/certification/sales_goods-input.csv `
   --output ../.artifacts/certification/sales_goods-output.xls `
   --import-result ../.artifacts/certification/sales_goods-import-result.json `
-  --result-artifact ../.artifacts/certification/sales_goods-misa-import.log `
+  --result-artifact ../.artifacts/certification/sales_goods-misa-receipt.json `
+  --fixture-attestation ../.artifacts/certification/sales_goods-fixture-attestation.json `
+  --fixture-manifest ../.artifacts/certification/approved-synthetic-fixtures.json `
   --artifact-dir config/misa-template-certifications `
   --expires-at 2027-01-31T00:00:00+00:00
 ```
 
-The command copies evidence under
+The command copies only the manifest-approved synthetic output, fixture manifest,
+fixture attestation, import-result JSON, and redacted receipt under
 `config/misa-template-certifications/evidence/sha256/` and writes only relative
-paths. It rejects absolute/escaping paths, future/expired/revoked records,
+paths. Template and input workbooks are hash-bound but are not copied into the
+bundle; customer workbooks must never be supplied or bundled. It rejects
+absolute/escaping paths, future/expired/revoked records,
 template-equals-output, placeholders, same-person approval, unbound hashes, stale
 writer bytes, and later bundle tampering. Package this directory read-only with the
 converter; do not put certification evidence or customer files in S3. Do not set

@@ -1,14 +1,21 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import hashlib
 import json
 import re
 import sys
 from datetime import datetime, timedelta, timezone
 from importlib import metadata
+from io import BytesIO, StringIO
 from pathlib import Path, PurePosixPath
 from typing import Any, Mapping
+
+import openpyxl
+import xlrd
+
+from app.misa_biff import iter_biff_records, scan_ole_metadata
 
 
 MISA_IMPORT_SOURCE_URLS = [
@@ -16,14 +23,22 @@ MISA_IMPORT_SOURCE_URLS = [
     "https://helpamis.misa.vn/amis-mua-hang/kb/copy-du-lieu-tu-excel-vao-chung-tu/",
     "https://www.misa.vn/154745/tai-lieu-open-api-tich-hop-amis-ke-toan-doanh-nghiep/",
 ]
-CERTIFICATION_SCHEMA_VERSION = 2
-IMPORT_RESULT_SCHEMA_VERSION = 2
+CERTIFICATION_SCHEMA_VERSION = 3
+IMPORT_RESULT_SCHEMA_VERSION = 3
+FIXTURE_ATTESTATION_SCHEMA_VERSION = 1
+RESULT_RECEIPT_SCHEMA_VERSION = 1
 _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 _SAFE_SUFFIX_PATTERN = re.compile(r"^\.[a-z0-9]{1,10}$")
 _OLE_SIGNATURE = bytes.fromhex("d0cf11e0a1b11ae1")
 _CLOCK_SKEW = timedelta(minutes=5)
 _MAX_IMPORT_TO_ISSUANCE = timedelta(days=7)
 _MAX_CERTIFICATION_LIFETIME = timedelta(days=397)
+_MAX_ATTESTATION_BYTES = 16 * 1024
+_MAX_FIXTURE_MANIFEST_BYTES = 256 * 1024
+_MAX_IMPORT_RESULT_BYTES = 64 * 1024
+_MAX_RESULT_RECEIPT_BYTES = 64 * 1024
+_MAX_WORKBOOK_BYTES = 32 * 1024 * 1024
+_MAX_SCANNED_CELLS = 500_000
 _PLACEHOLDER_VALUES = {
     "unknown",
     "unrecorded",
@@ -35,11 +50,7 @@ _PLACEHOLDER_VALUES = {
     "todo",
 }
 _EVIDENCE_ORIGINS = {"misa_sandbox_import", "misa_controlled_import"}
-_RESULT_ARTIFACT_KINDS = {
-    "misa_import_log",
-    "misa_import_report",
-    "misa_import_screenshot",
-}
+_RESULT_ARTIFACT_KINDS = {"redacted_json_receipt"}
 _SOURCE_KINDS = {
     "partner_sample_derived",
     "partner_supplied",
@@ -66,6 +77,9 @@ _IMPORT_RUN_FIELDS = {
     "output_sha256",
     "input_sha256",
     "result_artifact_sha256",
+    "fixture_attestation_sha256",
+    "synthetic_fixture_id",
+    "privacy_classification",
     "misa_product",
     "misa_release",
     "completed_at_utc",
@@ -89,10 +103,45 @@ _RECORD_FIELDS = {
     "output",
     "import_result",
     "result_artifact",
+    "fixture_attestation",
+    "fixture_manifest",
     "import_run",
     "source_urls",
     "notes",
 }
+_FIXTURE_ATTESTATION_FIELDS = {
+    "schema_version",
+    "synthetic_fixture_id",
+    "fixture_kind",
+    "privacy_classification",
+    "contains_customer_data",
+    "generator",
+    "reviewer",
+    "approval_status",
+    "approved_at_utc",
+    "input_sha256",
+    "output_sha256",
+}
+_RESULT_RECEIPT_FIELDS = {
+    "schema_version",
+    "receipt_type",
+    "status",
+    "redacted",
+    "synthetic_fixture_id",
+    "imported_rows",
+    "warnings_count",
+}
+_SYNTHETIC_FIXTURE_ID_PATTERN = re.compile(r"^synthetic-[a-z0-9][a-z0-9._-]{7,127}$")
+_MANIFEST_TOKEN_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+_EMAIL_PATTERN = re.compile(r"(?i)\b[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9.-]+\.[a-z]{2,}\b")
+_PATH_PATTERN = re.compile(r"(?i)(?:\b[a-z]:\\|\\\\|(?:^|\s)/(?:home|users|var|tmp)/)")
+_CUSTOMER_MARKER_PATTERN = re.compile(
+    r"(?i)\b(?:customer|client|tenant|company)\b|khách\s+hàng|nhà\s+cung\s+cấp|công\s+ty"
+)
+_SENSITIVE_HEADER_PATTERN = re.compile(
+    r"(?i)customer|supplier|client|contact|email|phone|address|tax|"
+    r"khách\s+hàng|nhà\s+cung\s+cấp|người\s+nhận|điện\s+thoại|địa\s+chỉ|mã\s+số\s+thuế"
+)
 
 
 def current_writer_build_sha256() -> str:
@@ -132,6 +181,8 @@ def create_manual_certification_record(
     output_path: Path,
     import_result_path: Path,
     result_artifact_path: Path,
+    fixture_attestation_path: Path,
+    fixture_manifest_path: Path,
     artifact_dir: Path,
     expires_at_utc: str,
     notes: str | None = None,
@@ -148,8 +199,38 @@ def create_manual_certification_record(
             result_artifact_path,
             kind="result artifact",
         ),
+        "fixture_attestation": _source_evidence_file(
+            fixture_attestation_path,
+            kind="fixture attestation",
+        ),
+        "fixture_manifest": _source_evidence_file(
+            fixture_manifest_path,
+            kind="fixture manifest",
+        ),
     }
     _assert_independent_evidence(evidence)
+    for name in (
+        "import_result",
+        "result_artifact",
+        "fixture_attestation",
+        "fixture_manifest",
+    ):
+        if evidence[name]["suffix"] != ".json":
+            raise ValueError(f"MISA certification {name.replace('_', ' ')} must be JSON")
+    _scan_fixture_privacy(evidence["template"], kind="template")
+    _scan_fixture_privacy(evidence["input"], kind="input")
+    _scan_fixture_privacy(evidence["output"], kind="output")
+    attestation = _validated_fixture_attestation_bytes(
+        evidence["fixture_attestation"]["contents"],
+        input_sha256=evidence["input"]["sha256"],
+        output_sha256=evidence["output"]["sha256"],
+    )
+    _validated_fixture_manifest_bytes(
+        evidence["fixture_manifest"]["contents"],
+        input_sha256=evidence["input"]["sha256"],
+        output_sha256=evidence["output"]["sha256"],
+        synthetic_fixture_id=attestation["synthetic_fixture_id"],
+    )
     import_run = _validated_import_run_bytes(
         evidence["import_result"]["contents"],
         template_sha256=evidence["template"]["sha256"],
@@ -157,6 +238,8 @@ def create_manual_certification_record(
         output_sha256=evidence["output"]["sha256"],
         result_artifact_sha256=evidence["result_artifact"]["sha256"],
         result_artifact_contents=evidence["result_artifact"]["contents"],
+        fixture_attestation_sha256=evidence["fixture_attestation"]["sha256"],
+        synthetic_fixture_id=attestation["synthetic_fixture_id"],
     )
 
     issued_at = datetime.now(timezone.utc)
@@ -167,9 +250,19 @@ def create_manual_certification_record(
 
     root = Path(artifact_dir).resolve(strict=False)
     references = {
-        name: _bundle_evidence(root, item)
-        for name, item in evidence.items()
+        name: _bundle_evidence(root, evidence[name])
+        for name in (
+            "output",
+            "import_result",
+            "result_artifact",
+            "fixture_attestation",
+            "fixture_manifest",
+        )
     }
+    certification_notes = notes or "Approved synthetic fixture; redacted MISA import receipt."
+    if len(certification_notes.encode("utf-8")) > 2_048:
+        raise ValueError("MISA certification notes exceed the size limit")
+    _assert_privacy_safe_value(certification_notes, kind="notes", sensitive=False)
     payload: dict[str, Any] = {
         "schema_version": CERTIFICATION_SCHEMA_VERSION,
         "conversion_type": _required_text(conversion_type, "conversion_type"),
@@ -180,10 +273,15 @@ def create_manual_certification_record(
         "revocation_status": "not_revoked",
         "revoked_at_utc": None,
         "revocation_reason": None,
+        "template": {"sha256": evidence["template"]["sha256"]},
+        "input": {
+            "sha256": evidence["input"]["sha256"],
+            "synthetic_fixture_id": attestation["synthetic_fixture_id"],
+        },
         **references,
         "import_run": import_run,
         "source_urls": MISA_IMPORT_SOURCE_URLS,
-        "notes": notes or "Independent reviewed MISA import evidence.",
+        "notes": certification_notes,
     }
     record_path = root / f"{conversion_type}_misa_certification.json"
     _write_new_file(
@@ -230,12 +328,8 @@ def validate_manual_certification_record(
     _validate_certification_window(issued_at, expires_at, now=now)
 
     root = record_path.parent
-    template = _validated_record_file(
-        payload.get("template"), root=root, kind="template", require_xls=True
-    )
-    input_evidence = _validated_record_file(
-        payload.get("input"), root=root, kind="input"
-    )
+    template = _validated_hash_reference(payload.get("template"), kind="template")
+    input_evidence = _validated_input_reference(payload.get("input"))
     output = _validated_record_file(
         payload.get("output"), root=root, kind="output", require_xls=True
     )
@@ -245,16 +339,47 @@ def validate_manual_certification_record(
     result_artifact = _validated_record_file(
         payload.get("result_artifact"), root=root, kind="result artifact"
     )
+    fixture_attestation = _validated_record_file(
+        payload.get("fixture_attestation"), root=root, kind="fixture attestation"
+    )
+    fixture_manifest = _validated_record_file(
+        payload.get("fixture_manifest"), root=root, kind="fixture manifest"
+    )
+    for name, item in {
+        "import result": import_result,
+        "result artifact": result_artifact,
+        "fixture attestation": fixture_attestation,
+        "fixture manifest": fixture_manifest,
+    }.items():
+        if item["suffix"] != ".json":
+            raise ValueError(f"MISA certification {name} must be JSON")
     evidence = {
         "template": template,
         "input": input_evidence,
         "output": output,
         "import_result": import_result,
         "result_artifact": result_artifact,
+        "fixture_attestation": fixture_attestation,
+        "fixture_manifest": fixture_manifest,
     }
     _assert_independent_evidence(evidence)
+    _scan_fixture_privacy(output, kind="output")
     if template["sha256"] != template_sha256:
         raise ValueError("MISA certification template SHA-256 mismatch")
+
+    attestation = _validated_fixture_attestation_bytes(
+        fixture_attestation["contents"],
+        input_sha256=input_evidence["sha256"],
+        output_sha256=output["sha256"],
+    )
+    if input_evidence["synthetic_fixture_id"] != attestation["synthetic_fixture_id"]:
+        raise ValueError("MISA certification input fixture attestation mismatch")
+    _validated_fixture_manifest_bytes(
+        fixture_manifest["contents"],
+        input_sha256=input_evidence["sha256"],
+        output_sha256=output["sha256"],
+        synthetic_fixture_id=attestation["synthetic_fixture_id"],
+    )
 
     import_run = _validated_import_run_bytes(
         import_result["contents"],
@@ -263,6 +388,8 @@ def validate_manual_certification_record(
         output_sha256=output["sha256"],
         result_artifact_sha256=result_artifact["sha256"],
         result_artifact_contents=result_artifact["contents"],
+        fixture_attestation_sha256=fixture_attestation["sha256"],
+        synthetic_fixture_id=attestation["synthetic_fixture_id"],
     )
     if payload.get("import_run") != import_run:
         raise ValueError("MISA certification import run metadata mismatch")
@@ -274,8 +401,9 @@ def validate_manual_certification_record(
             raise ValueError("MISA certification template provenance mismatch")
     if payload.get("source_urls") != MISA_IMPORT_SOURCE_URLS:
         raise ValueError("MISA certification source URLs are invalid")
-    if not isinstance(payload.get("notes"), str):
+    if not isinstance(payload.get("notes"), str) or len(payload["notes"].encode("utf-8")) > 2_048:
         raise ValueError("MISA certification notes are invalid")
+    _assert_privacy_safe_value(payload["notes"], kind="notes", sensitive=False)
     return payload
 
 
@@ -332,6 +460,25 @@ def _write_new_file(
         raise ValueError(f"MISA certification immutable path already exists: {path.name}") from exc
 
 
+def _validated_hash_reference(value: object, *, kind: str) -> dict[str, str]:
+    if not isinstance(value, dict) or set(value) != {"sha256"}:
+        raise ValueError(f"MISA certification {kind} evidence is invalid")
+    sha256 = value.get("sha256")
+    if not isinstance(sha256, str) or not _SHA256_PATTERN.fullmatch(sha256):
+        raise ValueError(f"MISA certification {kind} SHA-256 is invalid")
+    return {"sha256": sha256}
+
+
+def _validated_input_reference(value: object) -> dict[str, str]:
+    if not isinstance(value, dict) or set(value) != {"sha256", "synthetic_fixture_id"}:
+        raise ValueError("MISA certification input evidence is invalid")
+    sha256 = value.get("sha256")
+    if not isinstance(sha256, str) or not _SHA256_PATTERN.fullmatch(sha256):
+        raise ValueError("MISA certification input SHA-256 is invalid")
+    fixture_id = _validated_synthetic_fixture_id(value.get("synthetic_fixture_id"))
+    return {"sha256": sha256, "synthetic_fixture_id": fixture_id}
+
+
 def _validated_record_file(
     value: object,
     *,
@@ -382,7 +529,11 @@ def _validated_import_run_bytes(
     output_sha256: str,
     result_artifact_sha256: str,
     result_artifact_contents: bytes,
+    fixture_attestation_sha256: str,
+    synthetic_fixture_id: str,
 ) -> dict[str, Any]:
+    if len(contents) > _MAX_IMPORT_RESULT_BYTES:
+        raise ValueError("MISA import result evidence exceeds the size limit")
     payload = _read_json_bytes(contents, "import result")
     if (
         set(payload) != _IMPORT_RUN_FIELDS
@@ -396,6 +547,7 @@ def _validated_import_run_bytes(
         "input_sha256": input_sha256,
         "output_sha256": output_sha256,
         "result_artifact_sha256": result_artifact_sha256,
+        "fixture_attestation_sha256": fixture_attestation_sha256,
     }
     for field, expected in bindings.items():
         if payload.get(field) != expected:
@@ -409,6 +561,10 @@ def _validated_import_run_bytes(
         raise ValueError("MISA import result evidence origin is invalid")
     if payload.get("result_artifact_kind") not in _RESULT_ARTIFACT_KINDS:
         raise ValueError("MISA import result artifact kind is invalid")
+    if payload.get("synthetic_fixture_id") != synthetic_fixture_id:
+        raise ValueError("MISA import result synthetic fixture attestation mismatch")
+    if payload.get("privacy_classification") != "synthetic_no_customer_data":
+        raise ValueError("MISA import result privacy classification is invalid")
     if payload.get("writer_build_sha256") != current_writer_build_sha256():
         raise ValueError("MISA import result writer build SHA-256 mismatch")
     payload["template_provenance"] = _validated_provenance(
@@ -417,7 +573,10 @@ def _validated_import_run_bytes(
     completed_at = _aware_timestamp(payload.get("completed_at_utc"), "completed_at_utc")
     if completed_at > datetime.now(timezone.utc) + _CLOCK_SKEW:
         raise ValueError("MISA import result completed_at_utc is in the future")
-    _validate_result_artifact(result_artifact_contents)
+    _validate_result_artifact(
+        result_artifact_contents,
+        synthetic_fixture_id=synthetic_fixture_id,
+    )
     return payload
 
 
@@ -437,6 +596,183 @@ def _validated_provenance(value: object) -> dict[str, str]:
     return normalized
 
 
+def _validated_fixture_attestation_bytes(
+    contents: bytes,
+    *,
+    input_sha256: str,
+    output_sha256: str,
+) -> dict[str, Any]:
+    if len(contents) > _MAX_ATTESTATION_BYTES:
+        raise ValueError("MISA synthetic fixture attestation exceeds the size limit")
+    payload = _read_json_bytes(contents, "synthetic fixture attestation")
+    if (
+        set(payload) != _FIXTURE_ATTESTATION_FIELDS
+        or payload.get("schema_version") != FIXTURE_ATTESTATION_SCHEMA_VERSION
+    ):
+        raise ValueError("MISA synthetic fixture attestation schema is invalid")
+    fixture_id = _validated_synthetic_fixture_id(payload.get("synthetic_fixture_id"))
+    if payload.get("fixture_kind") != "synthetic":
+        raise ValueError("MISA synthetic fixture attestation fixture kind is invalid")
+    if payload.get("privacy_classification") != "synthetic_no_customer_data":
+        raise ValueError("MISA synthetic fixture attestation privacy classification is invalid")
+    if payload.get("contains_customer_data") is not False:
+        raise ValueError("MISA synthetic fixture attestation permits customer data")
+    generator = _attestation_text(payload.get("generator"), "generator")
+    reviewer = _attestation_text(payload.get("reviewer"), "reviewer")
+    if generator.casefold() == reviewer.casefold():
+        raise ValueError("MISA synthetic fixture attestation reviewer must be independent")
+    if payload.get("approval_status") != "approved":
+        raise ValueError("MISA synthetic fixture attestation is not approved")
+    approved_at = _aware_timestamp(payload.get("approved_at_utc"), "approved_at_utc")
+    if approved_at > datetime.now(timezone.utc) + _CLOCK_SKEW:
+        raise ValueError("MISA synthetic fixture attestation approval is in the future")
+    for field, expected in {
+        "input_sha256": input_sha256,
+        "output_sha256": output_sha256,
+    }.items():
+        if payload.get(field) != expected:
+            raise ValueError(f"MISA synthetic fixture attestation {field} mismatch")
+    payload["synthetic_fixture_id"] = fixture_id
+    payload["generator"] = generator
+    payload["reviewer"] = reviewer
+    return payload
+
+
+def _validated_fixture_manifest_bytes(
+    contents: bytes,
+    *,
+    input_sha256: str,
+    output_sha256: str,
+    synthetic_fixture_id: str,
+) -> dict[str, Any]:
+    if len(contents) > _MAX_FIXTURE_MANIFEST_BYTES:
+        raise ValueError("MISA synthetic fixture manifest exceeds the size limit")
+    payload = _read_json_bytes(contents, "synthetic fixture manifest")
+    if set(payload) != {"schema_version", "fixture_version", "fixtures"}:
+        raise ValueError("MISA synthetic fixture manifest schema is invalid")
+    if payload.get("schema_version") != 2:
+        raise ValueError("MISA synthetic fixture manifest schema is invalid")
+    fixture_version = _non_placeholder_text(
+        payload.get("fixture_version"),
+        "fixture manifest version",
+    )
+    if not _MANIFEST_TOKEN_PATTERN.fullmatch(fixture_version):
+        raise ValueError("MISA synthetic fixture manifest version is invalid")
+    fixtures = payload.get("fixtures")
+    if not isinstance(fixtures, dict) or not 1 <= len(fixtures) <= 256:
+        raise ValueError("MISA synthetic fixture manifest fixtures are invalid")
+
+    entries_by_sha256: dict[str, list[dict[str, Any]]] = {}
+    required_fields = {
+        "sha256",
+        "path",
+        "source_kind",
+        "fixture_kind",
+        "privacy_classification",
+        "contains_customer_data",
+        "generator",
+        "reviewer",
+        "approval_status",
+        "approved_at_utc",
+        "synthetic_fixture_id",
+    }
+    optional_fields = {
+        "derived_from",
+        "target_template_id",
+        "template_sha256",
+        "row_count",
+        "column_count",
+    }
+    for name, entry in fixtures.items():
+        if (
+            not isinstance(name, str)
+            or not _MANIFEST_TOKEN_PATTERN.fullmatch(name)
+            or not isinstance(entry, dict)
+        ):
+            raise ValueError("MISA synthetic fixture manifest entry is invalid")
+        if not required_fields.issubset(entry) or not set(entry).issubset(
+            required_fields | optional_fields
+        ):
+            raise ValueError("MISA synthetic fixture manifest entry schema is invalid")
+        sha256 = entry.get("sha256")
+        if not isinstance(sha256, str) or not _SHA256_PATTERN.fullmatch(sha256):
+            raise ValueError("MISA synthetic fixture manifest SHA-256 is invalid")
+        path_text = entry.get("path")
+        if not isinstance(path_text, str) or "\\" in path_text or ":" in path_text:
+            raise ValueError("MISA synthetic fixture manifest path is not portable")
+        relative = PurePosixPath(path_text)
+        if relative.is_absolute() or ".." in relative.parts or not relative.parts:
+            raise ValueError("MISA synthetic fixture manifest path is not portable")
+        _assert_privacy_safe_value(path_text, kind="fixture manifest path", sensitive=False)
+        if entry.get("source_kind") != "deterministic_synthetic":
+            raise ValueError("MISA synthetic fixture manifest source kind is invalid")
+        if entry.get("fixture_kind") != "synthetic":
+            raise ValueError("MISA synthetic fixture manifest fixture kind is invalid")
+        if entry.get("privacy_classification") != "synthetic_no_customer_data":
+            raise ValueError("MISA synthetic fixture manifest privacy classification is invalid")
+        if entry.get("contains_customer_data") is not False:
+            raise ValueError("MISA synthetic fixture manifest permits customer data")
+        generator = _attestation_text(entry.get("generator"), "fixture manifest generator")
+        reviewer = _attestation_text(entry.get("reviewer"), "fixture manifest reviewer")
+        if generator.casefold() == reviewer.casefold():
+            raise ValueError("MISA synthetic fixture manifest reviewer must be independent")
+        if entry.get("approval_status") != "approved":
+            raise ValueError("MISA synthetic fixture manifest entry is not approved")
+        approved_at = _aware_timestamp(
+            entry.get("approved_at_utc"),
+            "fixture manifest approved_at_utc",
+        )
+        if approved_at > datetime.now(timezone.utc) + _CLOCK_SKEW:
+            raise ValueError("MISA synthetic fixture manifest approval is in the future")
+        fixture_id = _validated_synthetic_fixture_id(entry.get("synthetic_fixture_id"))
+        for field in ("derived_from", "target_template_id"):
+            if field in entry and (
+                not isinstance(entry[field], str)
+                or not _MANIFEST_TOKEN_PATTERN.fullmatch(entry[field])
+            ):
+                raise ValueError(f"MISA synthetic fixture manifest {field} is invalid")
+        if "template_sha256" in entry and (
+            not isinstance(entry["template_sha256"], str)
+            or not _SHA256_PATTERN.fullmatch(entry["template_sha256"])
+        ):
+            raise ValueError("MISA synthetic fixture manifest template SHA-256 is invalid")
+        for field in ("row_count", "column_count"):
+            value = entry.get(field)
+            if field in entry and (
+                isinstance(value, bool)
+                or not isinstance(value, int)
+                or not 0 <= value <= 1_000_000
+            ):
+                raise ValueError(f"MISA synthetic fixture manifest {field} is invalid")
+        normalized = dict(entry)
+        normalized["synthetic_fixture_id"] = fixture_id
+        entries_by_sha256.setdefault(sha256, []).append(normalized)
+
+    input_entries = entries_by_sha256.get(input_sha256, [])
+    output_entries = entries_by_sha256.get(output_sha256, [])
+    if len(input_entries) != 1 or len(output_entries) != 1:
+        raise ValueError("MISA synthetic fixture manifest does not approve the input and output")
+    if output_entries[0]["synthetic_fixture_id"] != synthetic_fixture_id:
+        raise ValueError("MISA synthetic fixture manifest output fixture ID mismatch")
+    return payload
+
+
+def _validated_synthetic_fixture_id(value: object) -> str:
+    fixture_id = _attestation_text(value, "synthetic_fixture_id")
+    if not _SYNTHETIC_FIXTURE_ID_PATTERN.fullmatch(fixture_id):
+        raise ValueError("MISA synthetic fixture attestation fixture ID is invalid")
+    return fixture_id
+
+
+def _attestation_text(value: object, field: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"MISA synthetic fixture attestation {field} is required")
+    text = value.strip()
+    if text.casefold() in _PLACEHOLDER_VALUES:
+        raise ValueError(f"MISA synthetic fixture attestation {field} is a placeholder")
+    return text
+
+
 def _assert_independent_evidence(evidence: Mapping[str, Mapping[str, Any]]) -> None:
     template_hash = evidence["template"]["sha256"]
     output_hash = evidence["output"]["sha256"]
@@ -450,14 +786,130 @@ def _assert_independent_evidence(evidence: Mapping[str, Mapping[str, Any]]) -> N
         raise ValueError("MISA certification evidence artifacts must be independent")
 
 
-def _validate_result_artifact(contents: bytes) -> None:
-    if len(contents) < 32:
-        raise ValueError("MISA import result artifact is too small")
-    text = contents.decode("utf-8", errors="ignore").strip().casefold()
+def _validate_result_artifact(contents: bytes, *, synthetic_fixture_id: str) -> None:
+    if len(contents) > _MAX_RESULT_RECEIPT_BYTES:
+        raise ValueError("MISA import result receipt exceeds the size limit")
+    payload = _read_json_bytes(contents, "import result receipt")
+    if (
+        set(payload) != _RESULT_RECEIPT_FIELDS
+        or payload.get("schema_version") != RESULT_RECEIPT_SCHEMA_VERSION
+    ):
+        raise ValueError("MISA import result receipt schema is invalid")
+    if (
+        payload.get("receipt_type") != "misa_import_receipt"
+        or payload.get("status") != "success"
+        or payload.get("redacted") is not True
+    ):
+        raise ValueError("MISA import result receipt is not a redacted success receipt")
+    if payload.get("synthetic_fixture_id") != synthetic_fixture_id:
+        raise ValueError("MISA import result receipt fixture attestation mismatch")
+    for field in ("imported_rows", "warnings_count"):
+        value = payload.get(field)
+        if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 1_000_000:
+            raise ValueError(f"MISA import result receipt {field} is invalid")
+    for value in payload.values():
+        if isinstance(value, str):
+            _assert_privacy_safe_value(value, kind="result receipt", sensitive=False)
+
+
+def _scan_fixture_privacy(item: Mapping[str, Any], *, kind: str) -> None:
+    contents = item["contents"]
+    suffix = item["suffix"]
+    if len(contents) > _MAX_WORKBOOK_BYTES:
+        raise ValueError(f"MISA certification {kind} privacy scan size limit exceeded")
+    try:
+        if suffix == ".xls":
+            metadata_scan = scan_ole_metadata(contents)
+            unsafe_metadata = (
+                metadata_scan.ole_property_value_count
+                or metadata_scan.ole_property_parse_error_count
+                or metadata_scan.unknown_ole_stream_count
+                or metadata_scan.unsafe_ole_stream_count
+                or metadata_scan.property_stream_residual_count
+            )
+            if unsafe_metadata:
+                raise ValueError(f"MISA certification {kind} privacy scan found workbook metadata")
+            _scan_biff_user_metadata(contents, kind=kind)
+            workbook = xlrd.open_workbook(file_contents=contents, on_demand=True)
+            for sheet in workbook.sheets():
+                _scan_tabular_rows(
+                    (sheet.row_values(index) for index in range(sheet.nrows)),
+                    kind=kind,
+                )
+        elif suffix in {".xlsx", ".xlsm"}:
+            workbook = openpyxl.load_workbook(
+                BytesIO(contents),
+                read_only=True,
+                data_only=False,
+            )
+            for value in vars(workbook.properties).values():
+                if isinstance(value, str):
+                    _assert_privacy_safe_value(value, kind=f"{kind} metadata", sensitive=False)
+            for sheet in workbook.worksheets:
+                _scan_tabular_rows(sheet.iter_rows(values_only=True), kind=kind)
+            workbook.close()
+        elif suffix in {".csv", ".tsv", ".txt"}:
+            text = contents.decode("utf-8-sig")
+            delimiter = "\t" if suffix == ".tsv" else ","
+            _scan_tabular_rows(csv.reader(StringIO(text), delimiter=delimiter), kind=kind)
+        else:
+            raise ValueError(f"MISA certification {kind} privacy scan format is unsupported")
+    except (UnicodeDecodeError, xlrd.XLRDError, OSError, ValueError) as exc:
+        if isinstance(exc, ValueError) and "privacy scan" in str(exc):
+            raise
+        raise ValueError(f"MISA certification {kind} privacy scan failed") from exc
+
+
+def _scan_biff_user_metadata(contents: bytes, *, kind: str) -> None:
+    for record in iter_biff_records(contents):
+        if record.record_id not in {0x005B, 0x005C}:
+            continue
+        ascii_decoded = record.payload.decode("latin-1", errors="ignore").strip(" \t\r\n\0")
+        values = {ascii_decoded} if ascii_decoded else set()
+        if record.payload.count(b"\0") * 4 >= len(record.payload):
+            decoded = record.payload.decode("utf-16le", errors="ignore").strip(" \t\r\n\0")
+            if decoded:
+                values.add(decoded)
+        if any(value.casefold() != "none" and not value.upper().startswith("SYN-") for value in values):
+            raise ValueError(f"MISA certification {kind} privacy scan found workbook user metadata")
+
+
+def _scan_tabular_rows(rows: Any, *, kind: str) -> None:
+    buffered = [tuple(row) for row in rows]
+    cell_count = sum(len(row) for row in buffered)
+    if cell_count > _MAX_SCANNED_CELLS:
+        raise ValueError(f"MISA certification {kind} privacy scan cell limit exceeded")
+    if not buffered:
+        return
+    header_index = max(
+        range(min(len(buffered), 50)),
+        key=lambda index: sum(
+            isinstance(value, str) and bool(value.strip()) for value in buffered[index]
+        ),
+    )
+    headers = [str(value or "").strip() for value in buffered[header_index]]
+    for row_index, row in enumerate(buffered):
+        for column_index, value in enumerate(row):
+            if value in (None, "") or row_index == header_index:
+                continue
+            header = headers[column_index] if column_index < len(headers) else ""
+            sensitive = row_index > header_index and bool(_SENSITIVE_HEADER_PATTERN.search(header))
+            _assert_privacy_safe_value(value, kind=kind, sensitive=sensitive)
+
+
+def _assert_privacy_safe_value(value: object, *, kind: str, sensitive: bool) -> None:
+    text = str(value).strip()
     if not text:
         return
-    if any(marker in text for marker in ("placeholder", "self-asserted", "todo evidence")):
-        raise ValueError("MISA import result artifact is a self-asserted placeholder")
+    synthetic = text.upper().startswith("SYN-") or "@example.invalid" in text.casefold()
+    if _PATH_PATTERN.search(text):
+        raise ValueError(f"MISA certification {kind} privacy scan found a filesystem path")
+    if _EMAIL_PATTERN.search(text) and not synthetic:
+        raise ValueError(f"MISA certification {kind} privacy scan found an email address")
+    if _CUSTOMER_MARKER_PATTERN.search(text) and not synthetic:
+        raise ValueError(f"MISA certification {kind} privacy scan found a customer marker")
+    if sensitive and not synthetic:
+        raise ValueError(f"MISA certification {kind} privacy scan found non-synthetic identity data")
 
 
 def _validate_certification_window(
@@ -535,6 +987,8 @@ def _main(argv: list[str] | None = None) -> int:
     create.add_argument("--output", required=True)
     create.add_argument("--import-result", required=True)
     create.add_argument("--result-artifact", required=True)
+    create.add_argument("--fixture-attestation", required=True)
+    create.add_argument("--fixture-manifest", required=True)
     create.add_argument("--artifact-dir", required=True)
     create.add_argument("--expires-at", required=True)
     create.add_argument("--notes")
@@ -547,6 +1001,8 @@ def _main(argv: list[str] | None = None) -> int:
             output_path=Path(args.output),
             import_result_path=Path(args.import_result),
             result_artifact_path=Path(args.result_artifact),
+            fixture_attestation_path=Path(args.fixture_attestation),
+            fixture_manifest_path=Path(args.fixture_manifest),
             artifact_dir=Path(args.artifact_dir),
             expires_at_utc=args.expires_at,
             notes=args.notes,

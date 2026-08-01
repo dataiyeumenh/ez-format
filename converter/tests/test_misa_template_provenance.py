@@ -129,22 +129,91 @@ def _mutate_first_biff_record(contents: bytes, record_id: int, mutate) -> bytes:
 
 
 def _create_test_certification(template, certification_dir: Path, tmp_path: Path) -> None:
+    fixture_id = f"synthetic-{template.id}-provenance-test-001"
     input_path = tmp_path / f"{template.id}-input.csv"
     input_path.write_text("document\nSYN-CERT-001\n", encoding="utf-8")
     output_path = tmp_path / f"{template.id}-output.xls"
     write_xls_from_template(template.workbook, [{}], output_path)
-    result_artifact_path = tmp_path / f"{template.id}-misa-result.txt"
+    result_artifact_path = tmp_path / f"{template.id}-misa-receipt.json"
     result_artifact_path.write_text(
-        "MISA controlled import result\nstatus=success\nimported_rows=1\n",
+        json.dumps(
+            {
+                "schema_version": 1,
+                "receipt_type": "misa_import_receipt",
+                "status": "success",
+                "redacted": True,
+                "synthetic_fixture_id": fixture_id,
+                "imported_rows": 1,
+                "warnings_count": 0,
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    fixture_attestation_path = tmp_path / f"{template.id}-fixture-attestation.json"
+    fixture_attestation_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "synthetic_fixture_id": fixture_id,
+                "fixture_kind": "synthetic",
+                "privacy_classification": "synthetic_no_customer_data",
+                "contains_customer_data": False,
+                "generator": "converter/tests/test_misa_template_provenance.py",
+                "reviewer": "provenance-fixture-reviewer",
+                "approval_status": "approved",
+                "approved_at_utc": (
+                    datetime.now(timezone.utc) - timedelta(days=1)
+                ).isoformat(),
+                "input_sha256": hashlib.sha256(input_path.read_bytes()).hexdigest(),
+                "output_sha256": hashlib.sha256(output_path.read_bytes()).hexdigest(),
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    fixture_manifest_path = tmp_path / f"{template.id}-fixture-manifest.json"
+    common_manifest_fields = {
+        "source_kind": "deterministic_synthetic",
+        "fixture_kind": "synthetic",
+        "privacy_classification": "synthetic_no_customer_data",
+        "contains_customer_data": False,
+        "generator": "converter/tests/test_misa_template_provenance.py",
+        "reviewer": "provenance-fixture-reviewer",
+        "approval_status": "approved",
+        "approved_at_utc": (datetime.now(timezone.utc) - timedelta(days=1)).isoformat(),
+    }
+    fixture_manifest_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "fixture_version": "pytest-provenance-1",
+                "fixtures": {
+                    f"{template.id}_input": {
+                        **common_manifest_fields,
+                        "sha256": hashlib.sha256(input_path.read_bytes()).hexdigest(),
+                        "path": f"converter/fixtures/certification-tests/{template.id}-input.csv",
+                        "synthetic_fixture_id": f"synthetic-{template.id}-provenance-input-001",
+                    },
+                    f"{template.id}_output": {
+                        **common_manifest_fields,
+                        "sha256": hashlib.sha256(output_path.read_bytes()).hexdigest(),
+                        "path": f"converter/fixtures/certification-tests/{template.id}-output.xls",
+                        "synthetic_fixture_id": fixture_id,
+                    },
+                },
+            },
+            sort_keys=True,
+        ),
         encoding="utf-8",
     )
     import_result_path = tmp_path / f"{template.id}-misa-result.json"
     import_result_path.write_text(
         json.dumps(
             {
-                "schema_version": 2,
+                "schema_version": 3,
                 "evidence_origin": "misa_sandbox_import",
-                "result_artifact_kind": "misa_import_log",
+                "result_artifact_kind": "redacted_json_receipt",
                 "status": "misa_import_passed",
                 "template_sha256": template.sha256,
                 "output_sha256": hashlib.sha256(output_path.read_bytes()).hexdigest(),
@@ -152,6 +221,11 @@ def _create_test_certification(template, certification_dir: Path, tmp_path: Path
                 "result_artifact_sha256": hashlib.sha256(
                     result_artifact_path.read_bytes()
                 ).hexdigest(),
+                "fixture_attestation_sha256": hashlib.sha256(
+                    fixture_attestation_path.read_bytes()
+                ).hexdigest(),
+                "synthetic_fixture_id": fixture_id,
+                "privacy_classification": "synthetic_no_customer_data",
                 "misa_product": "AMIS Ke toan",
                 "misa_release": "sandbox-2026-07",
                 "completed_at_utc": (
@@ -177,6 +251,8 @@ def _create_test_certification(template, certification_dir: Path, tmp_path: Path
         output_path=output_path,
         import_result_path=import_result_path,
         result_artifact_path=result_artifact_path,
+        fixture_attestation_path=fixture_attestation_path,
+        fixture_manifest_path=fixture_manifest_path,
         artifact_dir=certification_dir,
         expires_at_utc=(datetime.now(timezone.utc) + timedelta(days=90)).isoformat(),
     )
@@ -563,16 +639,22 @@ def test_production_trust_env_must_exactly_match_manifest_vocabulary(monkeypatch
         get_misa_template("bsn_sales")
 
 
-def test_production_release_fails_until_every_template_has_certification(monkeypatch):
+def test_production_release_fails_until_every_template_has_certification(
+    tmp_path,
+    monkeypatch,
+):
     monkeypatch.setenv("NODE_ENV", "production")
     monkeypatch.setenv("MISA_TEMPLATE_ACCEPTED_TRUST_LEVELS", "partner_sample_derived")
+    monkeypatch.setenv("MISA_TEMPLATE_CERTIFICATION_DIR", str(tmp_path / "missing"))
 
     with pytest.raises(RuntimeError, match="certification evidence"):
         misa_templates.verify_all_misa_templates(require_export_safe=True)
 
 
-def test_release_capability_cli_fails_closed_for_current_writer():
+def test_release_capability_cli_fails_closed_for_current_writer(tmp_path):
     converter_root = CONVERSION_TYPES["sales_goods"].template_path.parents[2]
+    env = dict(os.environ)
+    env["MISA_TEMPLATE_CERTIFICATION_DIR"] = str(tmp_path / "missing")
     result = subprocess.run(
         [
             sys.executable,
@@ -582,6 +664,7 @@ def test_release_capability_cli_fails_closed_for_current_writer():
             "--require-export-safe",
         ],
         cwd=converter_root,
+        env=env,
         capture_output=True,
         text=True,
         check=False,
@@ -658,6 +741,7 @@ def test_verifier_checks_every_supported_template():
 
     assert verifier is not None
     assert set(verifier()) == set(CONVERSION_TYPES)
+    assert set(verifier(require_export_safe=True)) == set(CONVERSION_TYPES)
 
 
 @pytest.mark.parametrize("failure", ["missing_manifest", "hash_mismatch"])
