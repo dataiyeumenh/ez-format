@@ -44,29 +44,50 @@ MASTER_DATA_CONTEXT_CACHE_SECONDS=300
 MAPPING_PROFILE_TIMEOUT_SECONDS=15
 MISA_TEMPLATE_DIR=fixtures/templates
 MISA_TEMPLATE_MANIFEST_PATH=config/misa-template-manifest.json
+MISA_TEMPLATE_CERTIFICATION_DIR=config/misa-template-certifications
 MISA_TEMPLATE_ACCEPTED_TRUST_LEVELS=partner_sample_derived
 ```
 
-Package both configured paths in the converter deployment image. Relative paths
+Package the template, manifest, and certification paths in the converter deployment image. Relative paths
 resolve from the converter directory. Startup verifies canonical filenames,
 SHA-256 values, sheet names, header rows, column counts, and ordered headers for
-every export target; a missing or mismatched template/manifest prevents startup.
-Production also fails closed unless every template's reviewed trust level is in
+each template capability. Production fails closed unless every template's reviewed trust level is in
 `MISA_TEMPLATE_ACCEPTED_TRUST_LEVELS`. The committed templates are scrubbed
 structural derivatives of partner samples. Raw customer rows and unreferenced
-BIFF shared strings are absent from the current template files. OLE summary author
-properties and BIFF write-access/file-sharing usernames are also blanked.
+BIFF shared strings are absent from the current template files. OLE summary/custom
+properties and BIFF write-access/file-sharing usernames are blanked. Property-stream
+padding must exactly match canonical bytes. Unknown OLE streams, external/DDE links,
+macro sheets, unsafe formulas, and active content fail closed; reviewed auxiliary
+binary streams use an explicit hash allowlist.
 Acquisition date, MISA product, and MISA release are unknown; these files are not
 claimed to be official MISA downloads. Historical commits may contain predecessor
 bytes; history rewriting requires a separate authorized operation. Do not point
 production at an unreviewed local template folder.
 
-The current `xlutils.copy` exporter does not preserve formulas, defined names,
-drawings/objects, or data validations. The manifest records byte-level probes for
-those features. Run `python -m app.misa_templates verify --require-export-safe`
-before release. Current feature-bearing templates deliberately fail that gate,
-and `NODE_ENV=production` fails startup for the same reason. Do not bypass the
-gate; deploy a BIFF-preserving writer first. Excel COM is not a Render dependency.
+The service remains healthy but degraded when one certification is missing. Health,
+template API, and actual export use the same per-template capability: an uncertified
+selected template cannot export in production, development, or test. No application
+environment bypass exists. Pytest fixtures may monkeypatch the private capability
+boundary; this does not alter API registry truth. Certification schema/version,
+template/input/output/result hashes, MISA
+product/release, import status, independent result artifact, reviewer/approver,
+writer build SHA-256, provenance vocabulary, issuance/expiry, and revocation state
+are mandatory. The writer hash binds writer source, `requirements.txt`, resolved
+writer dependency versions, and Python major/minor. Evidence is copied content-addressed beneath
+`MISA_TEMPLATE_CERTIFICATION_DIR` with relative paths. Use synthetic input only;
+package the read-only directory with the converter, never S3.
+
+From `converter/`, provision with the exact command documented in
+`converter/README.md`, then run:
+
+```powershell
+python -m app.misa_templates verify
+python -m app.misa_templates verify --require-export-safe
+```
+
+The first command verifies provenance/privacy. The second must exit `0` only when
+all required templates are live-export capable. Current repository state is not
+production-ready. Excel COM is not a Render dependency.
 
 Before deployment, run `python -m app.misa_templates verify` from `converter/`.
 For an intentional rotation, use the documented `regenerate-manifest` and

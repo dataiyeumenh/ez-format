@@ -14,6 +14,7 @@ from typing import Any
 
 from app.conversion_types import BACKEND_ROOT, CONVERSION_TYPES
 from app.excel_io import TemplateWorkbook, read_template
+from app.misa_certification import validate_manual_certification_record
 from app.misa_biff import (
     advanced_biff_feature_names,
     iter_biff_records,
@@ -28,6 +29,7 @@ from app.misa_biff import (
 
 DEFAULT_TEMPLATE_DIR = BACKEND_ROOT / "fixtures" / "templates"
 DEFAULT_MANIFEST_PATH = BACKEND_ROOT / "config" / "misa-template-manifest.json"
+DEFAULT_CERTIFICATION_DIR = BACKEND_ROOT / "config" / "misa-template-certifications"
 MANIFEST_SCHEMA_VERSION = 3
 _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 _TRUST_LEVEL_PATTERN = re.compile(r"^[a-z][a-z0-9_-]{1,63}$")
@@ -61,6 +63,10 @@ DISPLAY_FILENAMES = {
 
 
 class MisaTemplateProvenanceError(RuntimeError):
+    pass
+
+
+class MisaTemplateCapabilityError(MisaTemplateProvenanceError):
     pass
 
 
@@ -98,6 +104,7 @@ class MisaTemplate:
     sha256: str
     path: Path
     workbook: TemplateWorkbook
+    trust: TemplateTrustMetadata
 
     @property
     def sheet_name(self) -> str:
@@ -116,6 +123,17 @@ class MisaTemplate:
         return self.workbook.headers
 
 
+@dataclass(frozen=True)
+class TemplateCapability:
+    template_id: str
+    available: bool
+    capability_status: str
+    unavailable_reason: str | None
+    template: MisaTemplate | None
+    advanced_biff_features: tuple[str, ...]
+    certification_sha256: str | None
+
+
 def configured_template_dir() -> Path:
     configured = os.getenv("MISA_TEMPLATE_DIR", "").strip()
     return _configured_path(configured, DEFAULT_TEMPLATE_DIR)
@@ -124,6 +142,11 @@ def configured_template_dir() -> Path:
 def configured_manifest_path() -> Path:
     configured = os.getenv("MISA_TEMPLATE_MANIFEST_PATH", "").strip()
     return _configured_path(configured, DEFAULT_MANIFEST_PATH)
+
+
+def configured_certification_dir() -> Path:
+    configured = os.getenv("MISA_TEMPLATE_CERTIFICATION_DIR", "").strip()
+    return _configured_path(configured, DEFAULT_CERTIFICATION_DIR)
 
 
 def template_path_for(template_id: str) -> Path:
@@ -146,7 +169,7 @@ def get_misa_template(
         template_id,
         path,
         provenance,
-        require_export_safe=(require_export_safe or _is_production()),
+        require_export_safe=require_export_safe,
     )
     definition = CONVERSION_TYPES[template_id]
     return MisaTemplate(
@@ -156,11 +179,94 @@ def get_misa_template(
         sha256=provenance.sha256,
         path=path,
         workbook=workbook,
+        trust=provenance.trust,
     )
+
+
+def get_misa_template_for_export(template_id: str) -> MisaTemplate:
+    return get_misa_template(template_id, require_export_safe=True)
 
 
 def list_misa_templates() -> list[MisaTemplate]:
     return [get_misa_template(template_id) for template_id in CONVERSION_TYPES]
+
+
+def template_capability_registry() -> dict[str, TemplateCapability]:
+    registry: dict[str, TemplateCapability] = {}
+    for template_id in CONVERSION_TYPES:
+        try:
+            template = get_misa_template(template_id)
+            scan = scan_misa_template_content(
+                template.workbook.file_contents,
+                header_row_index=template.workbook.header_row_index,
+            )
+            if not scan.clean:
+                raise MisaTemplateProvenanceError(
+                    "MISA template contains post-header or residual binary values: "
+                    f"{template_id}"
+                )
+        except MisaTemplateProvenanceError as exc:
+            registry[template_id] = TemplateCapability(
+                template_id=template_id,
+                available=False,
+                capability_status="unavailable",
+                unavailable_reason=str(exc),
+                template=None,
+                advanced_biff_features=(),
+                certification_sha256=None,
+            )
+            continue
+
+        advanced_features = advanced_biff_feature_names(
+            probe_biff_features(template.workbook.file_contents)
+        )
+        try:
+            certification_path, certification_payload = _validated_certification(
+                template_id,
+                template.sha256,
+                template.trust,
+            )
+        except (OSError, ValueError) as exc:
+            registry[template_id] = TemplateCapability(
+                template_id=template_id,
+                available=False,
+                capability_status="uncertified",
+                unavailable_reason=(
+                    f"MISA template certification evidence unavailable for {template_id}: {exc}"
+                ),
+                template=template,
+                advanced_biff_features=advanced_features,
+                certification_sha256=None,
+            )
+            continue
+
+        registry[template_id] = TemplateCapability(
+            template_id=template_id,
+            available=True,
+            capability_status="certified",
+            unavailable_reason=None,
+            template=template,
+            advanced_biff_features=advanced_features,
+            certification_sha256=hashlib.sha256(certification_path.read_bytes()).hexdigest(),
+        )
+        if certification_payload["template"]["sha256"] != template.sha256:
+            raise AssertionError("validated certification template hash changed")
+    return registry
+
+
+def template_health_payload() -> dict[str, Any]:
+    registry = template_capability_registry()
+    unavailable = {
+        template_id: capability.unavailable_reason
+        for template_id, capability in registry.items()
+        if not capability.available
+    }
+    return {
+        "status": "degraded" if unavailable else "ready",
+        "required_count": len(registry),
+        "available_count": len(registry) - len(unavailable),
+        "unavailable": unavailable,
+    }
 
 
 def verify_all_misa_templates(
@@ -530,16 +636,45 @@ def _is_production() -> bool:
     return os.getenv("NODE_ENV", "").strip().lower() == "production"
 
 
-def _enforce_biff_export_capability(
+def _enforce_export_capability(
     template_id: str,
+    template_sha256: str,
     probe: dict[str, dict[str, int | str]],
+    trust: TemplateTrustMetadata,
 ) -> None:
     unsupported = advanced_biff_feature_names(probe)
-    if unsupported:
-        raise MisaTemplateProvenanceError(
-            "MISA template BIFF preservation is unavailable with the current "
-            f"xlutils.copy writer for {template_id}: {', '.join(unsupported)}"
+    try:
+        _validated_certification(template_id, template_sha256, trust)
+    except (OSError, ValueError) as exc:
+        biff_reason = (
+            f"; BIFF preservation requires manual import evidence for: {', '.join(unsupported)}"
+            if unsupported
+            else ""
         )
+        raise MisaTemplateCapabilityError(
+            f"MISA template certification evidence unavailable for {template_id}{biff_reason}: {exc}"
+        ) from exc
+
+
+def _validated_certification(
+    template_id: str,
+    template_sha256: str,
+    trust: TemplateTrustMetadata,
+) -> tuple[Path, dict[str, Any]]:
+    certification_path = (
+        configured_certification_dir() / f"{template_id}_misa_certification.json"
+    )
+    payload = validate_manual_certification_record(
+        certification_path,
+        conversion_type=template_id,
+        template_sha256=template_sha256,
+        template_provenance={
+            "source_kind": trust.source_kind,
+            "trust_level": trust.trust_level,
+            "official_status": trust.official_status,
+        },
+    )
+    return certification_path, payload
 
 
 def _load_manifest(manifest_path: Path) -> dict[str, Any]:
@@ -563,7 +698,33 @@ def _load_manifest(manifest_path: Path) -> dict[str, Any]:
         raise MisaTemplateProvenanceError(
             "MISA template manifest template IDs do not match supported template IDs"
         )
+    _enforce_manifest_production_trust(templates)
     return manifest
+
+
+def _enforce_manifest_production_trust(templates: dict[str, Any]) -> None:
+    if not _is_production():
+        return
+    try:
+        manifest_levels = {
+            entry["provenance"]["trust_level"].strip()
+            for entry in templates.values()
+            if isinstance(entry["provenance"]["trust_level"], str)
+            and entry["provenance"]["trust_level"].strip()
+        }
+    except (KeyError, TypeError) as exc:
+        raise MisaTemplateProvenanceError(
+            "MISA template manifest trust vocabulary is invalid"
+        ) from exc
+    accepted = {
+        item.strip()
+        for item in os.getenv("MISA_TEMPLATE_ACCEPTED_TRUST_LEVELS", "").split(",")
+        if item.strip()
+    }
+    if accepted != manifest_levels:
+        raise MisaTemplateProvenanceError(
+            "MISA template accepted trust levels must exactly match manifest trust levels"
+        )
 
 
 def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -623,7 +784,12 @@ def _verified_workbook(
             f"MISA template BIFF feature probe mismatch for {template_id}"
         )
     if require_export_safe:
-        _enforce_biff_export_capability(template_id, actual_biff_features)
+        _enforce_export_capability(
+            template_id,
+            provenance.sha256,
+            actual_biff_features,
+            provenance.trust,
+        )
     return workbook
 
 
@@ -702,7 +868,7 @@ def _main(argv: list[str] | None = None) -> int:
 
 
 if _is_production():
-    verify_all_misa_templates(require_export_safe=True)
+    verify_all_misa_templates()
 
 
 if __name__ == "__main__":

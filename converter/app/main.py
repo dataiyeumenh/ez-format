@@ -71,6 +71,7 @@ from app.misa_workflow import (
     sync_mapping_session,
     templates_payload,
 )
+from app.misa_templates import MisaTemplateCapabilityError, template_health_payload
 from app.internal_auth import (
     assert_secure_production_config,
     bind_local_mode_request,
@@ -225,6 +226,14 @@ async def validation_exception_handler(
     )
 
 
+@app.exception_handler(MisaTemplateCapabilityError)
+async def misa_template_capability_exception_handler(
+    request: Request,
+    exc: MisaTemplateCapabilityError,
+) -> JSONResponse:
+    return JSONResponse(status_code=503, content={"detail": str(exc)})
+
+
 def _get_cors_origins() -> list[str]:
     """Read allowed origins from CORS_ORIGINS env var (comma-separated).
     Use CORS_ORIGINS=* to allow all origins (e.g. when tunnelling via ngrok).
@@ -256,9 +265,15 @@ EXCEL_MEDIA_TYPE = "application/vnd.ms-excel"
 def healthz() -> dict[str, object]:
     ai_provider = os.getenv("AI_PROVIDER", "disabled").strip().lower()
     ai_status = "disabled" if ai_provider == "disabled" else _ai_runtime_status()
+    misa_template_health = template_health_payload()
     return {
-        "status": "ok",
+        "status": (
+            "degraded"
+            if misa_template_health["status"] != "ready"
+            else "ok"
+        ),
         "ai": ai_status,
+        "misa_templates": misa_template_health,
         "capabilities": {
             "converter": True,
             "operations": True,

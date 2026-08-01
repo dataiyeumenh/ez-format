@@ -11,7 +11,7 @@ from app.conversion_types import CONVERSION_TYPES
 from app.excel_io import InputTable, write_xls_from_template
 from app.master_data_resolver import resolve_master_data
 from app.misa_readiness import add_master_data_resolutions, build_readiness_report
-from app.misa_templates import get_misa_template
+from app.misa_templates import get_misa_template, get_misa_template_for_export
 from app.voucher_models import VoucherDraft
 
 
@@ -164,7 +164,7 @@ def export_template_rows(
     with tempfile.TemporaryDirectory(prefix="ezformat-reconstruction-") as temp:
         root = Path(temp)
         for template_id, payload in template_payloads.items():
-            template = get_misa_template(template_id)
+            template = get_misa_template_for_export(template_id)
             filename = f"Import MISA {template_id} {reconstruction_id[:8]}.xls"
             path = root / filename
             write_xls_from_template(template.workbook, payload.get("rows") or [], path)

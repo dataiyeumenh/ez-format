@@ -1,16 +1,33 @@
 from pathlib import Path
 
 import openpyxl
+import pytest
 import xlrd
 
+from app import misa_templates
 from app.conversion_types import CONVERSION_TYPES
-from app.converter import convert_file, validate_file
+from app.converter import convert_file, export_rows, validate_file
 from app.excel_io import find_header_row, read_template
 
 
 ROOT = Path(__file__).resolve().parents[1]
 SAMPLES = ROOT / "fixtures" / "samples"
 TEMPLATES = ROOT / "fixtures" / "templates"
+_REAL_EXPORT_CAPABILITY = misa_templates._enforce_export_capability
+
+
+@pytest.fixture(autouse=True)
+def _allow_uncertified_test_exports(monkeypatch):
+    monkeypatch.setattr(misa_templates, "_enforce_export_capability", lambda *args: None)
+
+
+@pytest.fixture
+def _enforce_real_export_capability(monkeypatch, _allow_uncertified_test_exports):
+    monkeypatch.setattr(
+        misa_templates,
+        "_enforce_export_capability",
+        _REAL_EXPORT_CAPABILITY,
+    )
 
 
 def _header_map(sheet):
@@ -81,6 +98,24 @@ def test_purchase_template_is_exposed_but_sales_input_is_blocked():
     assert report.ok is False
     assert any(error.field == "supplier_code" for error in report.errors)
     assert any(error.field == "purchase_receipt" for error in report.errors)
+
+
+@pytest.mark.parametrize("environment", ["test", "development", "production"])
+def test_legacy_environment_bypass_cannot_export_uncertified_template(
+    tmp_path,
+    monkeypatch,
+    _enforce_real_export_capability,
+    environment,
+):
+    monkeypatch.setenv("NODE_ENV", environment)
+    monkeypatch.setenv("MISA_EXPORT_CERTIFICATION_BYPASS", "true")
+    monkeypatch.setenv("MISA_TEMPLATE_ACCEPTED_TRUST_LEVELS", "partner_sample_derived")
+    monkeypatch.setenv("MISA_TEMPLATE_CERTIFICATION_DIR", str(tmp_path / "certifications"))
+
+    with pytest.raises(RuntimeError, match="certification evidence"):
+        export_rows("bsn_sales", [{}], tmp_path / "blocked.xls")
+
+    assert not (tmp_path / "blocked.xls").exists()
 
 
 def test_convert_raw_sales_to_bsn_sales_xls_matches_golden_key_fields(tmp_path):

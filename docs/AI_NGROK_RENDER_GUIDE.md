@@ -93,6 +93,7 @@ E:\0. EXE2\ez-format\.artifacts\ngrok-ai\vps-ai.env
 ```env
 MISA_TEMPLATE_DIR=fixtures/templates
 MISA_TEMPLATE_MANIFEST_PATH=config/misa-template-manifest.json
+MISA_TEMPLATE_CERTIFICATION_DIR=config/misa-template-certifications
 MISA_TEMPLATE_ACCEPTED_TRUST_LEVELS=partner_sample_derived
 MAPPING_DB_PATH=data/mapping_profiles.sqlite
 
@@ -110,10 +111,22 @@ dự án không tuyên bố đây là file tải từ nguồn MISA chính thức
 thể còn byte tiền nhiệm; rewrite lịch sử cần một thao tác được phê duyệt riêng.
 
 `xlutils.copy` hiện không giữ được formula, defined name, drawing/object và data
-validation trong BIFF `.xls`. Chạy
-`python -m app.misa_templates verify --require-export-safe` trước release.
-Template có các record này sẽ làm production fail-closed; không có cơ chế bypass
-và không phụ thuộc Excel COM trên Render.
+validation trong BIFF `.xls`. Service vẫn chạy ở trạng thái degraded nếu thiếu chứng
+nhận; health/template API và export dùng cùng capability theo từng template. Export
+template chưa chứng nhận bị chặn ở mọi environment. Không có application env bypass;
+pytest chỉ monkeypatch private capability boundary trong fixture. Chạy từ `converter/`:
+
+```powershell
+python -m app.misa_templates verify
+python -m app.misa_templates verify --require-export-safe
+```
+
+Gate release yêu cầu bundle evidence content-addressed, relative-path cho đủ bảy
+template: template/input/output/result hashes, MISA product/release, import status,
+result artifact độc lập, reviewer/approver, writer build SHA-256, provenance,
+issued/expires/revocation. Writer hash bind source, `requirements.txt`, resolved
+writer dependency versions và Python major/minor. Dùng input synthetic; package bundle read-only cùng
+converter, không lưu S3. Không phụ thuộc Excel COM trên Render.
 
 Không đưa `AI_TOKEN` lên Vercel frontend.
 

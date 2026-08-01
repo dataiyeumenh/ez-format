@@ -1,9 +1,12 @@
 import hashlib
+from io import BytesIO
 import json
 from datetime import datetime
 from pathlib import Path
 
 import openpyxl
+import olefile
+import pytest
 import xlrd
 
 from app import misa_biff, misa_templates
@@ -56,6 +59,11 @@ def _accepted_trust_levels(path: Path) -> set[str]:
     return {value.strip() for value in line[len(prefix) :].split(",") if value.strip()}
 
 
+@pytest.fixture
+def _allow_uncertified_test_exports(monkeypatch):
+    monkeypatch.setattr(misa_templates, "_enforce_export_capability", lambda *args: None)
+
+
 def test_converter_fixture_manifest_pins_only_deterministic_synthetic_samples():
     manifest = json.loads(FIXTURE_MANIFEST.read_text(encoding="utf-8"))
 
@@ -73,7 +81,10 @@ def test_converter_fixture_manifest_pins_only_deterministic_synthetic_samples():
         assert entry["sha256"] == _sha256(path)
 
 
-def test_fixture_generator_reproduces_committed_hashes(tmp_path):
+def test_fixture_generator_reproduces_committed_hashes(
+    tmp_path,
+    _allow_uncertified_test_exports,
+):
     expected = json.loads(FIXTURE_MANIFEST.read_text(encoding="utf-8"))
     generated = generate_fixtures(
         tmp_path / "samples",
@@ -142,3 +153,107 @@ def test_root_and_converter_env_accept_manifest_trust_vocabulary():
     assert manifest_levels == {"partner_sample_derived"}
     assert _accepted_trust_levels(REPOSITORY_ROOT / ".env.example") == manifest_levels
     assert _accepted_trust_levels(ROOT / ".env.example") == manifest_levels
+
+
+def test_ole_scanner_fails_closed_on_future_unknown_stream(monkeypatch):
+    original_listdir = olefile.OleFileIO.listdir
+
+    def listdir_with_unknown(self, *args, **kwargs):
+        return original_listdir(self, *args, **kwargs) + [["FutureMetadata"]]
+
+    monkeypatch.setattr(olefile.OleFileIO, "listdir", listdir_with_unknown)
+    contents = (FIXTURES / "templates" / "bsn_sales.xls").read_bytes()
+
+    scan = misa_biff.scan_ole_metadata(contents)
+
+    assert scan.unknown_ole_stream_count == 1
+    assert not scan.clean
+
+
+def test_ole_scanner_rejects_ambiguous_duplicate_workbook_stream(monkeypatch):
+    original_listdir = olefile.OleFileIO.listdir
+
+    def listdir_with_second_workbook(self, *args, **kwargs):
+        return original_listdir(self, *args, **kwargs) + [["Book"]]
+
+    monkeypatch.setattr(olefile.OleFileIO, "listdir", listdir_with_second_workbook)
+    contents = (FIXTURES / "templates" / "bsn_sales.xls").read_bytes()
+
+    scan = misa_biff.scan_ole_metadata(contents)
+
+    assert scan.unsafe_ole_stream_count == 1
+    assert not scan.clean
+
+
+def test_ole_scanner_rejects_non_allowlisted_binary_stream_content(monkeypatch):
+    original_openstream = olefile.OleFileIO.openstream
+
+    def openstream_with_customer_text(self, filename):
+        stream_name = "/".join(filename) if isinstance(filename, (list, tuple)) else filename
+        if stream_name == "\x01CompObj":
+            return BytesIO(b"Customer User Name")
+        return original_openstream(self, filename)
+
+    monkeypatch.setattr(olefile.OleFileIO, "openstream", openstream_with_customer_text)
+    contents = (FIXTURES / "templates" / "purchase_goods.xls").read_bytes()
+
+    scan = misa_biff.scan_ole_metadata(contents)
+
+    assert scan.unsafe_ole_stream_count == 1
+    assert not scan.clean
+
+
+def test_ole_scanner_includes_custom_document_properties(monkeypatch):
+    monkeypatch.setattr(
+        olefile.OleFileIO,
+        "get_userdefined_properties",
+        lambda *args, **kwargs: [{"property_name": "Customer", "value": "User Name"}],
+    )
+    contents = (FIXTURES / "templates" / "sales_goods.xls").read_bytes()
+
+    scan = misa_biff.scan_ole_metadata(contents)
+
+    assert scan.ole_property_value_count >= 2
+    assert not scan.clean
+
+
+def test_ole_scanner_rejects_property_stream_padding_markers(monkeypatch):
+    original_openstream = olefile.OleFileIO.openstream
+    marker = b"CUSTOMER-PADDING-MARKER"
+
+    def openstream_with_padding_marker(self, filename):
+        stream_name = "/".join(filename) if isinstance(filename, (list, tuple)) else filename
+        stream = original_openstream(self, filename)
+        if stream_name != "\x05SummaryInformation":
+            return stream
+        contents = stream.read()
+        return BytesIO(contents[: -len(marker)] + marker)
+
+    monkeypatch.setattr(olefile.OleFileIO, "openstream", openstream_with_padding_marker)
+    contents = (FIXTURES / "templates" / "sales_goods.xls").read_bytes()
+
+    scan = misa_biff.scan_ole_metadata(contents)
+
+    assert scan.property_stream_residual_count == 1
+    assert not scan.clean
+
+
+def test_ole_scanner_rejects_property_stream_structural_markers(monkeypatch):
+    original_openstream = olefile.OleFileIO.openstream
+
+    def openstream_with_structural_marker(self, filename):
+        stream_name = "/".join(filename) if isinstance(filename, (list, tuple)) else filename
+        stream = original_openstream(self, filename)
+        if stream_name != "\x05SummaryInformation":
+            return stream
+        contents = bytearray(stream.read())
+        contents[28:44] = b"CUSTOMER-MARKER!"
+        return BytesIO(bytes(contents))
+
+    monkeypatch.setattr(olefile.OleFileIO, "openstream", openstream_with_structural_marker)
+    contents = (FIXTURES / "templates" / "sales_goods.xls").read_bytes()
+
+    scan = misa_biff.scan_ole_metadata(contents)
+
+    assert scan.property_stream_residual_count == 1
+    assert not scan.clean

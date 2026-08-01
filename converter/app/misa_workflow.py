@@ -18,7 +18,7 @@ from app.ai_mapping_client import (
     ai_required,
     request_mapping_suggestion,
 )
-from app.conversion_types import BACKEND_ROOT
+from app.conversion_types import BACKEND_ROOT, CONVERSION_TYPES
 from app.excel_io import InputTable, read_input_table, write_xls_from_template
 from app.export_manifest import build_export_manifest
 from app.misa_mapping import (
@@ -65,7 +65,11 @@ from app.mapping_profile_v2 import (
 from app.mapping_semantics import validate_mapping_semantics
 from app.misa_readiness import add_master_data_resolutions, build_readiness_report
 from app.misa_profiles import ProfileStore, local_mapping_owner_scope
-from app.misa_templates import get_misa_template, list_misa_templates
+from app.misa_templates import (
+    get_misa_template,
+    get_misa_template_for_export,
+    template_capability_registry,
+)
 from app.models import ExportManifestV1, MisaReadinessReport
 from app.normalization import normalize_header
 from app.operation_store import (
@@ -123,18 +127,24 @@ class _ResolvedConfirmedExport:
 
 
 def templates_payload() -> dict[str, Any]:
+    registry = template_capability_registry()
     return {
         "items": [
             {
-                "id": template.id,
-                "label": template.label,
-                "filename": template.filename,
-                "sheet_name": template.sheet_name,
-                "header_row": template.header_row,
-                "data_start_row": template.data_start_row,
-                "headers": template.headers,
+                "id": template_id,
+                "label": CONVERSION_TYPES[template_id].label,
+                "filename": capability.template.filename if capability.template else None,
+                "sheet_name": capability.template.sheet_name if capability.template else None,
+                "header_row": capability.template.header_row if capability.template else None,
+                "data_start_row": capability.template.data_start_row if capability.template else None,
+                "headers": capability.template.headers if capability.template else [],
+                "available": capability.available,
+                "capability_status": capability.capability_status,
+                "unavailable_reason": capability.unavailable_reason,
+                "advanced_biff_features": list(capability.advanced_biff_features),
+                "certification_sha256": capability.certification_sha256,
             }
-            for template in list_misa_templates()
+            for template_id, capability in registry.items()
         ]
     }
 
@@ -941,7 +951,7 @@ def _export_resolved_confirmed_profile(
     profile_kind = resolved.profile_kind
     profile_version = resolved.profile_version
     profile_v2 = resolved.profile_v2
-    template = resolved.template
+    template = get_misa_template_for_export(resolved.template.id)
     rows = resolved.rows
     output_path = _upload_dir(upload_id) / "misa_export.xls"
     write_xls_from_template(template.workbook, rows, output_path)
@@ -1222,7 +1232,7 @@ def _resolve_confirmed_export(
         profile_mapping = profile.mapping
         profile_defaults = profile.defaults
         profile_formulas = profile.formulas
-    template = get_misa_template(target_template_id)
+    template = get_misa_template_for_export(target_template_id)
     clean_mapping = sanitize_mapping_for_template(target_template_id, profile_mapping)
     clean_defaults = sanitize_defaults_for_template(
         target_template_id,
@@ -1368,7 +1378,7 @@ def export_confirmed_profile(
         profile_mapping = profile.mapping
         profile_defaults = profile.defaults
         profile_formulas = profile.formulas
-    template = get_misa_template(target_template_id)
+    template = get_misa_template_for_export(target_template_id)
     clean_mapping = sanitize_mapping_for_template(target_template_id, profile_mapping)
     clean_defaults = sanitize_defaults_for_template(
         target_template_id,

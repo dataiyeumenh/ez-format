@@ -2,10 +2,12 @@ import json
 from pathlib import Path
 
 import openpyxl
+import pytest
 import xlrd
 from fastapi.testclient import TestClient
 
 import app.main as main_module
+from app import misa_templates
 from app.main import app
 
 
@@ -14,6 +16,21 @@ SAMPLES = ROOT / "fixtures" / "samples"
 
 
 client = TestClient(app)
+_REAL_EXPORT_CAPABILITY = misa_templates._enforce_export_capability
+
+
+@pytest.fixture(autouse=True)
+def _allow_uncertified_test_exports(monkeypatch):
+    monkeypatch.setattr(misa_templates, "_enforce_export_capability", lambda *args: None)
+
+
+@pytest.fixture
+def _enforce_real_export_capability(monkeypatch, _allow_uncertified_test_exports):
+    monkeypatch.setattr(
+        misa_templates,
+        "_enforce_export_capability",
+        _REAL_EXPORT_CAPABILITY,
+    )
 
 WARNING_HEADERS = [
     "Mã hóa đơn",
@@ -166,11 +183,16 @@ def _write_purchase_mapping_workbook(path: Path) -> Path:
     return path
 
 
-def test_healthz():
+def test_healthz(monkeypatch):
+    monkeypatch.setattr(main_module, "_opportunistic_student_cleanup", lambda: None)
     response = client.get("/healthz")
 
     assert response.status_code == 200
-    assert response.json()["status"] == "ok"
+    assert response.json()["status"] == "degraded"
+    template_health = response.json()["misa_templates"]
+    assert template_health["status"] == "degraded"
+    assert template_health["unavailable"]
+    assert all(template_health["unavailable"].values())
     assert response.json()["ai"] in {"disabled", "offline", "online"}
 
 
@@ -240,6 +262,30 @@ def test_convert_endpoint_returns_xls_file_and_cleans_temp_storage():
 
     temp_root = ROOT / ".tmp"
     assert not temp_root.exists() or not any(temp_root.iterdir())
+
+
+def test_convert_endpoint_reports_uncertified_template_as_unavailable(
+    tmp_path,
+    monkeypatch,
+    _enforce_real_export_capability,
+):
+    monkeypatch.setenv("MISA_TEMPLATE_CERTIFICATION_DIR", str(tmp_path / "certifications"))
+
+    with (SAMPLES / "raw_sales_sample.xlsx").open("rb") as handle:
+        response = client.post(
+            "/api/v1/conversions",
+            data={"conversion_type": "bsn_sales"},
+            files={
+                "file": (
+                    "raw_sales_sample.xlsx",
+                    handle,
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                )
+            },
+        )
+
+    assert response.status_code == 503
+    assert "certification evidence" in response.json()["detail"]
 
 
 def test_export_rows_endpoint_rejects_multipart_without_server_error():

@@ -263,14 +263,19 @@ second API base URL. All production API values must be HTTPS and non-loopback.
    `rollback/main-pre-task11-reconcile-20260730-203721` resolves to the primary
    emergency SHA `2250102293021a54bcd1cf4fc8a7d6037e980524`.
 2. Complete and privately verify the Mongo backup record.
-3. Deploy the converter Render service. Wait for a successful `/healthz`
-   response before deploying Node.
+3. Deploy the converter Render service with the Node gateway still off. Wait for
+   HTTP `200` from `/healthz`; `status=degraded` is allowed only when the reported
+   unavailable capabilities are uncertified MISA templates.
 4. Deploy Node with all gates off. A temporary converter outage must not make
    the flags-off Node health check fail.
 5. Deploy Vercel with `VITE_API_URL` pointing only to Node. Confirm the build
    uses the candidate SHA and contains no direct converter base URL.
-6. Run the smoke checklist below. Do not enable any feature in this task.
-7. Record evidence. Only a complete evidence record can unblock Task 13.
+6. Run the initial flags-off smoke checklist below. Do not enable any feature.
+7. Complete **MISA certification provisioning and export preflight** while
+   `CONVERTER_PUBLIC_PROXY_ENABLED=false` and
+   `CONVERTER_GATEWAY_USAGE_READY=false`. Redeploy the immutable certification
+   bundle; require converter `status=ok` before Stage 1 export enablement.
+8. Record evidence. Only a complete evidence record can unblock Task 13.
 
 ## Health checks
 
@@ -282,7 +287,14 @@ $converter = "https://<converter-service>.onrender.com"
 $node = "https://<node-service>.onrender.com"
 
 $converterHealth = Invoke-RestMethod "$converter/healthz"
-if ($converterHealth.status -ne "ok") { throw "converter health failed" }
+if ($converterHealth.status -notin @("ok", "degraded")) { throw "converter health failed" }
+if ($converterHealth.status -eq "degraded") {
+  $unexpected = @(
+    $converterHealth.misa_templates.unavailable.PSObject.Properties |
+      Where-Object { [string]$_.Value -notmatch "certification evidence" }
+  )
+  if ($unexpected.Count -ne 0) { throw "converter degraded for a non-certification reason" }
+}
 
 $nodeHealth = Invoke-RestMethod "$node/api/health"
 if ($nodeHealth.status -ne "OK") { throw "node health failed" }
@@ -299,7 +311,8 @@ All items remain unchecked until performed against live staging.
 
 - [ ] Converter Render deploy uses the candidate SHA; build and start logs are
       free of secret values.
-- [ ] `GET /healthz` returns HTTP `200` and JSON `status: "ok"`.
+- [ ] Initial `GET /healthz` returns HTTP `200` and JSON `status: "ok"` or
+      `"degraded"`; degraded is accepted only for missing MISA certification.
 - [ ] Node Render deploy uses the candidate SHA; startup completes with the
       gateway and all new feature flags off.
 - [ ] `GET /api/health` returns HTTP `200` and JSON `status: "OK"`.
@@ -338,6 +351,11 @@ complete and `docs/qa/main-experimental-live-staging.md` identifies one release
 ID and one immutable full SHA. Every Render and Vercel deployment used by a
 gate must resolve to that SHA. A branch name, `latest`, a shortened SHA, or a
 deployment built from a different tree is not acceptable.
+
+Before Stage 1, provision the immutable MISA certification bundle using the exact
+path below, redeploy it read-only, run both template verification commands, and
+require `/healthz` `status=ok` plus all seven template capabilities `certified`.
+Keep both Node converter gateway flags off until this post-provision gate passes.
 
 Roles are mandatory:
 
@@ -537,14 +555,39 @@ Before enabling Stage 3, run the artifact lifecycle migration gate on Node:
    `ARTIFACT_LIFECYCLE_MIGRATION_MODE=dry-run`, deploy the immutable candidate,
    and retain its redacted `artifact-lifecycle-migration-completed` report. A
    fail-closed startup caused by remaining legacy rows is expected in dry-run.
-2. Review the count and confirm every legacy binding can be converted to an HMAC
-   `operationKey`. Set `ARTIFACT_LIFECYCLE_MIGRATION_MODE=apply` for one bounded
-   migration deployment only.
+2. Review the count and confirm every legacy binding can be converted to the
+   versioned HMAC `operationKeys` alias set. Set
+   `ARTIFACT_LIFECYCLE_MIGRATION_MODE=apply` for one bounded migration deployment
+   only.
 3. Require zero remaining plaintext binding fields, preserved `purged` statuses,
    and the exact legacy lifecycle index contract before its named unique index is
-   dropped. Verify the new `operationKey` unique index and purged-only TTL index.
+   dropped. Verify the exact old `operationKey_1` index was dropped, the new
+   `conversion_operation_key_alias_unique` index exists, and the purged-only TTL
+   index remains.
 4. Return `ARTIFACT_LIFECYCLE_MIGRATION_MODE=off`, redeploy the same candidate,
    then continue. Never use a broad index drop or treat a partial report as pass.
+
+Lifecycle HMAC rotation uses a versioned key ring on both services. Never replace
+a key in place:
+
+1. Before the first rotation, deploy this schema with active key ID `v1`, no
+   previous keys, and run the Node apply migration. On the converter, restart and
+   run the bounded operation cleanup while still on `v1`; any schema-v2 fence at
+   rotation startup is a blocker.
+2. Generate distinct new secrets in the secret manager. Set Node
+   `ARTIFACT_LIFECYCLE_HMAC_ACTIVE_KEY_ID=v2`, set
+   `ARTIFACT_LIFECYCLE_HMAC_PREVIOUS_KEYS` to a JSON object containing the old
+   `v1` secret, then set `ARTIFACT_LIFECYCLE_HMAC_ROTATION_HORIZON` to an absolute
+   UTC time at or after the maximum token, artifact, and lifecycle retention
+   horizon. Set the matching `OPERATION_FENCE_HMAC_*` variables independently on
+   the converter. Secret values never enter deployment evidence.
+3. Roll new instances gradually. The active and previous aliases must resolve the
+   same durable fence. Keep the previous key and rotation horizon on every new
+   instance until all old instances are stopped and the recorded horizon passes.
+4. Before removing a previous key, prove no active or purging lifecycle record is
+   reachable only through that key. Removing it before the retention horizon is a
+   fail-closed startup error. After removal, clear the rotation-horizon variable
+   only after the zero-old-key evidence is retained.
 
 Converter first:
 
@@ -707,6 +750,77 @@ Required gates:
 Do not pass this stage without a real Mongo run using the private
 `MISA_IMPORT_REPAIR_TEST_MONGO_URI` or approved `MONGO_URI` and zero MISA repair
 test skips.
+
+## MISA certification provisioning and export preflight
+
+The converter may remain healthy with `status=degraded` while one or more templates
+are uncertified. That state is not live-export ready. Every selected MISA template
+must pass its certification gate in every environment. No application environment
+bypass exists. The initial flags-off deploy may remain degraded; keep both Node
+converter gateway flags off until provisioning and post-provision preflight pass.
+
+1. Check out the exact candidate SHA. From `converter/`, set
+   `MISA_TEMPLATE_DIR=fixtures/templates`,
+   `MISA_TEMPLATE_MANIFEST_PATH=config/misa-template-manifest.json`,
+   `MISA_TEMPLATE_CERTIFICATION_DIR=config/misa-template-certifications`, and
+   `MISA_TEMPLATE_ACCEPTED_TRUST_LEVELS=partner_sample_derived`.
+2. For each of the seven template IDs, generate a synthetic non-customer input and
+   its deterministic `.xls` output from this exact build. Print the writer binding:
+
+```powershell
+python -c "from app.misa_certification import current_writer_build_sha256; print(current_writer_build_sha256())"
+```
+
+3. Import that output into a real controlled MISA sandbox. Retain an independent
+   MISA import log, report, or screenshot. Create schema-version `2` import-result
+   JSON with exact template/input/output/result-artifact SHA-256 values,
+   `status=misa_import_passed`, MISA product/release, timezone-aware completion,
+   distinct reviewer/approver, the writer hash, and template provenance vocabulary.
+   Placeholder/self-asserted evidence is forbidden.
+4. Provision each immutable bundle from `converter/`:
+
+```powershell
+python -m app.misa_certification create `
+  --conversion-type <template-id> `
+  --template fixtures/templates/<bundled-template>.xls `
+  --input ../.artifacts/misa-certification/<template-id>-input.csv `
+  --output ../.artifacts/misa-certification/<template-id>-output.xls `
+  --import-result ../.artifacts/misa-certification/<template-id>-import-result.json `
+  --result-artifact ../.artifacts/misa-certification/<template-id>-misa-result.log `
+  --artifact-dir config/misa-template-certifications `
+  --expires-at <timezone-aware-expiry>
+```
+
+5. Package `config/misa-template-certifications/` read-only in the converter image
+   and redeploy the exact candidate SHA with that immutable bundle.
+   Evidence paths must remain relative under `evidence/sha256/`. Do not use S3. Do
+   not bundle customer files.
+6. Run both gates inside the built converter artifact:
+
+```powershell
+python -m app.misa_templates verify
+python -m app.misa_templates verify --require-export-safe
+```
+
+Both commands must exit `0`; the second proves all seven live-export capabilities.
+Run the post-provision gate, which no longer accepts degraded health:
+
+```powershell
+$converter = "https://<converter-service>.onrender.com"
+$postProvisionHealth = Invoke-RestMethod "$converter/healthz"
+if ($postProvisionHealth.status -ne "ok") { throw "converter certification preflight failed" }
+$templateRegistry = Invoke-RestMethod "$converter/api/v1/templates"
+$uncertified = @(
+  $templateRegistry.items |
+    Where-Object { -not $_.available -or $_.capability_status -ne "certified" }
+)
+if ($uncertified.Count -ne 0) { throw "one or more MISA templates are not certified" }
+```
+
+Probe one real export per template.
+Any missing, future, expired, revoked, tampered, absolute-path, wrong-writer, or
+template-equals-output record blocks that template and returns the service to
+degraded. Re-provision from a fresh certification root; never edit evidence in place.
 
 ## Exact-SHA production promotion
 

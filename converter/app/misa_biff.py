@@ -10,6 +10,7 @@ import olefile
 import xlrd
 from xlrd.book import unpack_SST_table
 from xlrd.compdoc import CompDoc
+from xlrd.formula import FMLA_TYPE_CELL, FMLA_TYPE_NAME, decompile_formula
 
 
 _BOF = 0x0809
@@ -19,11 +20,37 @@ _CONTINUE = 0x003C
 _LABELSST = 0x00FD
 _FILESHARING = 0x005B
 _WRITEACCESS = 0x005C
+_BOUNDSHEET = 0x0085
+_NAME = 0x0018
+_SUPBOOK = 0x01AE
+_EXTERNNAME = 0x0023
+_HLINK = 0x01B8
+_OBPROJ = 0x00D3
 _OLE_PROPERTY_STREAMS = (
     "\x05SummaryInformation",
     "\x05DocumentSummaryInformation",
 )
+_OLE_PROPERTY_FORMAT_IDS = {
+    "\x05SummaryInformation": bytes.fromhex("e0859ff2f94f6810ab9108002b27b3d9"),
+    "\x05DocumentSummaryInformation": bytes.fromhex(
+        "02d5cdd59c2e1b10939708002b2cf9ae"
+    ),
+}
+_WORKBOOK_STREAMS = {"Workbook", "Book"}
+_AUXILIARY_OLE_STREAM_HASHES = {
+    "\x01CompObj": {
+        "1f75698fc71fdb2a15e971edbbeeb47e7bd67af8dca42b3994e337008c299ec6",
+        "87ade35570052baa0206f10a3fb754b7bb427fe019f2450989f6ba329254566e",
+    },
+    "\x01Ole": {
+        "c36c8a4b7dee703b9ce6e288032033b718feef01ca283cfaa4332a8334b2adf3",
+    },
+}
+_ALLOWED_OLE_STREAMS = _WORKBOOK_STREAMS | set(_OLE_PROPERTY_STREAMS) | set(
+    _AUXILIARY_OLE_STREAM_HASHES
+)
 _FORMULA_IDS = {0x0006, 0x0206, 0x0406}
+_UNSAFE_FORMULA_FUNCTIONS = ("HYPERLINK(", "RTD(")
 _FORMULA_FEATURE_IDS = _FORMULA_IDS | {
     0x0021,  # ARRAY (BIFF2)
     0x0036,  # TABLEOP (BIFF2)
@@ -77,6 +104,15 @@ class TemplateContentScan:
     ole_property_parse_error_count: int
     file_sharing_username_count: int
     write_access_username_count: int
+    unknown_ole_stream_count: int
+    unsafe_ole_stream_count: int
+    property_stream_residual_count: int
+    pre_header_formula_count: int
+    unsafe_formula_count: int
+    external_link_count: int
+    dde_link_count: int
+    macro_sheet_count: int
+    active_content_record_count: int
 
     @property
     def clean(self) -> bool:
@@ -89,6 +125,15 @@ class TemplateContentScan:
                 self.ole_property_parse_error_count,
                 self.file_sharing_username_count,
                 self.write_access_username_count,
+                self.unknown_ole_stream_count,
+                self.unsafe_ole_stream_count,
+                self.property_stream_residual_count,
+                self.pre_header_formula_count,
+                self.unsafe_formula_count,
+                self.external_link_count,
+                self.dde_link_count,
+                self.macro_sheet_count,
+                self.active_content_record_count,
             )
         )
 
@@ -99,6 +144,9 @@ class OleMetadataScan:
     ole_property_parse_error_count: int
     file_sharing_username_count: int
     write_access_username_count: int
+    unknown_ole_stream_count: int
+    unsafe_ole_stream_count: int
+    property_stream_residual_count: int
 
     @property
     def clean(self) -> bool:
@@ -108,6 +156,9 @@ class OleMetadataScan:
                 self.ole_property_parse_error_count,
                 self.file_sharing_username_count,
                 self.write_access_username_count,
+                self.unknown_ole_stream_count,
+                self.unsafe_ole_stream_count,
+                self.property_stream_residual_count,
             )
         )
 
@@ -167,12 +218,37 @@ def probe_biff_features(file_contents: bytes) -> dict[str, dict[str, int | str]]
 def scan_ole_metadata(file_contents: bytes) -> OleMetadataScan:
     property_value_count = 0
     property_parse_error_count = 0
+    unknown_stream_count = 0
+    unsafe_stream_count = 0
+    property_stream_residual_count = 0
     try:
         with olefile.OleFileIO(file_contents) as compound:
+            stream_paths = compound.listdir(streams=True, storages=False)
+            stream_names = ["/".join(path) for path in stream_paths]
+            unknown_stream_count = sum(
+                1 for stream_name in stream_names if stream_name not in _ALLOWED_OLE_STREAMS
+            )
+            workbook_stream_count = sum(
+                stream_name in _WORKBOOK_STREAMS for stream_name in stream_names
+            )
+            unsafe_stream_count += int(workbook_stream_count != 1)
+            for stream_path, stream_name in zip(stream_paths, stream_names):
+                allowed_hashes = _AUXILIARY_OLE_STREAM_HASHES.get(stream_name)
+                if allowed_hashes is None:
+                    continue
+                stream_sha256 = hashlib.sha256(
+                    compound.openstream(stream_path).read()
+                ).hexdigest()
+                unsafe_stream_count += int(stream_sha256 not in allowed_hashes)
             for stream_name in _OLE_PROPERTY_STREAMS:
                 if not compound.exists(stream_name):
                     continue
+                source_stream = compound.openstream(stream_name).read()
                 try:
+                    canonical_stream = _canonical_property_stream(
+                        source_stream,
+                        stream_name=stream_name,
+                    )
                     properties = compound.getproperties(
                         stream_name,
                         convert_time=False,
@@ -180,11 +256,26 @@ def scan_ole_metadata(file_contents: bytes) -> OleMetadataScan:
                 except Exception:
                     property_parse_error_count += 1
                     continue
+                property_stream_residual_count += int(
+                    source_stream != canonical_stream
+                )
                 property_value_count += sum(
                     _count_nonblank_property_values(value)
                     for property_id, value in properties.items()
                     if property_id != 1  # Codepage is structural, not user metadata.
                 )
+                if stream_name == "\x05DocumentSummaryInformation":
+                    try:
+                        custom_properties = compound.get_userdefined_properties(
+                            stream_name,
+                            convert_time=False,
+                        )
+                    except Exception:
+                        property_parse_error_count += 1
+                    else:
+                        property_value_count += _count_nonblank_property_values(
+                            custom_properties
+                        )
     except Exception as exc:
         raise ValueError("Invalid OLE workbook metadata") from exc
 
@@ -205,6 +296,9 @@ def scan_ole_metadata(file_contents: bytes) -> OleMetadataScan:
         ole_property_parse_error_count=property_parse_error_count,
         file_sharing_username_count=file_sharing_username_count,
         write_access_username_count=write_access_username_count,
+        unknown_ole_stream_count=unknown_stream_count,
+        unsafe_ole_stream_count=unsafe_stream_count,
+        property_stream_residual_count=property_stream_residual_count,
     )
 
 
@@ -213,7 +307,13 @@ def scan_template_content(
     *,
     header_row_index: int,
 ) -> TemplateContentScan:
+    records = list(iter_biff_records(file_contents))
     workbook = xlrd.open_workbook(file_contents=file_contents, formatting_info=True)
+    security = _scan_biff_security(
+        records,
+        workbook,
+        header_row_index=header_row_index,
+    )
     workbook_value_count = 0
     for sheet_index, sheet in enumerate(workbook.sheets()):
         first_row = header_row_index + 1 if sheet_index == 0 else 0
@@ -222,7 +322,6 @@ def scan_template_content(
                 1 for value in sheet.row_values(row_index) if not _is_blank(value)
             )
 
-    records = list(iter_biff_records(file_contents))
     referenced_sst_indexes: set[int] = set()
     literal_record_count = 0
     worksheet_index = -1
@@ -268,7 +367,145 @@ def scan_template_content(
         ole_property_parse_error_count=metadata.ole_property_parse_error_count,
         file_sharing_username_count=metadata.file_sharing_username_count,
         write_access_username_count=metadata.write_access_username_count,
+        unknown_ole_stream_count=metadata.unknown_ole_stream_count,
+        unsafe_ole_stream_count=metadata.unsafe_ole_stream_count,
+        property_stream_residual_count=metadata.property_stream_residual_count,
+        pre_header_formula_count=security["pre_header_formula_count"],
+        unsafe_formula_count=security["unsafe_formula_count"],
+        external_link_count=security["external_link_count"],
+        dde_link_count=security["dde_link_count"],
+        macro_sheet_count=security["macro_sheet_count"],
+        active_content_record_count=security["active_content_record_count"],
     )
+
+
+def _scan_biff_security(
+    records: list[BiffRecord],
+    workbook: xlrd.book.Book,
+    *,
+    header_row_index: int,
+) -> dict[str, int]:
+    counts = {
+        "pre_header_formula_count": 0,
+        "unsafe_formula_count": 0,
+        "external_link_count": 0,
+        "dde_link_count": 0,
+        "macro_sheet_count": 0,
+        "active_content_record_count": 0,
+    }
+    worksheet_index = -1
+    substream_stack: list[int | None] = []
+    active_sheet: int | None = None
+    for record in records:
+        if record.record_id == _BOF and len(record.payload) >= 4:
+            substream_stack.append(active_sheet)
+            substream_type = struct.unpack_from("<H", record.payload, 2)[0]
+            if substream_type == 0x0010:
+                worksheet_index += 1
+                active_sheet = worksheet_index
+            elif substream_type in {0x0006, 0x0040}:
+                counts["macro_sheet_count"] += 1
+            continue
+        if record.record_id == _EOF:
+            active_sheet = substream_stack.pop() if substream_stack else None
+            continue
+        if record.record_id == _BOUNDSHEET:
+            if len(record.payload) < 6:
+                counts["active_content_record_count"] += 1
+            elif record.payload[5] in {0x01, 0x06}:
+                counts["macro_sheet_count"] += 1
+            elif record.payload[5] not in {0x00, 0x02}:
+                counts["active_content_record_count"] += 1
+        elif record.record_id == _SUPBOOK:
+            _count_supbook_link(record.payload, counts)
+        elif record.record_id == _EXTERNNAME:
+            counts["active_content_record_count"] += 1
+        elif record.record_id == _NAME:
+            if len(record.payload) < 2:
+                counts["active_content_record_count"] += 1
+            else:
+                option_flags = struct.unpack_from("<H", record.payload, 0)[0]
+                if option_flags & (0x0004 | 0x0008 | 0x1000):
+                    counts["active_content_record_count"] += 1
+        elif record.record_id in {_HLINK, _OBPROJ}:
+            counts["active_content_record_count"] += 1
+
+        if record.record_id in _FORMULA_FEATURE_IDS - _FORMULA_IDS:
+            counts["unsafe_formula_count"] += 1
+            continue
+        if record.record_id not in _FORMULA_IDS:
+            continue
+        formula_is_unsafe = active_sheet != 0
+        if len(record.payload) < 22 or record.record_id != 0x0006:
+            counts["unsafe_formula_count"] += 1
+            continue
+        row_index, column_index = struct.unpack_from("<HH", record.payload, 0)
+        if active_sheet == 0 and row_index <= header_row_index:
+            counts["pre_header_formula_count"] += 1
+        if _formula_is_unsafe(workbook, record.payload, row_index, column_index):
+            formula_is_unsafe = True
+        counts["unsafe_formula_count"] += int(formula_is_unsafe)
+
+    for name in workbook.name_obj_list:
+        if name.macro or name.vbasic or name.binary:
+            counts["active_content_record_count"] += 1
+            continue
+        try:
+            formula = decompile_formula(
+                workbook,
+                name.raw_formula,
+                name.basic_formula_len,
+                FMLA_TYPE_NAME,
+            )
+        except Exception:
+            counts["unsafe_formula_count"] += 1
+            continue
+        if _contains_unsafe_formula_function(formula):
+            counts["unsafe_formula_count"] += 1
+    return counts
+
+
+def _count_supbook_link(payload: bytes, counts: dict[str, int]) -> None:
+    if len(payload) < 4:
+        counts["external_link_count"] += 1
+        return
+    if payload[2:4] == b"\x01\x04":
+        return
+    if payload[:4] == b"\x01\x00\x01\x3a":
+        counts["active_content_record_count"] += 1
+        return
+    number_of_sheets = struct.unpack_from("<H", payload, 0)[0]
+    key = "dde_link_count" if number_of_sheets == 0 else "external_link_count"
+    counts[key] += 1
+
+
+def _formula_is_unsafe(
+    workbook: xlrd.book.Book,
+    payload: bytes,
+    row_index: int,
+    column_index: int,
+) -> bool:
+    formula_length = struct.unpack_from("<H", payload, 20)[0]
+    formula_end = 22 + formula_length
+    if formula_end > len(payload):
+        return True
+    try:
+        formula = decompile_formula(
+            workbook,
+            payload[22:formula_end],
+            formula_length,
+            FMLA_TYPE_CELL,
+            row_index,
+            column_index,
+        )
+    except Exception:
+        return True
+    return _contains_unsafe_formula_function(formula)
+
+
+def _contains_unsafe_formula_function(formula: object) -> bool:
+    normalized = str(formula or "").upper()
+    return any(function in normalized for function in _UNSAFE_FORMULA_FUNCTIONS)
 
 
 def advanced_biff_feature_names(
@@ -345,15 +582,21 @@ def _write_scrubbed_ole_copy(
             source_stream = compound.openstream(property_stream_name).read()
             compound.write_stream(
                 property_stream_name,
-                _canonical_property_stream(source_stream),
+                _canonical_property_stream(
+                    source_stream,
+                    stream_name=property_stream_name,
+                ),
             )
 
 
-def _canonical_property_stream(source_stream: bytes) -> bytes:
+def _canonical_property_stream(source_stream: bytes, *, stream_name: str) -> bytes:
     # Keep a valid, minimal property set and preserve stream length for OLE in-place writes.
     if len(source_stream) < 72 or source_stream[:2] != b"\xfe\xff":
         raise ValueError("OLE property stream cannot be scrubbed safely")
-    format_id = source_stream[28:44]
+    try:
+        format_id = _OLE_PROPERTY_FORMAT_IDS[stream_name]
+    except KeyError as exc:
+        raise ValueError("Unknown OLE property stream cannot be canonicalized") from exc
     header = struct.pack("<HHI", 0xFFFE, 0, 0x00020006)
     header += b"\0" * 16
     header += struct.pack("<I", 1)

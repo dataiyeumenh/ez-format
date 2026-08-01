@@ -13,7 +13,7 @@ from app.calculation_rules import (
 from app.conversion_types import ConversionTypeDefinition, get_conversion_type
 from app.excel_io import InputReadError, read_input_table, write_xls_from_template
 from app.field_detection import apply_column_mapping, detect_columns, semantic_value
-from app.misa_templates import get_misa_template
+from app.misa_templates import get_misa_template, get_misa_template_for_export
 from app.models import JsonDict, ReportIssue, ValidationReport
 from app.normalization import is_blank, normalize_header
 from app.parsing import parse_date, parse_number
@@ -191,7 +191,7 @@ def export_rows(
     if not rows:
         raise ValueError("No rows to export.")
     definition = get_conversion_type(conversion_type)
-    template = get_misa_template(conversion_type).workbook
+    template = get_misa_template_for_export(conversion_type).workbook
     write_xls_from_template(template, rows, output_path, output_sheet_name=sheet_name)
 
 
@@ -211,7 +211,7 @@ def convert_file(
     definition = get_conversion_type(conversion_type)
     table = read_input_table(input_path)
     detected_columns = report.detected_columns
-    template = get_misa_template(conversion_type).workbook
+    template = get_misa_template_for_export(conversion_type).workbook
     output_rows = [_map_row(row, detected_columns, definition, options) for row in table.rows]
     write_xls_from_template(template, output_rows, output_path, output_sheet_name=table.sheet_name)
     return report

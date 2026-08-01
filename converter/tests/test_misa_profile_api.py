@@ -6,8 +6,10 @@ from datetime import datetime
 from pathlib import Path
 
 import xlrd
+import pytest
 from fastapi.testclient import TestClient
 
+from app import misa_templates
 from app.main import app
 from app.misa_profiles import ProfileStore
 
@@ -17,6 +19,11 @@ SAMPLES = ROOT / "fixtures" / "samples"
 
 
 client = TestClient(app)
+
+
+@pytest.fixture(autouse=True)
+def _allow_uncertified_test_exports(monkeypatch):
+    monkeypatch.setattr(misa_templates, "_enforce_export_capability", lambda *args: None)
 
 
 def _profile_values(**overrides):
@@ -162,12 +169,15 @@ def test_sqlite_new_local_profiles_default_to_local_owner_scope(tmp_path, monkey
     assert profile.owner_scope == "local:default"
 
 
-def test_templates_endpoint_reads_real_misa_headers():
+def test_templates_endpoint_reads_real_misa_headers(monkeypatch):
     response = client.get("/api/v1/templates")
 
     assert response.status_code == 200
     items = response.json()["items"]
     bsn_sales = next(item for item in items if item["id"] == "bsn_sales")
+    assert bsn_sales["available"] is False
+    assert bsn_sales["capability_status"] == "uncertified"
+    assert "certification evidence" in bsn_sales["unavailable_reason"]
     assert bsn_sales["header_row"] == 8
     assert bsn_sales["data_start_row"] == 9
     assert bsn_sales["headers"][:8] == [
@@ -180,6 +190,25 @@ def test_templates_endpoint_reads_real_misa_headers():
         "Ngày chứng từ (*)",
         "Số chứng từ (*)",
     ]
+
+
+@pytest.mark.parametrize("environment", ["test", "development"])
+def test_templates_endpoint_ignores_legacy_environment_bypass(
+    tmp_path,
+    monkeypatch,
+    environment,
+):
+    monkeypatch.setenv("NODE_ENV", environment)
+    monkeypatch.setenv("MISA_EXPORT_CERTIFICATION_BYPASS", "true")
+    monkeypatch.setenv("MISA_TEMPLATE_CERTIFICATION_DIR", str(tmp_path / "certifications"))
+
+    response = client.get("/api/v1/templates")
+
+    assert response.status_code == 200
+    items = response.json()["items"]
+    assert all(item["available"] is False for item in items)
+    assert all(item["capability_status"] == "uncertified" for item in items)
+    assert all(item["certification_sha256"] is None for item in items)
 
 
 def test_analyze_preview_confirm_export_learns_profile(tmp_path, monkeypatch):

@@ -25,6 +25,7 @@ Production/local template configuration:
 ```powershell
 $env:MISA_TEMPLATE_DIR='fixtures/templates'
 $env:MISA_TEMPLATE_MANIFEST_PATH='config/misa-template-manifest.json'
+$env:MISA_TEMPLATE_CERTIFICATION_DIR='config/misa-template-certifications'
 $env:MISA_TEMPLATE_ACCEPTED_TRUST_LEVELS='partner_sample_derived'
 $env:MAPPING_DB_PATH='converter\data\mapping_profiles.sqlite'
 ```
@@ -32,16 +33,17 @@ $env:MAPPING_DB_PATH='converter\data\mapping_profiles.sqlite'
 Relative template and manifest paths resolve from this `converter` directory.
 An external `MISA_TEMPLATE_DIR` must contain exact reviewed bytes under each
 canonical filename recorded as `canonical_filename`; a same-header replacement
-is rejected. Production imports verify every supported template and fail before
-the API starts when the manifest, filename, SHA-256, sheet, header row, or ordered
-header schema differs. Production also requires an explicitly configured accepted
-trust level. The committed templates are scrubbed structural derivatives of
+is rejected. Production requires an explicitly configured accepted trust level.
+The committed templates are scrubbed structural derivatives of
 partner-provided samples. Post-header values, residual unreferenced BIFF shared
 strings, OLE author properties, and BIFF write-access/file-sharing usernames are
-removed from the current bundled files. Acquisition date, MISA product, and MISA
-release remain unknown. No official MISA source is claimed. Historical commits may
-contain predecessor bytes; history rewriting is a separate destructive operation
-and is not performed by this template release.
+removed from the current bundled files. Property streams must exactly equal their
+canonical bytes, including padding. Every OLE stream is inventoried: unknown streams
+fail closed, custom properties are scanned, and reviewed `CompObj`/`Ole` binary
+stream hashes are allowlisted. BIFF scanning rejects pre/header formulas, unsafe
+formula functions, external/DDE links, macro sheets, and active-content records.
+Acquisition date, MISA product, and MISA release remain unknown. No official MISA
+source is claimed.
 
 Verify the active deployment assets:
 
@@ -59,9 +61,76 @@ python -m app.misa_templates verify --require-export-safe
 The current `xlutils.copy` writer preserves the tested cell styles, merges,
 column widths, and row heights, but drops formulas, defined names,
 drawings/objects, and data validations. Six committed templates contain at least
-one such BIFF feature. Therefore release preflight and production startup fail
-closed until a writer that passes the committed byte-level record probes is
-deployed. There is no Excel COM dependency or bypass setting.
+one such BIFF feature. The service remains healthy with `status=degraded` while
+one or more templates are unavailable; `/healthz` and `/api/v1/templates` report
+the same per-template capability used by export. Every user-facing MISA export,
+in every environment, checks the selected template certification. No application
+environment bypass exists; tests isolate writer behavior by monkeypatching the
+private capability boundary inside pytest fixtures only. Release preflight remains
+blocked until every required template is certified. There is no Excel COM dependency.
+
+Certification is evidence-bound, portable, and immutable. Use a synthetic,
+non-customer input. Perform a real MISA sandbox/controlled import, then retain a
+MISA-generated log, report, or screenshot separate from the JSON attestation. The
+import-result JSON schema is version `2` and binds template, input, output, result
+artifact, current deterministic writer build, product/release, reviewer, approver,
+provenance vocabulary, and timezone-aware completion time. Print the current writer
+build hash with the exact candidate environment. The hash binds writer source,
+`requirements.txt` bytes, resolved `xlrd`/`xlwt`/`xlutils`/`olefile` versions, and
+the Python major/minor version:
+
+```powershell
+python -c "from app.misa_certification import current_writer_build_sha256; print(current_writer_build_sha256())"
+```
+
+The import-result JSON must contain exactly:
+
+```json
+{
+  "schema_version": 2,
+  "evidence_origin": "misa_sandbox_import",
+  "result_artifact_kind": "misa_import_log",
+  "status": "misa_import_passed",
+  "template_sha256": "<64 lowercase hex>",
+  "input_sha256": "<64 lowercase hex>",
+  "output_sha256": "<64 lowercase hex>",
+  "result_artifact_sha256": "<64 lowercase hex>",
+  "misa_product": "<explicit product>",
+  "misa_release": "<explicit release>",
+  "completed_at_utc": "<timezone-aware ISO-8601>",
+  "reviewer": "<reviewer identity>",
+  "approver": "<different approver identity>",
+  "writer_build_sha256": "<current writer hash>",
+  "template_provenance": {
+    "source_kind": "partner_sample_derived",
+    "trust_level": "partner_sample_derived",
+    "official_status": "not_claimed_official"
+  }
+}
+```
+
+Provision each template with the exact command path:
+
+```powershell
+python -m app.misa_certification create `
+  --conversion-type sales_goods `
+  --template fixtures/templates/sales_goods.xls `
+  --input ../.artifacts/certification/sales_goods-input.csv `
+  --output ../.artifacts/certification/sales_goods-output.xls `
+  --import-result ../.artifacts/certification/sales_goods-import-result.json `
+  --result-artifact ../.artifacts/certification/sales_goods-misa-import.log `
+  --artifact-dir config/misa-template-certifications `
+  --expires-at 2027-01-31T00:00:00+00:00
+```
+
+The command copies evidence under
+`config/misa-template-certifications/evidence/sha256/` and writes only relative
+paths. It rejects absolute/escaping paths, future/expired/revoked records,
+template-equals-output, placeholders, same-person approval, unbound hashes, stale
+writer bytes, and later bundle tampering. Package this directory read-only with the
+converter; do not put certification evidence or customer files in S3. Do not set
+`production_ready` manually. Current repository state has no complete certification
+set and is not production-ready.
 
 Template rotation is never learned automatically. Replace reviewed template
 files intentionally, generate a candidate without overwriting the active

@@ -1,9 +1,12 @@
 import json
+import hashlib
+from io import BytesIO
 import os
 import shutil
 import struct
 import subprocess
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import olefile
@@ -14,6 +17,10 @@ import xlwt
 from app.conversion_types import CONVERSION_TYPES
 from app import misa_biff, misa_templates
 from app.excel_io import write_xls_from_template
+from app.misa_certification import (
+    create_manual_certification_record,
+    current_writer_build_sha256,
+)
 from app.misa_templates import DISPLAY_FILENAMES, get_misa_template, list_misa_templates
 
 
@@ -94,6 +101,85 @@ def _add_private_ole_metadata(path: Path) -> None:
         summary = "\x05SummaryInformation"
         source_summary = compound.openstream(summary).read()
         compound.write_stream(summary, _property_stream_with_author(source_summary))
+
+
+def _formula_workbook_bytes(formula: str, *, row_index: int = 0) -> bytes:
+    book = xlwt.Workbook()
+    sheet = book.add_sheet("Sheet1")
+    sheet.write(row_index, 0, xlwt.Formula(formula))
+    output = BytesIO()
+    book.save(output)
+    return output.getvalue()
+
+
+def _mutate_first_biff_record(contents: bytes, record_id: int, mutate) -> bytes:
+    workbook = bytearray(misa_biff.workbook_stream(contents))
+    record = next(
+        item for item in misa_biff.iter_biff_records(contents) if item.record_id == record_id
+    )
+    replacement = mutate(bytearray(record.payload))
+    assert len(replacement) == len(record.payload)
+    start = record.offset + 4
+    workbook[start : start + len(replacement)] = replacement
+    output = BytesIO(contents)
+    with olefile.OleFileIO(output, write_mode=True) as compound:
+        stream_name = "Workbook" if compound.exists("Workbook") else "Book"
+        compound.write_stream(stream_name, bytes(workbook))
+    return output.getvalue()
+
+
+def _create_test_certification(template, certification_dir: Path, tmp_path: Path) -> None:
+    input_path = tmp_path / f"{template.id}-input.csv"
+    input_path.write_text("document\nSYN-CERT-001\n", encoding="utf-8")
+    output_path = tmp_path / f"{template.id}-output.xls"
+    write_xls_from_template(template.workbook, [{}], output_path)
+    result_artifact_path = tmp_path / f"{template.id}-misa-result.txt"
+    result_artifact_path.write_text(
+        "MISA controlled import result\nstatus=success\nimported_rows=1\n",
+        encoding="utf-8",
+    )
+    import_result_path = tmp_path / f"{template.id}-misa-result.json"
+    import_result_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "evidence_origin": "misa_sandbox_import",
+                "result_artifact_kind": "misa_import_log",
+                "status": "misa_import_passed",
+                "template_sha256": template.sha256,
+                "output_sha256": hashlib.sha256(output_path.read_bytes()).hexdigest(),
+                "input_sha256": hashlib.sha256(input_path.read_bytes()).hexdigest(),
+                "result_artifact_sha256": hashlib.sha256(
+                    result_artifact_path.read_bytes()
+                ).hexdigest(),
+                "misa_product": "AMIS Ke toan",
+                "misa_release": "sandbox-2026-07",
+                "completed_at_utc": (
+                    datetime.now(timezone.utc) - timedelta(minutes=5)
+                ).isoformat(),
+                "reviewer": "qa-reviewer",
+                "approver": "release-approver",
+                "writer_build_sha256": current_writer_build_sha256(),
+                "template_provenance": {
+                    "source_kind": template.trust.source_kind,
+                    "trust_level": template.trust.trust_level,
+                    "official_status": template.trust.official_status,
+                },
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    create_manual_certification_record(
+        conversion_type=template.id,
+        template_path=template.path,
+        input_path=input_path,
+        output_path=output_path,
+        import_result_path=import_result_path,
+        result_artifact_path=result_artifact_path,
+        artifact_dir=certification_dir,
+        expires_at_utc=(datetime.now(timezone.utc) + timedelta(days=90)).isoformat(),
+    )
 
 
 def test_same_header_workbook_without_trusted_hash_is_rejected(tmp_path, monkeypatch):
@@ -257,6 +343,94 @@ def test_bundled_templates_have_no_post_header_values_or_binary_pii():
         assert scan.write_access_username_count == 0, template.id
 
 
+def test_biff_scanner_rejects_formula_on_or_before_header():
+    contents = _formula_workbook_bytes("1+1", row_index=7)
+
+    scan = misa_biff.scan_template_content(contents, header_row_index=7)
+
+    assert scan.pre_header_formula_count == 1
+    assert not scan.clean
+
+
+def test_biff_scanner_rejects_formula_in_non_data_sheet():
+    book = xlwt.Workbook()
+    book.add_sheet("Primary")
+    secondary = book.add_sheet("HiddenPayload")
+    secondary.write(9, 0, xlwt.Formula("1+1"))
+    output = BytesIO()
+    book.save(output)
+
+    scan = misa_biff.scan_template_content(output.getvalue(), header_row_index=7)
+
+    assert scan.unsafe_formula_count == 1
+    assert not scan.clean
+
+
+@pytest.mark.parametrize(
+    "formula",
+    [
+        'HYPERLINK("https://example.invalid/customer", "open")',
+        'RTD("untrusted.server",, "customer")',
+    ],
+)
+def test_biff_scanner_rejects_active_formula_functions_in_any_row(formula):
+    contents = _formula_workbook_bytes(formula, row_index=9)
+
+    scan = misa_biff.scan_template_content(contents, header_row_index=7)
+
+    assert scan.unsafe_formula_count == 1
+    assert not scan.clean
+
+
+@pytest.mark.parametrize(
+    ("supbook_payload", "expected_field"),
+    [
+        (b"\x01\x00\x00\x00", "external_link_count"),
+        (b"\x00\x00\x00\x00", "dde_link_count"),
+    ],
+)
+def test_biff_scanner_rejects_external_and_dde_supbooks(
+    supbook_payload,
+    expected_field,
+):
+    template = get_misa_template("sales_goods")
+    contents = _mutate_first_biff_record(
+        template.workbook.file_contents,
+        0x01AE,
+        lambda payload: bytearray(supbook_payload),
+    )
+
+    scan = misa_biff.scan_template_content(
+        contents,
+        header_row_index=template.workbook.header_row_index,
+    )
+
+    assert getattr(scan, expected_field) == 1
+    assert not scan.clean
+
+
+def test_biff_scanner_rejects_macro_sheet_boundsheet_record():
+    template = get_misa_template("sales_goods")
+
+    def make_macro_sheet(payload):
+        payload[5] = 0x01
+        return payload
+
+    contents = _mutate_first_biff_record(
+        template.workbook.file_contents,
+        0x0085,
+        make_macro_sheet,
+    )
+
+    scan = misa_biff.scan_template_content(
+        contents,
+        header_row_index=template.workbook.header_row_index,
+    )
+
+    assert scan.macro_sheet_count == 1
+    assert not scan.clean
+
+
 def test_scrubber_removes_values_without_changing_protected_biff_records(tmp_path):
     scrubber = getattr(misa_templates, "scrub_misa_template_copy", None)
     source_path = tmp_path / "source.xls"
@@ -378,11 +552,22 @@ def test_production_accepts_explicit_derived_trust_for_feature_free_template(mon
     assert get_misa_template("bsn_sales").id == "bsn_sales"
 
 
-def test_production_release_fails_when_writer_cannot_preserve_advanced_biff(monkeypatch):
+def test_production_trust_env_must_exactly_match_manifest_vocabulary(monkeypatch):
+    monkeypatch.setenv("NODE_ENV", "production")
+    monkeypatch.setenv(
+        "MISA_TEMPLATE_ACCEPTED_TRUST_LEVELS",
+        "partner_sample_derived,partner_supplied",
+    )
+
+    with pytest.raises(RuntimeError, match="exactly match manifest trust levels"):
+        get_misa_template("bsn_sales")
+
+
+def test_production_release_fails_until_every_template_has_certification(monkeypatch):
     monkeypatch.setenv("NODE_ENV", "production")
     monkeypatch.setenv("MISA_TEMPLATE_ACCEPTED_TRUST_LEVELS", "partner_sample_derived")
 
-    with pytest.raises(RuntimeError, match="BIFF preservation"):
+    with pytest.raises(RuntimeError, match="certification evidence"):
         misa_templates.verify_all_misa_templates(require_export_safe=True)
 
 
@@ -403,22 +588,27 @@ def test_release_capability_cli_fails_closed_for_current_writer():
     )
 
     assert result.returncode != 0
-    assert "BIFF preservation" in result.stderr
+    assert "certification evidence" in result.stderr
 
 
-def test_production_startup_fails_closed_on_unsupported_biff_writer():
+def test_production_startup_stays_healthy_but_reports_degraded_templates(tmp_path):
     converter_root = CONVERSION_TYPES["sales_goods"].template_path.parents[2]
     env = dict(os.environ)
     env.update(
         {
             "NODE_ENV": "production",
             "MISA_TEMPLATE_ACCEPTED_TRUST_LEVELS": "partner_sample_derived",
+            "MISA_TEMPLATE_CERTIFICATION_DIR": str(tmp_path / "certifications"),
             "PYTHONIOENCODING": "utf-8",
         }
     )
 
     result = subprocess.run(
-        [sys.executable, "-c", "import app.main"],
+        [
+            sys.executable,
+            "-c",
+            "import json; from app.main import healthz; print(json.dumps(healthz()))",
+        ],
         cwd=converter_root,
         env=env,
         capture_output=True,
@@ -426,8 +616,41 @@ def test_production_startup_fails_closed_on_unsupported_biff_writer():
         check=False,
     )
 
-    assert result.returncode != 0
-    assert "BIFF preservation" in result.stderr
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "degraded"
+    assert payload["misa_templates"]["status"] == "degraded"
+    assert set(payload["misa_templates"]["unavailable"]) == set(CONVERSION_TYPES)
+
+
+def test_template_capability_registry_reports_each_uncertified_template(tmp_path, monkeypatch):
+    monkeypatch.setenv("MISA_TEMPLATE_CERTIFICATION_DIR", str(tmp_path / "certifications"))
+
+    registry = misa_templates.template_capability_registry()
+
+    assert set(registry) == set(CONVERSION_TYPES)
+    assert all(not capability.available for capability in registry.values())
+    assert all(
+        "certification evidence" in str(capability.unavailable_reason)
+        for capability in registry.values()
+    )
+
+
+def test_production_export_checks_only_the_selected_template(tmp_path, monkeypatch):
+    certification_dir = tmp_path / "certifications"
+    template = get_misa_template("bsn_sales")
+    _create_test_certification(template, certification_dir, tmp_path)
+    monkeypatch.setenv("NODE_ENV", "production")
+    monkeypatch.setenv("MISA_TEMPLATE_ACCEPTED_TRUST_LEVELS", "partner_sample_derived")
+    monkeypatch.setenv("MISA_TEMPLATE_CERTIFICATION_DIR", str(certification_dir))
+
+    registry = misa_templates.template_capability_registry()
+    assert registry["bsn_sales"].available is True
+    assert registry["sales_goods"].available is False
+    assert misa_templates.template_health_payload()["status"] == "degraded"
+    assert misa_templates.get_misa_template_for_export("bsn_sales").id == "bsn_sales"
+    with pytest.raises(RuntimeError, match="certification evidence"):
+        misa_templates.get_misa_template_for_export("sales_goods")
 
 
 def test_verifier_checks_every_supported_template():
