@@ -26,6 +26,21 @@ from app.operation_store import (
 
 
 client = TestClient(app)
+OPERATION_FENCE_SECRET = "operation-fence-test-secret-at-least-32-characters"
+
+
+@pytest.fixture(autouse=True)
+def _isolate_operation_fence_state(tmp_path, monkeypatch):
+    monkeypatch.setenv("OPERATION_SESSION_DIR", str(tmp_path / "default-sessions"))
+    monkeypatch.setenv("OPERATION_FENCE_HMAC_SECRET", OPERATION_FENCE_SECRET)
+
+
+@pytest.fixture
+def _allow_uncertified_workflow_export(monkeypatch):
+    import app.misa_workflow as workflow
+    from app.misa_templates import get_misa_template
+
+    monkeypatch.setattr(workflow, "get_misa_template_for_export", get_misa_template)
 
 
 def _context_token(payload: dict, secret: str = "test-secret") -> str:
@@ -48,6 +63,7 @@ def test_production_analyze_forwards_preallocated_run_session_and_upload_binding
     import app.main as main_module
 
     monkeypatch.setenv("CONVERSION_CONTEXT_SECRET", "test-secret")
+    monkeypatch.setenv("OPERATION_FENCE_HMAC_SECRET", OPERATION_FENCE_SECRET)
     monkeypatch.setenv("OPERATION_STORE_PROVIDER", "node")
     captured = {}
 
@@ -107,10 +123,16 @@ def test_production_analyze_forwards_preallocated_run_session_and_upload_binding
     assert captured["preallocated_upload_id"] == upload_id
 
 
-def test_health_capabilities_are_fixed_booleans():
-    payload = client.get("/healthz").json()
+def test_health_capabilities_are_fixed_booleans(tmp_path, monkeypatch):
+    certification_dir = tmp_path / "certifications"
+    certification_dir.mkdir()
+    monkeypatch.setenv("MISA_TEMPLATE_CERTIFICATION_DIR", str(certification_dir))
+    response = client.get("/healthz")
+    payload = response.json()
 
-    assert payload["status"] == "ok"
+    assert response.status_code == 200
+    assert payload["status"] == "degraded"
+    assert payload["misa_templates"]["status"] == "degraded"
     assert payload["capabilities"]["converter"] is True
     assert payload["capabilities"]["operations"] is True
 
@@ -169,7 +191,10 @@ def test_converter_capability_endpoint_matches_health_source_of_truth(monkeypatc
     assert health["operations"] is True
 
 
-def test_health_never_probes_ollama_directly(monkeypatch):
+def test_health_never_probes_ollama_directly(tmp_path, monkeypatch):
+    certification_dir = tmp_path / "certifications"
+    certification_dir.mkdir()
+    monkeypatch.setenv("MISA_TEMPLATE_CERTIFICATION_DIR", str(certification_dir))
     monkeypatch.setenv("AI_PROVIDER", "ollama")
     monkeypatch.setattr(
         "urllib.request.urlopen",
@@ -182,7 +207,8 @@ def test_health_never_probes_ollama_directly(monkeypatch):
 
     assert response.status_code == 200
     payload = response.json()
-    assert payload["status"] == "ok"
+    assert payload["status"] == "degraded"
+    assert payload["misa_templates"]["status"] == "degraded"
     assert payload["capabilities"]["converter"] is True
     assert payload["capabilities"]["operations"] is True
 
@@ -733,7 +759,7 @@ def test_purged_fence_is_hmac_minimized_and_swept_only_after_safe_horizon(
         batch_size=10,
     )
     assert not state_path.exists()
-    assert not lock_path.exists()
+    assert lock_path.exists()
 
 
 def test_purged_fence_ignores_early_purge_after_before_retention_horizon(
@@ -795,6 +821,7 @@ def test_schema_v1_plaintext_purged_fence_migrates_without_allowing_reuse(
     state_path = store._lifecycle_state_path(session_id)
     serialized = state_path.read_text(encoding="utf-8")
     assert payload["schema_version"] == 2
+    assert payload["key_ids"] == ["v1"]
     assert payload["status"] == "purged"
     assert session_id not in state_path.name
     assert session_id not in serialized
@@ -875,12 +902,347 @@ def test_operation_cleanup_uses_independent_session_and_fence_budgets(
     assert not fence_path.exists()
 
 
+def test_operation_cleanup_selects_expired_sessions_and_fences_before_batch_budget(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv(
+        "OPERATION_FENCE_HMAC_SECRET",
+        "operation-fence-test-secret-at-least-32-characters",
+    )
+    root = tmp_path / "sessions"
+    store = OperationStore(root=root)
+    current_time = datetime.now(timezone.utc)
+
+    for name in ("a-active", "b-active", "c-active"):
+        directory = root / name
+        directory.mkdir()
+        (directory / "session.json").write_text(
+            json.dumps({"expires_at": (current_time + timedelta(days=1)).isoformat()}),
+            encoding="utf-8",
+        )
+    expired_directory = root / "z-expired"
+    expired_directory.mkdir()
+    (expired_directory / "session.json").write_text(
+        json.dumps({"expires_at": (current_time - timedelta(days=1)).isoformat()}),
+        encoding="utf-8",
+    )
+
+    ordered = sorted(
+        [f"fence-{index}" for index in range(32)],
+        key=lambda session_id: store._lifecycle_state_path(session_id).name,
+    )
+    for session_id in ordered[:3]:
+        store._write_lifecycle_state(session_id, "active")
+    expired_fence_id = ordered[-1]
+    store._write_lifecycle_state(expired_fence_id, "purged")
+    expired_fence = store._lifecycle_state_path(expired_fence_id)
+    payload = json.loads(expired_fence.read_text(encoding="utf-8"))
+    payload["updated_at"] = (current_time - timedelta(days=4)).isoformat()
+    payload["retain_until"] = (current_time - timedelta(days=3)).isoformat()
+    payload["purge_after"] = (current_time - timedelta(days=2)).isoformat()
+    store._atomic_write(expired_fence, payload)
+
+    deleted = cleanup_expired_operation_sessions(
+        root=root,
+        now=current_time,
+        batch_size=1,
+    )
+
+    assert deleted == ["z-expired"]
+    assert not expired_fence.exists()
+
+
+def test_operation_cleanup_cursor_advances_past_stable_failures_with_bounded_scan(
+    tmp_path,
+    monkeypatch,
+):
+    import app.operation_store as operation_store_module
+
+    monkeypatch.setenv(
+        "OPERATION_FENCE_HMAC_SECRET",
+        "operation-fence-test-secret-at-least-32-characters",
+    )
+    root = tmp_path / "sessions"
+    root.mkdir()
+    current_time = datetime.now(timezone.utc)
+    for index in range(10):
+        directory = root / f"a-failing-{index:02d}"
+        directory.mkdir()
+        (directory / "session.json").write_text(
+            json.dumps({"expires_at": (current_time - timedelta(days=1)).isoformat()}),
+            encoding="utf-8",
+        )
+    eligible = root / "z-expired"
+    eligible.mkdir()
+    (eligible / "session.json").write_text(
+        json.dumps({"expires_at": (current_time - timedelta(days=1)).isoformat()}),
+        encoding="utf-8",
+    )
+    calls: list[str] = []
+
+    def remove(_root, directory):
+        calls.append(directory.name)
+        if directory.name.startswith("a-failing"):
+            raise OSError("stable failure")
+        operation_store_module._remove_operation_session_directory(_root, directory)
+        return True
+
+    monkeypatch.setattr(
+        operation_store_module,
+        "_coordinated_remove_expired_directory",
+        remove,
+    )
+
+    first = cleanup_expired_operation_sessions(root=root, now=current_time, batch_size=1)
+    first_scan_count = len(calls)
+    second = cleanup_expired_operation_sessions(root=root, now=current_time, batch_size=1)
+    second_scan_count = len(calls) - first_scan_count
+
+    assert first == []
+    assert second == ["z-expired"]
+    assert first_scan_count <= 8
+    assert second_scan_count <= 8
+
+
+def test_operation_fence_rejects_short_active_secret_and_accepts_32_utf8_bytes(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv("OPERATION_FENCE_HMAC_ACTIVE_KEY_ID", "v2")
+    monkeypatch.setenv("OPERATION_FENCE_HMAC_SECRET", "short")
+    monkeypatch.setenv("OPERATION_FENCE_HMAC_PREVIOUS_KEYS", "{}")
+    with pytest.raises(OperationStoreError, match="at least 32 bytes"):
+        OperationStore(root=tmp_path / "short-active")
+
+    utf8_root = tmp_path / "utf8-previous"
+    previous_secret = "\u00e9" * 20
+    monkeypatch.setenv("OPERATION_FENCE_HMAC_ACTIVE_KEY_ID", "v1")
+    monkeypatch.setenv("OPERATION_FENCE_HMAC_SECRET", previous_secret)
+    monkeypatch.setenv("OPERATION_FENCE_HMAC_PREVIOUS_KEYS", "{}")
+    monkeypatch.delenv("OPERATION_FENCE_HMAC_ROTATION_HORIZON", raising=False)
+    OperationStore(root=utf8_root)
+
+    monkeypatch.setenv("OPERATION_FENCE_HMAC_ACTIVE_KEY_ID", "v2")
+    monkeypatch.setenv(
+        "OPERATION_FENCE_HMAC_SECRET",
+        "active-operation-fence-secret-at-least-32-bytes",
+    )
+    monkeypatch.setenv(
+        "OPERATION_FENCE_HMAC_PREVIOUS_KEYS",
+        json.dumps({"v1": previous_secret}),
+    )
+    monkeypatch.setenv(
+        "OPERATION_FENCE_HMAC_ROTATION_HORIZON",
+        (datetime.now(timezone.utc) + timedelta(days=1)).isoformat(),
+    )
+    OperationStore(root=utf8_root)
+
+
+def test_operation_fence_canary_rejects_wrong_material_for_same_key_id(
+    tmp_path,
+    monkeypatch,
+):
+    root = tmp_path / "sessions"
+    first_secret = "first-operation-fence-secret-at-least-32-characters"
+    wrong_secret = "wrong-operation-fence-secret-at-least-32-characters"
+    monkeypatch.setenv("OPERATION_FENCE_HMAC_ACTIVE_KEY_ID", "stable-id")
+    monkeypatch.setenv("OPERATION_FENCE_HMAC_SECRET", first_secret)
+    OperationStore(root=root)
+
+    lifecycle_root = tmp_path / ".sessions-lifecycle"
+    canaries = list(lifecycle_root.glob(".key-canary-*"))
+    assert len(canaries) == 1
+    assert list(lifecycle_root.glob("*.json")) == []
+    serialized = canaries[0].read_text(encoding="utf-8")
+    assert first_secret not in serialized
+
+    monkeypatch.setenv("OPERATION_FENCE_HMAC_SECRET", wrong_secret)
+    with pytest.raises(OperationStoreError, match="same key id.*different secret material"):
+        OperationStore(root=root)
+
+
+def test_operation_fence_rotation_requires_bootstrapped_matching_previous_canary(
+    tmp_path,
+    monkeypatch,
+):
+    old_secret = "old-operation-fence-secret-at-least-32-characters"
+    wrong_secret = "wrong-operation-fence-secret-at-least-32-characters"
+    new_secret = "new-operation-fence-secret-at-least-32-characters"
+    horizon = (datetime.now(timezone.utc) + timedelta(days=7)).isoformat()
+
+    monkeypatch.setenv("OPERATION_FENCE_HMAC_ACTIVE_KEY_ID", "v2")
+    monkeypatch.setenv("OPERATION_FENCE_HMAC_SECRET", new_secret)
+    monkeypatch.setenv(
+        "OPERATION_FENCE_HMAC_PREVIOUS_KEYS",
+        json.dumps({"v1": old_secret}),
+    )
+    monkeypatch.setenv("OPERATION_FENCE_HMAC_ROTATION_HORIZON", horizon)
+    with pytest.raises(OperationStoreError, match="(?i)previous.*canary.*bootstrap"):
+        OperationStore(root=tmp_path / "missing-bootstrap")
+    assert list((tmp_path / ".missing-bootstrap-lifecycle").glob("*.canary")) == []
+
+    root = tmp_path / "wrong-material"
+    monkeypatch.setenv("OPERATION_FENCE_HMAC_ACTIVE_KEY_ID", "v1")
+    monkeypatch.setenv("OPERATION_FENCE_HMAC_SECRET", old_secret)
+    monkeypatch.setenv("OPERATION_FENCE_HMAC_PREVIOUS_KEYS", "{}")
+    monkeypatch.delenv("OPERATION_FENCE_HMAC_ROTATION_HORIZON", raising=False)
+    OperationStore(root=root)
+    monkeypatch.setenv("OPERATION_FENCE_HMAC_ACTIVE_KEY_ID", "v2")
+    monkeypatch.setenv("OPERATION_FENCE_HMAC_SECRET", new_secret)
+    monkeypatch.setenv(
+        "OPERATION_FENCE_HMAC_PREVIOUS_KEYS",
+        json.dumps({"v1": wrong_secret}),
+    )
+    monkeypatch.setenv("OPERATION_FENCE_HMAC_ROTATION_HORIZON", horizon)
+    with pytest.raises(OperationStoreError, match="same key id.*different secret material"):
+        OperationStore(root=root)
+    assert len(list((tmp_path / ".wrong-material-lifecycle").glob("*.canary"))) == 1
+
+
+def test_rotating_purge_waits_for_old_head_lock_and_old_path_stays_terminal(
+    tmp_path,
+    monkeypatch,
+):
+    import app.operation_store as operation_store_module
+
+    old_secret = "old-operation-fence-secret-at-least-32-characters"
+    new_secret = "new-operation-fence-secret-at-least-32-characters"
+    root = tmp_path / "sessions"
+    monkeypatch.setenv("OPERATION_FENCE_HMAC_ACTIVE_KEY_ID", "v1")
+    monkeypatch.setenv("OPERATION_FENCE_HMAC_SECRET", old_secret)
+    monkeypatch.setenv("OPERATION_FENCE_HMAC_PREVIOUS_KEYS", "{}")
+    old_store = OperationStore(root=root)
+    session_id = _create_test_operation_session(old_store).session_id
+    old_key = hmac.new(
+        old_secret.encode("utf-8"),
+        session_id.encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+    old_state_path = old_store._lifecycle_root / f"{old_key}.json"
+    old_lock_path = old_store._lifecycle_root / f"{old_key}.lock"
+
+    monkeypatch.setenv("OPERATION_FENCE_HMAC_ACTIVE_KEY_ID", "v2")
+    monkeypatch.setenv("OPERATION_FENCE_HMAC_SECRET", new_secret)
+    monkeypatch.setenv(
+        "OPERATION_FENCE_HMAC_PREVIOUS_KEYS",
+        json.dumps({"v1": old_secret}),
+    )
+    monkeypatch.setenv(
+        "OPERATION_FENCE_HMAC_ROTATION_HORIZON",
+        (datetime.now(timezone.utc) + timedelta(days=7)).isoformat(),
+    )
+    rotating_store = OperationStore(root=root)
+    old_started = threading.Event()
+    release_old = threading.Event()
+    purge_finished = threading.Event()
+
+    def old_head_write():
+        with operation_store_module._file_lock(old_lock_path):
+            payload = json.loads(old_state_path.read_text(encoding="utf-8"))
+            assert payload["schema_version"] == 2
+            assert payload["status"] == "active"
+            old_started.set()
+            assert release_old.wait(timeout=2)
+            old_store._atomic_write(
+                old_state_path,
+                {
+                    "schema_version": 2,
+                    "status": "active",
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                    "retain_until": (datetime.now(timezone.utc) + timedelta(days=1)).isoformat(),
+                },
+            )
+
+    def purge():
+        rotating_store.purge_session_state(session_id)
+        purge_finished.set()
+
+    writer = threading.Thread(target=old_head_write, daemon=True)
+    purger = threading.Thread(target=purge, daemon=True)
+    writer.start()
+    assert old_started.wait(timeout=2)
+    purger.start()
+    time.sleep(0.1)
+    assert not purge_finished.is_set()
+    release_old.set()
+    writer.join(timeout=2)
+    purger.join(timeout=2)
+
+    assert purge_finished.is_set()
+    old_payload = json.loads(old_state_path.read_text(encoding="utf-8"))
+    assert old_payload["schema_version"] == 2
+    assert old_payload["status"] == "purged"
+
+
+def test_operation_fence_key_rotation_shares_terminal_state_and_rejects_early_key_removal(
+    tmp_path,
+    monkeypatch,
+):
+    old_secret = "old-operation-fence-secret-at-least-32-characters"
+    new_secret = "new-operation-fence-secret-at-least-32-characters"
+    rotation_horizon = (datetime.now(timezone.utc) + timedelta(days=7)).isoformat()
+    root = tmp_path / "sessions"
+    session_id = "rotation-session"
+
+    monkeypatch.setenv("OPERATION_FENCE_HMAC_ACTIVE_KEY_ID", "v1")
+    monkeypatch.setenv("OPERATION_FENCE_HMAC_SECRET", old_secret)
+    monkeypatch.setenv("OPERATION_FENCE_HMAC_PREVIOUS_KEYS", "{}")
+    monkeypatch.delenv("OPERATION_FENCE_HMAC_ROTATION_HORIZON", raising=False)
+    old_store = OperationStore(root=root)
+    old_store._write_lifecycle_state(session_id, "active")
+
+    monkeypatch.setenv("OPERATION_FENCE_HMAC_ACTIVE_KEY_ID", "v2")
+    monkeypatch.setenv("OPERATION_FENCE_HMAC_SECRET", new_secret)
+    monkeypatch.setenv(
+        "OPERATION_FENCE_HMAC_PREVIOUS_KEYS",
+        json.dumps({"v1": old_secret}),
+    )
+    monkeypatch.setenv("OPERATION_FENCE_HMAC_ROTATION_HORIZON", rotation_horizon)
+    rotating_store = OperationStore(root=root)
+    canary_payloads = [
+        json.loads(path.read_text(encoding="utf-8"))
+        for path in rotating_store._lifecycle_root.glob("*.canary")
+    ]
+    previous_canary = next(
+        payload for payload in canary_payloads if payload["key_id"] == "v1"
+    )
+    assert previous_canary["required_until"] == rotation_horizon
+    assert rotating_store._read_lifecycle_state(session_id)["status"] == "active"
+    rotating_store._write_lifecycle_state(session_id, "purged")
+    old_key = hmac.new(
+        old_secret.encode("utf-8"), session_id.encode("utf-8"), hashlib.sha256
+    ).hexdigest()
+    old_reader_payload = json.loads(
+        (rotating_store._lifecycle_root / f"{old_key}.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert old_reader_payload["schema_version"] == 2
+    assert old_reader_payload["status"] == "purged"
+
+    monkeypatch.setenv("OPERATION_FENCE_HMAC_ACTIVE_KEY_ID", "v1")
+    monkeypatch.setenv("OPERATION_FENCE_HMAC_SECRET", old_secret)
+    monkeypatch.setenv("OPERATION_FENCE_HMAC_PREVIOUS_KEYS", "{}")
+    monkeypatch.delenv("OPERATION_FENCE_HMAC_ROTATION_HORIZON", raising=False)
+    restarted_old = OperationStore(root=root)
+    assert restarted_old._read_lifecycle_state(session_id)["status"] == "purged"
+
+    monkeypatch.setenv("OPERATION_FENCE_HMAC_ACTIVE_KEY_ID", "v2")
+    monkeypatch.setenv("OPERATION_FENCE_HMAC_SECRET", new_secret)
+    monkeypatch.setenv("OPERATION_FENCE_HMAC_PREVIOUS_KEYS", "{}")
+    monkeypatch.delenv("OPERATION_FENCE_HMAC_ROTATION_HORIZON", raising=False)
+    with pytest.raises(OperationStoreError, match="(?i)previous.*retention horizon"):
+        OperationStore(root=root)
+
+
 def test_expired_context_cannot_reuse_operation_id_after_fence_horizon(
     tmp_path,
     monkeypatch,
 ):
     monkeypatch.setenv("OPERATION_STORE_PROVIDER", "node")
     monkeypatch.setenv("CONVERSION_CONTEXT_SECRET", "test-secret")
+    monkeypatch.setenv("OPERATION_FENCE_HMAC_SECRET", OPERATION_FENCE_SECRET)
     expired = _context_token(
         {
             "purpose": "misa_conversion",
@@ -968,6 +1330,7 @@ def test_personal_conversion_context_owns_session_without_workspace(
 
     monkeypatch.delenv("ALLOW_UNAUTHENTICATED_LOCAL_OPERATIONS", raising=False)
     monkeypatch.setenv("CONVERSION_CONTEXT_SECRET", "test-secret")
+    monkeypatch.setenv("OPERATION_FENCE_HMAC_SECRET", OPERATION_FENCE_SECRET)
     monkeypatch.setenv("OPERATION_SESSION_DIR", str(tmp_path / "sessions"))
     monkeypatch.setenv("MAPPING_DB_PATH", str(tmp_path / "mapping.sqlite"))
     monkeypatch.setenv("FEATURE_MAPPING_PROFILE_V2", "false")
@@ -1264,7 +1627,11 @@ def test_session_readiness_ignores_client_rows_instead_of_breaking_preview_flow(
     assert "FORGED-CLIENT-ROW" not in response.text
 
 
-def test_session_export_uses_active_revision_without_client_rows(tmp_path, monkeypatch):
+def test_session_export_uses_active_revision_without_client_rows(
+    tmp_path,
+    monkeypatch,
+    _allow_uncertified_workflow_export,
+):
     import app.misa_workflow as workflow
 
     monkeypatch.setattr(workflow, "UPLOAD_ROOT", tmp_path / "uploads")

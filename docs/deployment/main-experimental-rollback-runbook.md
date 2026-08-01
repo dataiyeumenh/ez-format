@@ -43,6 +43,27 @@ Record the trigger, UTC time, affected service, deployed SHA, request IDs,
 redacted logs, and decision owner. Preserve evidence before changing service
 configuration.
 
+## Lifecycle key rotation precondition
+
+Lifecycle HMAC rotation requires a one-key bootstrap release before any
+multi-key release:
+
+1. Deploy this code with the existing key ID and material as the sole active
+   key, `*_PREVIOUS_KEYS={}`, and a blank `*_ROTATION_HORIZON`. Start both
+   services and verify the Node Mongo canary and converter lifecycle-root canary
+   were persisted without recording their fingerprints.
+2. In a later release, configure the new active key, place the bootstrapped key
+   in `*_PREVIOUS_KEYS`, and set a horizon no earlier than every artifact,
+   context, and fence retention deadline. Run the Node lifecycle migration in
+   its documented apply sequence before mixed-version traffic.
+3. Keep every previous key configured through that horizon and at least the
+   supported two-release rolling window. Never shorten the horizon or reuse a
+   key ID with different material.
+
+A missing previous-key canary, fingerprint mismatch, shortened horizon, or
+early key removal must fail startup closed. Do not bypass this gate during
+rollback; use the bootstrapped key material or remain on the current SHA.
+
 ## First response: flags off
 
 For a feature or gateway regression, disable the gates first and redeploy the
@@ -109,6 +130,46 @@ checks. If core behavior is healthy, stop here; do not restore MongoDB.
 Keep Student privacy retention enabled until coordinated expiry purge reports
 no remaining Student raw state or metadata, even while the product feature is off.
 
+## Mandatory legacy deep-fallback drain gate
+
+The legacy deep fallback SHA is allowed only while the release is fully
+quiesced. First quiesce ingress, normal Node and converter workers, every queue
+producer and consumer, scheduled jobs, and autoscaling. Drain in-flight HTTP
+requests, worker jobs, leases, and queues to zero. Only the current SHA's
+dedicated privacy and lifecycle drain commands may run after quiescence.
+
+The pre-rollback drain report from the currently deployed code must then prove
+all of these independently:
+
+- zero active/pending Student rows, including active, `deleting`,
+  `delete_failed`, question-event, activity, and retry-job records;
+- zero artifact lifecycle rows in `active` or `purging` state and zero pending
+  artifact metadata or GridFS bytes for Student operation bindings;
+- zero raw uploads in Node/GridFS and in every converter Student upload and
+  operation-session directory.
+
+Run the coordinated Student deletion sweeper and artifact sweeper until two
+consecutive bounded passes report zero. Query Mongo collection counts plus the
+GridFS binding count from the current code, then inspect the converter retention
+roots with the current cleanup command. Record only counts, current SHA, UTC
+timestamp, environment revision, and operator; never record identifiers or raw
+bytes. A release owner must attest that the three zero results refer to the same
+drain window.
+
+Keep ingress, workers, and queues quiesced. Immediately before any old SHA
+process starts, recheck every count and queue depth with the current SHA. Record
+a fresh same-window zero result. Do not start an old SHA container, worker,
+health probe, or one-off command while any privacy data or lifecycle state
+remains. MongoDB/GridFS only is supported for artifact bytes; no S3 drain,
+fallback, restore, or deletion path is valid.
+
+If any count is non-zero, unknown, stale, or the purge verifier is unavailable,
+fail closed: stay on the current code with flags off and
+`STUDENT_PRIVACY_RETENTION_ENABLED=true`. Do not deploy the legacy deep fallback,
+remove lifecycle keys, or claim rollback completion. The primary emergency SHA
+also keeps retention enabled; this stricter zero-data gate applies before any SHA
+old enough to lack the coordinated privacy lifecycle.
+
 ## Code rollback to the approved ref
 
 Use this path when flags-off redeploy does not restore core behavior, or when
@@ -119,8 +180,11 @@ the candidate itself is unsafe.
    audit records, or failed-release logs.
 2. Verify the emergency ref resolves to the exact approved SHA above.
 3. In Render, deploy the converter and Node services from the exact emergency
-   SHA. Keep their production roots, build commands, start commands, and
-   secret references unchanged unless the incident owner approves a change.
+   SHA. For the legacy deep fallback, repeat the mandatory zero recheck
+   immediately before starting either service; a non-zero, unknown, or stale
+   result forbids startup. Keep production roots, build commands, start
+   commands, and secret references unchanged unless the incident owner
+   approves a change.
 4. In Vercel, redeploy the deployment built from the same emergency SHA. Keep
    `VITE_API_URL` pointed to Node and retain the flags-off values.
 5. Check `GET /healthz` and `GET /api/health`, then repeat the smoke checklist

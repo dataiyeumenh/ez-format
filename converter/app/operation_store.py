@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import hashlib
+import heapq
 import hmac
 import json
 import os
 import shutil
 import threading
 import uuid
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -27,6 +28,8 @@ DEFAULT_OPERATION_SESSION_CREATION_GRACE_SECONDS = 300
 MIN_OPERATION_FENCE_RETENTION_SECONDS = 24 * 60 * 60
 _OPERATION_SESSION_DIRECTORY_LOCK = threading.RLock()
 _ACTIVE_OPERATION_SESSION_CREATIONS: set[tuple[str, str]] = set()
+_OPERATION_CLEANUP_CURSOR_LOCK = threading.Lock()
+_OPERATION_CLEANUP_CURSORS: dict[tuple[str, str], str] = {}
 
 
 class OperationStoreError(ValueError):
@@ -120,18 +123,24 @@ def cleanup_expired_operation_sessions(
         limit = DEFAULT_OPERATION_SESSION_CLEANUP_BATCH_SIZE
     current_time = now or datetime.now(timezone.utc)
     deleted: list[str] = []
+    scan_limit = min(limit * 8, 8000)
+    lifecycle_root = session_root.parent / f".{session_root.name}-lifecycle"
+    if session_root.is_dir() or lifecycle_root.is_dir():
+        lifecycle_root.mkdir(parents=True, exist_ok=True)
+        _assert_operation_fence_key_coverage(lifecycle_root)
+
+    session_cursor_key = (str(session_root.resolve()), "sessions")
+    directories = _bounded_cleanup_paths(
+        lambda: session_root.iterdir(),
+        cursor_key=session_cursor_key,
+        scan_limit=scan_limit,
+        predicate=lambda path: path.is_dir() or path.is_symlink(),
+    ) if session_root.is_dir() else []
     inspected_sessions = 0
-    directories = (
-        sorted(session_root.iterdir(), key=lambda path: path.name)
-        if session_root.is_dir()
-        else ()
-    )
+    last_session_name = ""
     for directory in directories:
-        if inspected_sessions >= limit:
-            break
-        if not directory.is_dir() and not directory.is_symlink():
-            continue
         inspected_sessions += 1
+        last_session_name = directory.name
         with _OPERATION_SESSION_DIRECTORY_LOCK:
             if _creation_registry_key(session_root, directory) in (
                 _ACTIVE_OPERATION_SESSION_CREATIONS
@@ -149,19 +158,93 @@ def cleanup_expired_operation_sessions(
             continue
         if removed:
             deleted.append(directory.name)
-    lifecycle_root = session_root.parent / f".{session_root.name}-lifecycle"
-    if lifecycle_root.is_dir():
-        inspected_fences = 0
-        for state_path in sorted(lifecycle_root.glob("*.json"), key=lambda path: path.name):
-            if inspected_fences >= limit:
+            if len(deleted) >= limit:
                 break
+    _advance_cleanup_cursor(
+        session_cursor_key,
+        last_session_name,
+        scanned=inspected_sessions,
+        available=len(directories),
+        scan_limit=scan_limit,
+    )
+
+    if lifecycle_root.is_dir():
+        fence_cursor_key = (str(lifecycle_root.resolve()), "fences")
+        state_paths = _bounded_cleanup_paths(
+            lambda: lifecycle_root.glob("*.json"),
+            cursor_key=fence_cursor_key,
+            scan_limit=scan_limit,
+            predicate=lambda path: not path.name.startswith(".key-canary-"),
+        )
+        inspected_fences = 0
+        deleted_fences = 0
+        last_fence_name = ""
+        for state_path in state_paths:
             inspected_fences += 1
+            last_fence_name = state_path.name
             try:
                 migrated_path = _migrate_legacy_lifecycle_path(state_path)
-                _remove_expired_purged_fence(migrated_path, current_time)
+                payload = _read_lifecycle_payload(migrated_path, expected_schema=2)
+                if not _purged_fence_is_expired(payload, current_time):
+                    continue
+                if _remove_expired_purged_fence(migrated_path, current_time):
+                    deleted_fences += 1
+                    if deleted_fences >= limit:
+                        break
             except (OSError, OperationStoreError):
                 continue
+        _advance_cleanup_cursor(
+            fence_cursor_key,
+            last_fence_name,
+            scanned=inspected_fences,
+            available=len(state_paths),
+            scan_limit=scan_limit,
+        )
     return deleted
+
+
+def _bounded_cleanup_paths(
+    paths: Callable[[], Iterator[Path]],
+    *,
+    cursor_key: tuple[str, str],
+    scan_limit: int,
+    predicate: Callable[[Path], bool],
+) -> list[Path]:
+    with _OPERATION_CLEANUP_CURSOR_LOCK:
+        after_name = _OPERATION_CLEANUP_CURSORS.get(cursor_key, "")
+
+    def select(after: str) -> list[Path]:
+        return heapq.nsmallest(
+            scan_limit,
+            (
+                path
+                for path in paths()
+                if path.name > after and predicate(path)
+            ),
+            key=lambda path: path.name,
+        )
+
+    selected = select(after_name)
+    return selected if selected or not after_name else select("")
+
+
+def _advance_cleanup_cursor(
+    cursor_key: tuple[str, str],
+    last_name: str,
+    *,
+    scanned: int,
+    available: int,
+    scan_limit: int,
+) -> None:
+    with _OPERATION_CLEANUP_CURSOR_LOCK:
+        if last_name and (scanned < available or available == scan_limit):
+            if cursor_key not in _OPERATION_CLEANUP_CURSORS and len(
+                _OPERATION_CLEANUP_CURSORS
+            ) >= 128:
+                _OPERATION_CLEANUP_CURSORS.pop(next(iter(_OPERATION_CLEANUP_CURSORS)))
+            _OPERATION_CLEANUP_CURSORS[cursor_key] = last_name
+        else:
+            _OPERATION_CLEANUP_CURSORS.pop(cursor_key, None)
 
 
 
@@ -195,6 +278,7 @@ class OperationStore:
         self.root.mkdir(parents=True, exist_ok=True)
         self._lifecycle_root = self.root.parent / f".{self.root.name}-lifecycle"
         self._lifecycle_root.mkdir(parents=True, exist_ok=True)
+        _assert_operation_fence_key_coverage(self._lifecycle_root)
         self._remote_client = remote_client
         self._remote_run_id = str(conversion_run_id or "").strip()
         self._remote_payloads: dict[str, dict[str, Any]] = {}
@@ -1106,7 +1190,7 @@ class OperationStore:
                     if depths[key] == 0:
                         depths.pop(key, None)
                 return
-            with _file_lock(self._lifecycle_lock_path(session_id)):
+            with _operation_fence_locks(self._lifecycle_root, session_id):
                 lifecycle = self._read_lifecycle_state(session_id)
                 if lifecycle is None:
                     if (
@@ -1134,7 +1218,7 @@ class OperationStore:
         with cls._locks_guard:
             thread_lock = cls._locks.setdefault(session_id, threading.RLock())
         with thread_lock:
-            with _file_lock(self._lifecycle_lock_path(session_id)):
+            with _operation_fence_locks(self._lifecycle_root, session_id):
                 lifecycle = self._read_lifecycle_state(session_id)
                 if lifecycle is None or lifecycle.get("status") == "active":
                     self._write_lifecycle_state(session_id, "purging")
@@ -1147,7 +1231,7 @@ class OperationStore:
 
     def _lifecycle_lock_path(self, session_id: str) -> Path:
         self._directory(session_id)
-        return self._lifecycle_root / f"{_operation_fence_key(session_id)}.lock"
+        return _operation_fence_lock_path(self._lifecycle_root, session_id)
 
     def _lifecycle_state_path(self, session_id: str) -> Path:
         self._directory(session_id)
@@ -1158,24 +1242,47 @@ class OperationStore:
         return self._lifecycle_root / f"{session_id}.json"
 
     def _read_lifecycle_state(self, session_id: str) -> dict[str, Any] | None:
-        path = self._lifecycle_state_path(session_id)
+        paths = _operation_fence_state_paths(self._lifecycle_root, session_id)
+        path = paths[0][1]
         legacy_path = self._legacy_lifecycle_state_path(session_id)
         if legacy_path.is_file():
-            return _migrate_legacy_lifecycle_state(
+            _migrate_legacy_lifecycle_state(
                 lifecycle_root=self._lifecycle_root,
                 session_id=session_id,
                 hashed_path=path,
             )
-        return _read_lifecycle_payload(path, expected_schema=2) if path.is_file() else None
+        observed: list[dict[str, Any]] = []
+        for key_id, candidate in paths:
+            if not candidate.is_file():
+                continue
+            payload = _read_lifecycle_payload(candidate, expected_schema=2)
+            observed.append(_upgrade_lifecycle_payload(payload, session_id, key_id))
+        if not observed:
+            return None
+        merged = observed[0]
+        for payload in observed[1:]:
+            merged = _merged_lifecycle_payload(merged, payload, session_id=session_id)
+        for _key_id, candidate in paths:
+            if not candidate.is_file() or _read_lifecycle_payload(
+                candidate,
+                expected_schema=2,
+            ) != merged:
+                self._atomic_write(candidate, merged)
+        return merged
 
     def _write_lifecycle_state(self, session_id: str, status: str) -> None:
         if status not in {"active", "purging", "purged"}:
             raise OperationStoreError("Operation lifecycle fence không hợp lệ")
         current_time = datetime.now(timezone.utc)
-        self._atomic_write(
-            self._lifecycle_state_path(session_id),
-            _operation_fence_payload(status, current_time),
-        )
+        current = self._read_lifecycle_state(session_id)
+        payload = _operation_fence_payload(status, current_time, session_id=session_id)
+        if current is not None:
+            payload = _merged_lifecycle_payload(current, payload, session_id=session_id)
+        for _key_id, path in _operation_fence_state_paths(
+            self._lifecycle_root,
+            session_id,
+        ):
+            self._atomic_write(path, payload)
 
     @staticmethod
     def _atomic_write(path: Path, payload: dict[str, Any]) -> None:
@@ -1286,20 +1393,299 @@ def _operation_fence_secret() -> bytes:
         ),
         "",
     )
-    if not secret:
-        raise OperationStoreError("Operation lifecycle HMAC secret is required")
-    return secret.encode("utf-8")
+    encoded = secret.encode("utf-8")
+    if len(encoded) < 32:
+        raise OperationStoreError(
+            "Operation lifecycle HMAC secret must contain at least 32 bytes"
+        )
+    return encoded
 
 
-def _operation_fence_key(session_id: str) -> str:
+def _operation_fence_key_ring() -> dict[str, Any]:
+    active_key_id = os.getenv("OPERATION_FENCE_HMAC_ACTIVE_KEY_ID", "v1").strip()
+    if not active_key_id or any(
+        not (character.isalnum() or character in {".", "_", "-"})
+        for character in active_key_id
+    ) or len(active_key_id) > 64:
+        raise OperationStoreError("OPERATION_FENCE_HMAC_ACTIVE_KEY_ID is invalid")
+    raw_previous = os.getenv("OPERATION_FENCE_HMAC_PREVIOUS_KEYS", "{}").strip() or "{}"
+    try:
+        previous = json.loads(raw_previous)
+    except json.JSONDecodeError as exc:
+        raise OperationStoreError(
+            "OPERATION_FENCE_HMAC_PREVIOUS_KEYS must be a JSON object"
+        ) from exc
+    if not isinstance(previous, dict):
+        raise OperationStoreError(
+            "OPERATION_FENCE_HMAC_PREVIOUS_KEYS must be a JSON object"
+        )
+    entries = [(active_key_id, _operation_fence_secret())]
+    for raw_key_id, raw_secret in previous.items():
+        key_id = str(raw_key_id or "").strip()
+        secret = str(raw_secret or "").strip()
+        if (
+            not key_id
+            or key_id == active_key_id
+            or len(key_id) > 64
+            or any(
+                not (character.isalnum() or character in {".", "_", "-"})
+                for character in key_id
+            )
+        ):
+            raise OperationStoreError(
+                "OPERATION_FENCE_HMAC_PREVIOUS_KEYS contains an invalid key id"
+            )
+        encoded_secret = secret.encode("utf-8")
+        if len(encoded_secret) < 32:
+            raise OperationStoreError(
+                "Every previous operation fence HMAC key must contain at least 32 bytes"
+            )
+        entries.append((key_id, encoded_secret))
+    if len({secret for _key_id, secret in entries}) != len(entries):
+        raise OperationStoreError("Operation fence HMAC key ids need distinct secrets")
+
+    horizon_text = os.getenv("OPERATION_FENCE_HMAC_ROTATION_HORIZON", "").strip()
+    horizon = None
+    if horizon_text:
+        try:
+            horizon = datetime.fromisoformat(horizon_text.replace("Z", "+00:00"))
+            if horizon.tzinfo is None:
+                horizon = horizon.replace(tzinfo=timezone.utc)
+        except ValueError as exc:
+            raise OperationStoreError(
+                "OPERATION_FENCE_HMAC_ROTATION_HORIZON is invalid"
+            ) from exc
+    if len(entries) > 1 and horizon is None:
+        raise OperationStoreError(
+            "OPERATION_FENCE_HMAC_ROTATION_HORIZON is required during key rotation"
+        )
+    if (
+        horizon is not None
+        and horizon > datetime.now(timezone.utc)
+        and len(entries) == 1
+    ):
+        raise OperationStoreError(
+            "Previous operation fence key cannot be removed before the retention horizon"
+        )
+    return {
+        "active_key_id": active_key_id,
+        "entries": entries,
+        "previous_key_ids": [key_id for key_id, _secret in entries[1:]],
+        "rotation_horizon": horizon,
+    }
+
+
+def _operation_fence_aliases(session_id: str) -> list[tuple[str, str]]:
     normalized = str(session_id or "").strip()
     if not normalized:
         raise OperationStoreError("Session ID không hợp lệ")
+    return [
+        (
+            key_id,
+            hmac.new(secret, normalized.encode("utf-8"), hashlib.sha256).hexdigest(),
+        )
+        for key_id, secret in _operation_fence_key_ring()["entries"]
+    ]
+
+
+def _operation_fence_key(session_id: str) -> str:
+    return _operation_fence_aliases(session_id)[0][1]
+
+
+def _operation_digest(session_id: str) -> str:
+    normalized = str(session_id or "").strip()
+    if not normalized:
+        raise OperationStoreError("Session ID không hợp lệ")
+    return hashlib.sha256(
+        f"operation-fence-lock\0{normalized}".encode("utf-8")
+    ).hexdigest()
+
+
+def _operation_fence_state_paths(
+    lifecycle_root: Path,
+    session_id: str,
+) -> list[tuple[str, Path]]:
+    return [
+        (key_id, lifecycle_root / f"{operation_key}.json")
+        for key_id, operation_key in _operation_fence_aliases(session_id)
+    ]
+
+
+def _operation_fence_lock_path(lifecycle_root: Path, session_id: str) -> Path:
+    return lifecycle_root / f".{_operation_digest(session_id)}.lock"
+
+
+def _operation_fence_lock_paths(
+    lifecycle_root: Path,
+    session_id: str,
+) -> list[Path]:
+    paths = {_operation_fence_lock_path(lifecycle_root, session_id)}
+    paths.update(
+        lifecycle_root / f"{operation_key}.lock"
+        for _key_id, operation_key in _operation_fence_aliases(session_id)
+    )
+    return sorted(paths, key=lambda path: path.name)
+
+
+@contextmanager
+def _operation_fence_locks(
+    lifecycle_root: Path,
+    session_id: str,
+) -> Iterator[None]:
+    with ExitStack() as stack:
+        for path in _operation_fence_lock_paths(lifecycle_root, session_id):
+            stack.enter_context(_file_lock(path))
+        yield
+
+
+def _operation_fence_key_canary(key_id: str, secret: bytes) -> str:
     return hmac.new(
-        _operation_fence_secret(),
-        normalized.encode("utf-8"),
+        secret,
+        f"ez-format:operation-fence-key-canary:v1\0{key_id}".encode("utf-8"),
         hashlib.sha256,
     ).hexdigest()
+
+
+def _operation_fence_key_canary_path(lifecycle_root: Path, key_id: str) -> Path:
+    key_hash = hashlib.sha256(key_id.encode("utf-8")).hexdigest()
+    # HEAD cleanup treats every root-level JSON file as a lifecycle fence.
+    return lifecycle_root / f".key-canary-{key_hash}.canary"
+
+
+def _assert_operation_fence_key_canaries(
+    lifecycle_root: Path,
+    key_ring: dict[str, Any],
+) -> None:
+    configured_key_ids = {
+        key_id for key_id, _secret in key_ring["entries"]
+    }
+    lock_path = lifecycle_root / ".key-canary.lock"
+    with _file_lock(lock_path):
+        observed_by_key_id: dict[str, dict[str, Any]] = {}
+        current_time = datetime.now(timezone.utc)
+        for path in lifecycle_root.glob(".key-canary-*.canary"):
+            try:
+                observed = json.loads(path.read_text(encoding="utf-8"))
+                key_id = str(observed.get("key_id") or "")
+                fingerprint = str(observed.get("fingerprint") or "")
+                required_until = _lifecycle_timestamp(observed, "required_until")
+            except (OSError, json.JSONDecodeError, OperationStoreError) as exc:
+                raise OperationStoreError("Operation fence key canary is invalid") from exc
+            if (
+                observed.get("schema_version") != 1
+                or not key_id
+                or len(key_id) > 64
+                or any(
+                    not (character.isalnum() or character in {".", "_", "-"})
+                    for character in key_id
+                )
+                or len(fingerprint) != 64
+                or any(character not in "0123456789abcdef" for character in fingerprint)
+                or path != _operation_fence_key_canary_path(lifecycle_root, key_id)
+            ):
+                raise OperationStoreError("Operation fence key canary is invalid")
+            observed_by_key_id[key_id] = observed
+            if (
+                key_id not in configured_key_ids
+                and required_until is not None
+                and required_until > current_time
+            ):
+                raise OperationStoreError(
+                    "Previous operation fence key cannot be removed before the retention horizon"
+                )
+
+        for key_id in key_ring["previous_key_ids"]:
+            if key_id not in observed_by_key_id:
+                raise OperationStoreError(
+                    "Previous operation fence key canary is missing; "
+                    "deploy a one-key canary bootstrap first"
+                )
+
+        for key_id, secret in key_ring["entries"]:
+            fingerprint = _operation_fence_key_canary(key_id, secret)
+            observed = observed_by_key_id.get(key_id)
+            if observed is not None and observed.get("fingerprint") != fingerprint:
+                raise OperationStoreError(
+                    f"Operation fence same key id {key_id} uses different secret material"
+                )
+            existing_horizon = (
+                _lifecycle_timestamp(observed, "required_until")
+                if observed is not None
+                else None
+            )
+            if (
+                key_id in key_ring["previous_key_ids"]
+                and existing_horizon is not None
+                and existing_horizon > key_ring["rotation_horizon"]
+            ):
+                raise OperationStoreError(
+                    "Operation fence key rotation horizon cannot be shortened"
+                )
+
+        for key_id, secret in key_ring["entries"]:
+            path = _operation_fence_key_canary_path(lifecycle_root, key_id)
+            observed = observed_by_key_id.get(key_id)
+            payload: dict[str, Any] = {
+                "schema_version": 1,
+                "key_id": key_id,
+                "fingerprint": _operation_fence_key_canary(key_id, secret),
+            }
+            if key_id in key_ring["previous_key_ids"]:
+                payload["required_until"] = key_ring["rotation_horizon"].isoformat()
+            if observed is not None:
+                existing_horizon = _lifecycle_timestamp(observed, "required_until")
+                requested_horizon = _lifecycle_timestamp(payload, "required_until")
+                if existing_horizon is not None and requested_horizon is None:
+                    payload["required_until"] = existing_horizon.isoformat()
+            OperationStore._atomic_write(path, payload)
+
+
+def _assert_operation_fence_key_coverage(lifecycle_root: Path) -> None:
+    key_ring = _operation_fence_key_ring()
+    _assert_operation_fence_key_canaries(lifecycle_root, key_ring)
+    configured_key_ids = {
+        key_id for key_id, _secret in key_ring["entries"]
+    }
+    current_time = datetime.now(timezone.utc)
+    for state_path in lifecycle_root.glob("*.json"):
+        if state_path.name.startswith(".key-canary-"):
+            continue
+        try:
+            payload = json.loads(state_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise OperationStoreError("Operation lifecycle fence không hợp lệ") from exc
+        schema_version = payload.get("schema_version")
+        if schema_version == 1:
+            continue
+        if schema_version not in {2, 3}:
+            raise OperationStoreError("Operation lifecycle fence không hợp lệ")
+        key_ids = {
+            str(key_id)
+            for key_id in payload.get("key_ids", [])
+            if str(key_id).strip()
+        }
+        required_previous = {
+            str(key_id)
+            for key_id in payload.get("required_previous_key_ids", [])
+            if str(key_id).strip()
+        }
+        horizon = _lifecycle_timestamp(payload, "key_ring_retain_until")
+        if (
+            horizon is not None
+            and horizon > current_time
+            and not required_previous.issubset(configured_key_ids)
+        ):
+            raise OperationStoreError(
+                "Previous operation fence key cannot be removed before the retention horizon"
+            )
+        if (
+            payload.get("status") in {"active", "purging"}
+            and key_ids
+            and key_ids.isdisjoint(configured_key_ids)
+        ):
+            raise OperationStoreError(
+                "Active operation fence has no configured lifecycle key"
+            )
 
 
 def _operation_fence_retention_seconds() -> int:
@@ -1316,16 +1702,29 @@ def _operation_fence_retention_seconds() -> int:
     return max(values)
 
 
-def _operation_fence_payload(status: str, current_time: datetime) -> dict[str, Any]:
+def _operation_fence_payload(
+    status: str,
+    current_time: datetime,
+    *,
+    session_id: str,
+) -> dict[str, Any]:
+    key_ring = _operation_fence_key_ring()
     retain_until = current_time + timedelta(
         seconds=_operation_fence_retention_seconds()
     )
     payload: dict[str, Any] = {
         "schema_version": 2,
+        "operation_digest": _operation_digest(session_id),
+        "key_ids": [key_id for key_id, _secret in key_ring["entries"]],
+        "required_previous_key_ids": key_ring["previous_key_ids"],
         "status": status,
         "updated_at": current_time.isoformat(),
         "retain_until": retain_until.isoformat(),
     }
+    if key_ring["rotation_horizon"] is not None:
+        payload["key_ring_retain_until"] = key_ring[
+            "rotation_horizon"
+        ].isoformat()
     if status == "purged":
         payload["purge_after"] = retain_until.isoformat()
     return payload
@@ -1341,7 +1740,10 @@ def _read_lifecycle_payload(
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise OperationStoreError("Operation lifecycle fence không hợp lệ") from exc
-    if payload.get("schema_version") != expected_schema:
+    schema_version = payload.get("schema_version")
+    if schema_version != expected_schema and not (
+        expected_schema == 2 and schema_version == 3
+    ):
         raise OperationStoreError("Operation lifecycle fence không hợp lệ")
     if payload.get("status") not in {"active", "purging", "purged"}:
         raise OperationStoreError("Operation lifecycle fence không hợp lệ")
@@ -1349,7 +1751,41 @@ def _read_lifecycle_payload(
         raise OperationStoreError("Operation lifecycle fence không hợp lệ")
     if expected_schema == 2 and "session_id" in payload:
         raise OperationStoreError("Operation lifecycle fence không hợp lệ")
+    if schema_version == 3 or "key_ids" in payload:
+        if not isinstance(payload.get("key_ids"), list) or not payload["key_ids"]:
+            raise OperationStoreError("Operation lifecycle fence không hợp lệ")
+        if not isinstance(payload.get("required_previous_key_ids"), list):
+            raise OperationStoreError("Operation lifecycle fence không hợp lệ")
+        if not isinstance(payload.get("operation_digest"), str) or len(
+            payload["operation_digest"]
+        ) != 64:
+            raise OperationStoreError("Operation lifecycle fence không hợp lệ")
     return payload
+
+
+def _upgrade_lifecycle_payload(
+    payload: dict[str, Any],
+    session_id: str,
+    key_id: str,
+) -> dict[str, Any]:
+    upgraded = dict(payload)
+    if upgraded.get("operation_digest") not in {None, _operation_digest(session_id)}:
+        raise OperationStoreError("Operation lifecycle fence không hợp lệ")
+    upgraded.pop("session_id", None)
+    upgraded.update(
+        {
+            "schema_version": 2,
+            "operation_digest": _operation_digest(session_id),
+            "key_ids": sorted({
+                key_id,
+                *(str(value) for value in upgraded.get("key_ids", []) if str(value)),
+            }),
+            "required_previous_key_ids": list(
+                upgraded.get("required_previous_key_ids", [])
+            ),
+        }
+    )
+    return upgraded
 
 
 def _lifecycle_timestamp(payload: dict[str, Any], field: str) -> datetime | None:
@@ -1366,6 +1802,8 @@ def _lifecycle_timestamp(payload: dict[str, Any], field: str) -> datetime | None
 def _merged_lifecycle_payload(
     current: dict[str, Any] | None,
     legacy: dict[str, Any],
+    *,
+    session_id: str,
 ) -> dict[str, Any]:
     status_rank = {"active": 0, "purging": 1, "purged": 2}
     status = max(
@@ -1373,7 +1811,30 @@ def _merged_lifecycle_payload(
         key=status_rank.__getitem__,
     )
     current_time = datetime.now(timezone.utc)
-    merged = _operation_fence_payload(status, current_time)
+    merged = _operation_fence_payload(status, current_time, session_id=session_id)
+    merged["key_ids"] = sorted({
+        str(key_id)
+        for payload in (current, legacy, merged)
+        if payload is not None
+        for key_id in payload.get("key_ids", [])
+        if str(key_id).strip()
+    })
+    merged["required_previous_key_ids"] = sorted({
+        str(key_id)
+        for payload in (current, legacy, merged)
+        if payload is not None
+        for key_id in payload.get("required_previous_key_ids", [])
+        if str(key_id).strip()
+    })
+    key_ring_horizons = [
+        value
+        for payload in (current, legacy, merged)
+        if payload is not None
+        for value in (_lifecycle_timestamp(payload, "key_ring_retain_until"),)
+        if value is not None
+    ]
+    if key_ring_horizons:
+        merged["key_ring_retain_until"] = max(key_ring_horizons).isoformat()
     retained = [
         value
         for payload in (current, legacy)
@@ -1426,7 +1887,25 @@ def _migrate_legacy_lifecycle_state(
                 if hashed_path.is_file()
                 else None
             )
-            merged = _merged_lifecycle_payload(current, legacy)
+            upgraded_legacy = _upgrade_lifecycle_payload(
+                legacy,
+                session_id,
+                _operation_fence_key_ring()["active_key_id"],
+            )
+            upgraded_current = (
+                _upgrade_lifecycle_payload(
+                    current,
+                    session_id,
+                    _operation_fence_key_ring()["active_key_id"],
+                )
+                if current is not None
+                else None
+            )
+            merged = _merged_lifecycle_payload(
+                upgraded_current,
+                upgraded_legacy,
+                session_id=session_id,
+            )
             OperationStore._atomic_write(hashed_path, merged)
             try:
                 legacy_path.unlink()
@@ -1458,11 +1937,10 @@ def _migrate_legacy_lifecycle_path(state_path: Path) -> Path:
         raise OperationStoreError("Operation lifecycle fence không hợp lệ")
     lifecycle_root = state_path.parent
     hashed_path = lifecycle_root / f"{_operation_fence_key(session_id)}.json"
-    hashed_lock = hashed_path.with_suffix(".lock")
     with OperationStore._locks_guard:
         thread_lock = OperationStore._locks.setdefault(session_id, threading.RLock())
     with thread_lock:
-        with _file_lock(hashed_lock):
+        with _operation_fence_locks(lifecycle_root, session_id):
             _migrate_legacy_lifecycle_state(
                 lifecycle_root=lifecycle_root,
                 session_id=session_id,
@@ -1471,31 +1949,68 @@ def _migrate_legacy_lifecycle_path(state_path: Path) -> Path:
     return hashed_path
 
 
+def _purged_fence_is_expired(
+    payload: dict[str, Any],
+    current_time: datetime,
+) -> bool:
+    if payload.get("status") != "purged":
+        return False
+    updated_at = _lifecycle_timestamp(payload, "updated_at")
+    retain_until = _lifecycle_timestamp(payload, "retain_until")
+    purge_after = _lifecycle_timestamp(payload, "purge_after")
+    if updated_at is None or retain_until is None or purge_after is None:
+        return False
+    safe_horizon = max(
+        retain_until,
+        purge_after,
+        updated_at + timedelta(seconds=_operation_fence_retention_seconds()),
+    )
+    key_ring_horizon = _lifecycle_timestamp(payload, "key_ring_retain_until")
+    if key_ring_horizon is not None:
+        safe_horizon = max(safe_horizon, key_ring_horizon)
+    return safe_horizon <= current_time
+
+
 def _remove_expired_purged_fence(state_path: Path, current_time: datetime) -> bool:
-    lock_path = state_path.with_suffix(".lock")
     try:
         observed = json.loads(state_path.read_text(encoding="utf-8"))
-        if observed.get("status") != "purged":
+        if not _purged_fence_is_expired(observed, current_time):
             return False
-        with _file_lock(lock_path):
-            payload = json.loads(state_path.read_text(encoding="utf-8"))
-            if payload.get("status") != "purged":
-                return False
-            updated_at = _lifecycle_timestamp(payload, "updated_at")
-            retain_until = _lifecycle_timestamp(payload, "retain_until")
-            purge_after = _lifecycle_timestamp(payload, "purge_after")
-            if updated_at is None or retain_until is None or purge_after is None:
-                return False
-            safe_horizon = max(
-                retain_until,
-                purge_after,
-                updated_at + timedelta(
-                    seconds=_operation_fence_retention_seconds()
-                ),
-            )
-            if safe_horizon > current_time:
-                return False
-            state_path.unlink(missing_ok=True)
+        operation_digest = str(observed.get("operation_digest") or "").strip()
+        digest_lock = (
+            state_path.parent / f".{operation_digest}.lock"
+            if len(operation_digest) == 64
+            else state_path.with_suffix(".lock")
+        )
+        siblings = [state_path]
+        if operation_digest:
+            siblings = []
+            for candidate in state_path.parent.glob("*.json"):
+                if candidate.name.startswith(".key-canary-"):
+                    continue
+                try:
+                    candidate_payload = json.loads(
+                        candidate.read_text(encoding="utf-8")
+                    )
+                except (OSError, json.JSONDecodeError):
+                    continue
+                if candidate_payload.get("operation_digest") == operation_digest:
+                    siblings.append(candidate)
+                    if len(siblings) > 64:
+                        return False
+        lock_paths = sorted(
+            {digest_lock, *(candidate.with_suffix(".lock") for candidate in siblings)},
+            key=lambda path: path.name,
+        )
+        with ExitStack() as stack:
+            for lock_path in lock_paths:
+                stack.enter_context(_file_lock(lock_path))
+            for candidate in siblings:
+                payload = json.loads(candidate.read_text(encoding="utf-8"))
+                if not _purged_fence_is_expired(payload, current_time):
+                    return False
+            for candidate in siblings:
+                candidate.unlink(missing_ok=True)
     except (
         OSError,
         ValueError,
@@ -1504,11 +2019,7 @@ def _remove_expired_purged_fence(state_path: Path, current_time: datetime) -> bo
         OperationStoreError,
     ):
         return False
-    try:
-        lock_path.unlink(missing_ok=True)
-    except OSError:
-        return False
-    return not state_path.exists() and not lock_path.exists()
+    return not state_path.exists()
 
 
 def _remove_operation_session_directory(root: Path, directory: Path) -> None:
@@ -1540,37 +2051,58 @@ def _coordinated_remove_expired_directory(root: Path, directory: Path) -> bool:
 
     lifecycle_root = root.parent / f".{root.name}-lifecycle"
     lifecycle_root.mkdir(parents=True, exist_ok=True)
-    lifecycle_key = _operation_fence_key(session_id)
-    lifecycle_path = lifecycle_root / f"{lifecycle_key}.json"
-    lock_path = lifecycle_root / f"{lifecycle_key}.lock"
+    lifecycle_paths = _operation_fence_state_paths(lifecycle_root, session_id)
     with OperationStore._locks_guard:
         thread_lock = OperationStore._locks.setdefault(session_id, threading.RLock())
     with thread_lock:
-        with _file_lock(lock_path):
-            if lifecycle_path.is_file():
-                try:
-                    lifecycle = json.loads(lifecycle_path.read_text(encoding="utf-8"))
-                except (OSError, json.JSONDecodeError) as exc:
-                    raise OperationStoreError(
-                        "Operation lifecycle fence không hợp lệ"
-                    ) from exc
-                if lifecycle.get("status") not in {"active", "purging", "purged"}:
-                    raise OperationStoreError(
-                        "Operation lifecycle fence không hợp lệ"
+        with _operation_fence_locks(lifecycle_root, session_id):
+            observed: dict[str, Any] | None = None
+            for key_id, lifecycle_path in lifecycle_paths:
+                if not lifecycle_path.is_file():
+                    continue
+                lifecycle = _upgrade_lifecycle_payload(
+                    _read_lifecycle_payload(lifecycle_path, expected_schema=2),
+                    session_id,
+                    key_id,
+                )
+                observed = (
+                    lifecycle
+                    if observed is None
+                    else _merged_lifecycle_payload(
+                        observed,
+                        lifecycle,
+                        session_id=session_id,
                     )
-            OperationStore._atomic_write(
-                lifecycle_path,
-                _operation_fence_payload("purging", datetime.now(timezone.utc)),
+                )
+            purging = _operation_fence_payload(
+                "purging",
+                datetime.now(timezone.utc),
+                session_id=session_id,
             )
+            if observed is not None:
+                purging = _merged_lifecycle_payload(
+                    observed,
+                    purging,
+                    session_id=session_id,
+                )
+            for _key_id, lifecycle_path in lifecycle_paths:
+                OperationStore._atomic_write(lifecycle_path, purging)
             with _OPERATION_SESSION_DIRECTORY_LOCK:
                 if directory.exists() or directory.is_symlink():
                     _remove_operation_session_directory(root, directory)
             if directory.exists() or directory.is_symlink():
                 return False
-            OperationStore._atomic_write(
-                lifecycle_path,
-                _operation_fence_payload("purged", datetime.now(timezone.utc)),
+            purged = _merged_lifecycle_payload(
+                purging,
+                _operation_fence_payload(
+                    "purged",
+                    datetime.now(timezone.utc),
+                    session_id=session_id,
+                ),
+                session_id=session_id,
             )
+            for _key_id, lifecycle_path in lifecycle_paths:
+                OperationStore._atomic_write(lifecycle_path, purged)
             return True
 
 

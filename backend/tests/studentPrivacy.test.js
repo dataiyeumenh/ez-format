@@ -1914,11 +1914,39 @@ test("backend environment and release runbooks keep Student privacy retention in
   );
   assert.match(envExample, /^ARTIFACT_LIFECYCLE_MIGRATION_MODE=off$/m);
   assert.match(backendEnvExample, /^ARTIFACT_LIFECYCLE_MIGRATION_MODE=off$/m);
+  assert.match(backendEnvExample, /^ARTIFACT_LIFECYCLE_HMAC_ACTIVE_KEY_ID=v1$/m);
+  assert.match(backendEnvExample, /^ARTIFACT_LIFECYCLE_HMAC_SECRET=$/m);
+  assert.match(backendEnvExample, /^ARTIFACT_LIFECYCLE_HMAC_PREVIOUS_KEYS=\{\}$/m);
+  assert.match(envExample, /^OPERATION_FENCE_HMAC_ACTIVE_KEY_ID=v1$/m);
+  assert.match(envExample, /^OPERATION_FENCE_HMAC_SECRET=$/m);
+  assert.match(envExample, /^OPERATION_FENCE_HMAC_PREVIOUS_KEYS=\{\}$/m);
+  assert.match(envExample, /operation fence HMAC secrets.*32 bytes/i);
+  assert.match(backendEnvExample, /artifact lifecycle HMAC secrets.*32 bytes/i);
+  assert.match(backendEnvExample, /^CONVERTER_ARTIFACT_STORAGE_DRIVER=mongodb$/m);
   assert.match(
     release,
     /ARTIFACT_LIFECYCLE_MIGRATION_MODE=dry-run[\s\S]{0,1000}ARTIFACT_LIFECYCLE_MIGRATION_MODE=apply/,
   );
   assert.match(release, /exact legacy lifecycle index/i);
+  assert.match(release, /rotation horizon[\s\S]{0,1200}previous key/i);
+  assert.match(
+    rollback,
+    /deep fallback[\s\S]{0,3000}zero active\/pending Student rows[\s\S]{0,1800}zero artifact lifecycle rows[\s\S]{0,1800}zero raw uploads/i,
+  );
+  assert.match(
+    rollback,
+    /any count is non-zero[\s\S]{0,500}stay on the current code[\s\S]{0,300}flags off/i,
+  );
+  assert.match(
+    rollback,
+    /quiesce ingress[\s\S]{0,500}workers[\s\S]{0,500}queues[\s\S]{0,1200}drain/i,
+  );
+  assert.match(
+    rollback,
+    /immediately before[\s\S]{0,500}old SHA[\s\S]{0,800}zero/i,
+  );
+  assert.match(rollback, /unknown[\s\S]{0,300}stale[\s\S]{0,500}fail closed/i);
+  assert.match(rollback, /MongoDB\/GridFS only[\s\S]{0,300}S3/i);
 });
 
 test("feature-off startup performs zero Student migration or model loading", async () => {

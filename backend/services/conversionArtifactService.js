@@ -11,6 +11,16 @@ const {
 const conversionOperationLifecycleSchema = new mongoose.Schema(
   {
     operationKey: { type: String, required: true, trim: true, immutable: true },
+    operationKeys: {
+      type: [{
+        _id: false,
+        keyId: { type: String, required: true, immutable: true },
+        operationKey: { type: String, required: true, immutable: true },
+      }],
+      default: [],
+    },
+    requiredPreviousKeyIds: { type: [String], default: [] },
+    keyRingRetainUntil: { type: Date, default: null },
     status: {
       type: String,
       enum: ["active", "purging", "purged"],
@@ -36,7 +46,11 @@ const conversionOperationLifecycleSchema = new mongoose.Schema(
 
 conversionOperationLifecycleSchema.index(
   { operationKey: 1 },
-  { unique: true },
+  { name: "operationKey_1", unique: true },
+);
+conversionOperationLifecycleSchema.index(
+  { "operationKeys.operationKey": 1 },
+  { name: "conversion_operation_key_alias_unique", unique: true, sparse: true },
 );
 conversionOperationLifecycleSchema.index(
   { purgeAt: 1 },
@@ -64,6 +78,9 @@ const LEGACY_LIFECYCLE_BINDING_FIELDS = [
 ];
 const LEGACY_LIFECYCLE_UNIQUE_INDEX =
   "ownerScope_1_userId_1_sessionId_1_uploadId_1_runId_1_targetTemplateId_1";
+const LEGACY_OPERATION_KEY_INDEX = "operationKey_1";
+const LIFECYCLE_KEY_CANARY_CONTEXT = "ez-format:artifact-lifecycle-key-canary:v1";
+const LIFECYCLE_KEY_CANARY_RECORD = "artifact_lifecycle_key_canary";
 const LEGACY_LIFECYCLE_INDEX_KEY = Object.fromEntries(
   LEGACY_LIFECYCLE_BINDING_FIELDS.map((field) => [field, 1]),
 );
@@ -99,13 +116,70 @@ function artifactLifecycleSecret(explicitSecret) {
     explicitSecret || process.env.ARTIFACT_LIFECYCLE_HMAC_SECRET ||
     process.env.CONVERSION_CONTEXT_SECRET || "",
   ).trim();
-  if (secret.length < 32) {
-    throw new Error("ARTIFACT_LIFECYCLE_HMAC_SECRET must contain at least 32 characters");
+  if (Buffer.byteLength(secret, "utf8") < 32) {
+    throw new Error("ARTIFACT_LIFECYCLE_HMAC_SECRET must contain at least 32 bytes");
   }
   return secret;
 }
 
-function lifecycleFilter(binding, secret) {
+function parsePreviousLifecycleKeys(value) {
+  if (value == null || value === "") return {};
+  if (typeof value === "object" && !Array.isArray(value)) return { ...value };
+  try {
+    const parsed = JSON.parse(String(value));
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error();
+    return parsed;
+  } catch {
+    throw new Error("ARTIFACT_LIFECYCLE_HMAC_PREVIOUS_KEYS must be a JSON object");
+  }
+}
+
+function artifactLifecycleKeyRing({
+  hmacSecret,
+  activeKeyId = process.env.ARTIFACT_LIFECYCLE_HMAC_ACTIVE_KEY_ID || "v1",
+  previousKeys = process.env.ARTIFACT_LIFECYCLE_HMAC_PREVIOUS_KEYS || "{}",
+  rotationHorizon = process.env.ARTIFACT_LIFECYCLE_HMAC_ROTATION_HORIZON,
+  now = () => new Date(),
+} = {}) {
+  const normalizedActiveKeyId = String(activeKeyId || "").trim();
+  if (!/^[A-Za-z0-9._-]{1,64}$/.test(normalizedActiveKeyId)) {
+    throw new Error("ARTIFACT_LIFECYCLE_HMAC_ACTIVE_KEY_ID is invalid");
+  }
+  const entries = [{ keyId: normalizedActiveKeyId, secret: artifactLifecycleSecret(hmacSecret) }];
+  for (const [rawKeyId, rawSecret] of Object.entries(parsePreviousLifecycleKeys(previousKeys))) {
+    const keyId = String(rawKeyId || "").trim();
+    if (!/^[A-Za-z0-9._-]{1,64}$/.test(keyId) || keyId === normalizedActiveKeyId) {
+      throw new Error("ARTIFACT_LIFECYCLE_HMAC_PREVIOUS_KEYS contains an invalid key id");
+    }
+    const secret = String(rawSecret || "").trim();
+    if (Buffer.byteLength(secret, "utf8") < 32) {
+      throw new Error("Every previous artifact lifecycle HMAC key must contain at least 32 bytes");
+    }
+    entries.push({ keyId, secret });
+  }
+  if (new Set(entries.map(({ secret }) => secret)).size !== entries.length) {
+    throw new Error("Artifact lifecycle HMAC key ids must use distinct secrets");
+  }
+  const horizonText = String(rotationHorizon || "").trim();
+  const horizon = horizonText ? new Date(horizonText) : null;
+  if (horizon && Number.isNaN(horizon.getTime())) {
+    throw new Error("ARTIFACT_LIFECYCLE_HMAC_ROTATION_HORIZON is invalid");
+  }
+  if (entries.length > 1 && !horizon) {
+    throw new Error("ARTIFACT_LIFECYCLE_HMAC_ROTATION_HORIZON is required during key rotation");
+  }
+  if (horizon && horizon > now() && entries.length === 1) {
+    throw new Error("Previous lifecycle key cannot be removed before the retention horizon");
+  }
+  return {
+    activeKeyId: normalizedActiveKeyId,
+    entries,
+    previousKeyIds: entries.slice(1).map(({ keyId }) => keyId),
+    rotationHorizon: horizon,
+  };
+}
+
+function lifecycleAliases(binding, keyRing) {
   const canonical = [
     binding.ownerScope,
     binding.userId,
@@ -114,9 +188,165 @@ function lifecycleFilter(binding, secret) {
     binding.runId,
     binding.targetTemplateId,
   ].join("\0");
-  return {
+  return keyRing.entries.map(({ keyId, secret }) => ({
+    keyId,
     operationKey: crypto.createHmac("sha256", secret).update(canonical).digest("hex"),
+  }));
+}
+
+function lifecycleCompatibilityAlias(binding, keyRing) {
+  const compatibilityKeyId = keyRing.entries[1]?.keyId || keyRing.activeKeyId;
+  return lifecycleAliases(binding, keyRing).find(({ keyId }) => keyId === compatibilityKeyId);
+}
+
+function lifecycleFilter(binding, keyRing) {
+  const operationKeys = lifecycleAliases(binding, keyRing).map(({ operationKey }) => operationKey);
+  return {
+    $or: [
+      { operationKey: { $in: operationKeys } },
+      { "operationKeys.operationKey": { $in: operationKeys } },
+    ],
   };
+}
+
+function lifecycleKeyFingerprint(keyId, secret) {
+  return crypto.createHmac("sha256", secret)
+    .update(`${LIFECYCLE_KEY_CANARY_CONTEXT}\0${keyId}`)
+    .digest("hex");
+}
+
+function lifecycleKeyCanaryId(keyId) {
+  return new mongoose.Types.ObjectId(
+    crypto.createHash("sha256")
+      .update(`${LIFECYCLE_KEY_CANARY_RECORD}\0${keyId}`)
+      .digest()
+      .subarray(0, 12),
+  );
+}
+
+async function assertArtifactLifecycleKeyCanaries({
+  model,
+  keyRing,
+  persistMissing = true,
+  now = () => new Date(),
+}) {
+  const collection = model?.collection;
+  if (!collection?.updateOne || !collection?.findOne || !collection?.find) {
+    throw new Error("MongoDB lifecycle collection is required for lifecycle key canaries");
+  }
+  const observedByKeyId = new Map();
+  for (const { keyId, secret } of keyRing.entries) {
+    const _id = lifecycleKeyCanaryId(keyId);
+    const keyFingerprint = lifecycleKeyFingerprint(keyId, secret);
+    const observed = await collection.findOne(
+      { _id },
+      { projection: { recordType: 1, keyId: 1, keyFingerprint: 1, requiredUntil: 1 } },
+    );
+    observedByKeyId.set(keyId, observed);
+    if (!observed && keyRing.previousKeyIds.includes(keyId)) {
+      throw new Error(
+        `Previous artifact lifecycle key canary ${keyId} is missing; deploy a one-key canary bootstrap first`,
+      );
+    }
+    if (observed && (
+      observed.recordType !== LIFECYCLE_KEY_CANARY_RECORD ||
+      observed.keyId !== keyId ||
+      observed.keyFingerprint !== keyFingerprint
+    )) {
+      throw new Error(`Artifact lifecycle key id ${keyId} uses different secret material`);
+    }
+    const observedRequiredUntil = observed?.requiredUntil == null
+      ? null
+      : new Date(observed.requiredUntil);
+    if (observedRequiredUntil && Number.isNaN(observedRequiredUntil.getTime())) {
+      throw new Error("Artifact lifecycle key canary is invalid");
+    }
+    if (
+      observedRequiredUntil &&
+      keyRing.previousKeyIds.includes(keyId) &&
+      observedRequiredUntil > keyRing.rotationHorizon
+    ) {
+      throw new Error("Artifact lifecycle key rotation horizon cannot be shortened");
+    }
+  }
+
+  for (const { keyId, secret } of keyRing.entries) {
+    const _id = lifecycleKeyCanaryId(keyId);
+    const keyFingerprint = lifecycleKeyFingerprint(keyId, secret);
+    const operationKey = crypto.createHash("sha256")
+      .update(`${LIFECYCLE_KEY_CANARY_RECORD}:operation\0${keyId}`)
+      .digest("hex");
+    let observed = observedByKeyId.get(keyId);
+    if (!observed && !persistMissing) continue;
+    if (!observed) {
+      try {
+        await collection.updateOne(
+          { _id, recordType: LIFECYCLE_KEY_CANARY_RECORD, keyId },
+          {
+            $setOnInsert: {
+              recordType: LIFECYCLE_KEY_CANARY_RECORD,
+              keyId,
+              keyFingerprint,
+              operationKey,
+              operationKeys: [],
+            },
+          },
+          { upsert: true },
+        );
+      } catch (error) {
+        if (error?.code !== 11000) throw error;
+      }
+      observed = await collection.findOne(
+        { _id },
+        { projection: { recordType: 1, keyId: 1, keyFingerprint: 1, requiredUntil: 1 } },
+      );
+    }
+    if (
+      observed?.recordType !== LIFECYCLE_KEY_CANARY_RECORD ||
+      observed?.keyId !== keyId ||
+      observed?.keyFingerprint !== keyFingerprint
+    ) {
+      throw new Error(`Artifact lifecycle key id ${keyId} uses different secret material`);
+    }
+    if (persistMissing && keyRing.previousKeyIds.includes(keyId)) {
+      const result = await collection.updateOne(
+        { _id, recordType: LIFECYCLE_KEY_CANARY_RECORD, keyId, keyFingerprint },
+        { $max: { requiredUntil: keyRing.rotationHorizon } },
+      );
+      if (Number(result?.matchedCount) !== 1) {
+        throw new Error("Previous artifact lifecycle key canary could not be retained");
+      }
+    }
+  }
+
+  const persisted = await collection.find(
+    { recordType: LIFECYCLE_KEY_CANARY_RECORD },
+    { projection: { recordType: 1, keyId: 1, keyFingerprint: 1, requiredUntil: 1 } },
+  ).toArray();
+  if (!Array.isArray(persisted)) {
+    throw new Error("MongoDB lifecycle key canary scan returned an invalid result");
+  }
+  const configuredKeyIds = new Set(keyRing.entries.map(({ keyId }) => keyId));
+  const currentTime = now();
+  for (const canary of persisted) {
+    const requiredUntil = canary?.requiredUntil == null
+      ? null
+      : new Date(canary.requiredUntil);
+    if (
+      canary?.recordType !== LIFECYCLE_KEY_CANARY_RECORD ||
+      !/^[A-Za-z0-9._-]{1,64}$/.test(String(canary?.keyId || "")) ||
+      !/^[a-f0-9]{64}$/.test(String(canary?.keyFingerprint || "")) ||
+      (requiredUntil && Number.isNaN(requiredUntil.getTime()))
+    ) {
+      throw new Error("Artifact lifecycle key canary is invalid");
+    }
+    if (
+      !configuredKeyIds.has(canary.keyId) &&
+      requiredUntil && requiredUntil > currentTime
+    ) {
+      throw new Error("Previous lifecycle key cannot be removed before the retention horizon");
+    }
+  }
 }
 
 function lifecycleWriteError(message = "Operation session is no longer writable") {
@@ -133,9 +363,11 @@ function normalizeArtifactLifecycleMigrationMode(value = "off") {
 
 function legacyLifecycleFilter(afterId) {
   const filter = {
+    recordType: { $ne: LIFECYCLE_KEY_CANARY_RECORD },
     $or: [
       ...LEGACY_LIFECYCLE_BINDING_FIELDS.map((field) => ({ [field]: { $exists: true } })),
       { "writeLeases.expiresAt": { $exists: true } },
+      { operationKeys: { $exists: false } },
     ],
   };
   if (afterId != null) filter._id = { $gt: afterId };
@@ -176,6 +408,23 @@ function inspectLegacyLifecycleIndex(indexes) {
   return named || null;
 }
 
+function inspectLegacyOperationKeyIndex(indexes) {
+  const expectedKey = { operationKey: 1 };
+  const named = indexes.find((index) => index.name === LEGACY_OPERATION_KEY_INDEX);
+  if (named && (named.unique !== true || !sameIndexKey(named.key, expectedKey))) {
+    throw new Error("Legacy operation key index contract does not match the exact removable unique index");
+  }
+  const unexpected = indexes.find((index) =>
+    index.name !== LEGACY_OPERATION_KEY_INDEX &&
+    index.unique === true &&
+    sameIndexKey(index.key, expectedKey)
+  );
+  if (unexpected) {
+    throw new Error("Legacy operation key index contract uses an unexpected index name");
+  }
+  return named || null;
+}
+
 function lifecycleMigrationError(message, report) {
   const error = new Error(message);
   error.code = "ARTIFACT_LIFECYCLE_MIGRATION_FAILED";
@@ -187,6 +436,9 @@ async function migrateConversionOperationLifecycles({
   model = ConversionOperationLifecycle,
   mode: requestedMode = process.env.ARTIFACT_LIFECYCLE_MIGRATION_MODE,
   hmacSecret,
+  activeKeyId,
+  previousKeys,
+  rotationHorizon,
   now = () => new Date(),
   batchSize = process.env.ARTIFACT_LIFECYCLE_MIGRATION_BATCH_SIZE || 100,
   maxTotal = process.env.ARTIFACT_LIFECYCLE_MIGRATION_MAX_TOTAL || 100_000,
@@ -202,6 +454,7 @@ async function migrateConversionOperationLifecycles({
   }
   const indexes = await readCollectionIndexes(collection);
   const oldIndex = inspectLegacyLifecycleIndex(indexes);
+  const oldOperationKeyIndex = inspectLegacyOperationKeyIndex(indexes);
   const legacyDocuments = await collection.countDocuments(legacyLifecycleFilter());
   const report = {
     mode,
@@ -210,11 +463,19 @@ async function migrateConversionOperationLifecycles({
     migratedDocuments: 0,
     remainingLegacyDocuments: legacyDocuments,
     oldUniqueIndexPresent: Boolean(oldIndex),
+    oldOperationKeyIndexPresent: Boolean(oldOperationKeyIndex),
     droppedIndexes: [],
   };
   if (mode === "dry-run") return report;
 
-  const secret = artifactLifecycleSecret(hmacSecret);
+  const keyRing = artifactLifecycleKeyRing({
+    hmacSecret,
+    activeKeyId,
+    previousKeys,
+    rotationHorizon,
+    now,
+  });
+  await assertArtifactLifecycleKeyCanaries({ model, keyRing, persistMissing: false, now });
   const boundedBatchSize = Math.min(Math.max(Number(batchSize) || 100, 1), 1000);
   const boundedMaxTotal = Math.min(Math.max(Number(maxTotal) || 100_000, 1), 10_000_000);
   const boundedMaxDurationMs = Math.min(Math.max(Number(maxDurationMs) || 60_000, 100), 60 * 60 * 1000);
@@ -237,33 +498,55 @@ async function migrateConversionOperationLifecycles({
     assertBudget();
     const documents = await collection.find(
       legacyLifecycleFilter(afterId),
-      { projection: Object.fromEntries(["_id", "operationKey", "status", "writeLeases", "retainUntil", "purgeAt", ...LEGACY_LIFECYCLE_BINDING_FIELDS].map((field) => [field, 1])) },
+      { projection: Object.fromEntries(["_id", "operationKey", "operationKeys", "status", "writeLeases", "retainUntil", "keyRingRetainUntil", "purgeAt", ...LEGACY_LIFECYCLE_BINDING_FIELDS].map((field) => [field, 1])) },
     ).sort({ _id: 1 }).limit(boundedBatchSize).toArray();
     if (!documents.length) break;
     assertBudget(documents.length);
     const observedAt = now();
     const operations = documents.map((document) => {
       const hasRawBinding = LEGACY_LIFECYCLE_BINDING_FIELDS.some((field) => Object.hasOwn(document, field));
-      let operationKey = String(document.operationKey || "").trim();
+      let operationKeys = Array.isArray(document.operationKeys)
+        ? document.operationKeys.map((alias) => ({
+          keyId: String(alias.keyId || "").trim(),
+          operationKey: String(alias.operationKey || "").trim(),
+        }))
+        : [];
       if (hasRawBinding) {
         for (const field of LEGACY_LIFECYCLE_BINDING_FIELDS) {
           if (!String(document[field] || "").trim()) {
             throw lifecycleMigrationError(`Legacy lifecycle binding is missing ${field}`, report);
           }
         }
-        const expectedKey = lifecycleFilter(document, secret).operationKey;
-        if (operationKey && operationKey !== expectedKey) {
+        const expectedAliases = lifecycleAliases(document, keyRing);
+        const legacyKey = String(document.operationKey || "").trim();
+        if (legacyKey && !expectedAliases.some(({ operationKey }) => operationKey === legacyKey)) {
           throw lifecycleMigrationError("Legacy lifecycle HMAC does not match its binding", report);
         }
-        operationKey = expectedKey;
+        operationKeys = expectedAliases;
+      } else if (!operationKeys.length) {
+        const legacyKey = String(document.operationKey || "").trim();
+        const compatibilityKeyId = keyRing.entries[1]?.keyId || keyRing.activeKeyId;
+        operationKeys = [{ keyId: compatibilityKeyId, operationKey: legacyKey }];
       }
-      if (!/^[a-f0-9]{64}$/.test(operationKey)) {
+      if (!operationKeys.length || operationKeys.some(({ keyId, operationKey }) =>
+        !/^[A-Za-z0-9._-]{1,64}$/.test(keyId) || !/^[a-f0-9]{64}$/.test(operationKey)
+      )) {
         throw lifecycleMigrationError("Legacy lifecycle operation key is unavailable", report);
       }
       if (!["active", "purging", "purged"].includes(document.status)) {
         throw lifecycleMigrationError("Legacy lifecycle status is invalid", report);
       }
-      const set = { operationKey };
+      const compatibilityKeyId = keyRing.entries[1]?.keyId || keyRing.activeKeyId;
+      const compatibilityAlias = operationKeys.find(({ keyId }) => keyId === compatibilityKeyId);
+      const operationKey = String(document.operationKey || compatibilityAlias?.operationKey || "").trim();
+      if (!/^[a-f0-9]{64}$/.test(operationKey)) {
+        throw lifecycleMigrationError("Legacy lifecycle compatibility key is unavailable", report);
+      }
+      const set = { operationKey, operationKeys };
+      if (keyRing.previousKeyIds.length) {
+        set.requiredPreviousKeyIds = keyRing.previousKeyIds;
+        set.keyRingRetainUntil = keyRing.rotationHorizon;
+      }
       if (Array.isArray(document.writeLeases)) {
         set.writeLeases = document.writeLeases.map((lease) => {
           const leaseExpiresAt = new Date(lease.leaseExpiresAt || lease.expiresAt);
@@ -276,10 +559,12 @@ async function migrateConversionOperationLifecycles({
       if (document.status === "purged") {
         const safePurgeAt = observedAt.getTime() + boundedRetentionMs;
         const retainUntil = new Date(document.retainUntil || 0).getTime();
+        const keyRingRetainUntil = new Date(document.keyRingRetainUntil || 0).getTime();
         const currentPurgeAt = new Date(document.purgeAt || 0).getTime();
         set.purgeAt = new Date(Math.max(
           safePurgeAt,
           Number.isNaN(retainUntil) ? 0 : retainUntil,
+          Number.isNaN(keyRingRetainUntil) ? 0 : keyRingRetainUntil,
           Number.isNaN(currentPurgeAt) ? 0 : currentPurgeAt,
         ));
       }
@@ -297,19 +582,26 @@ async function migrateConversionOperationLifecycles({
     await collection.dropIndex(LEGACY_LIFECYCLE_UNIQUE_INDEX);
     report.droppedIndexes.push(LEGACY_LIFECYCLE_UNIQUE_INDEX);
   }
-
+  await assertArtifactLifecycleKeyCanaries({ model, keyRing, now });
   afterId = null;
   while (true) {
     assertBudget();
     const documents = await collection.find(
-      { $or: LEGACY_LIFECYCLE_BINDING_FIELDS.map((field) => ({ [field]: { $exists: true } })), ...(afterId == null ? {} : { _id: { $gt: afterId } }) },
+      {
+        $or: LEGACY_LIFECYCLE_BINDING_FIELDS.map((field) => ({ [field]: { $exists: true } })),
+        ...(afterId == null ? {} : { _id: { $gt: afterId } }),
+      },
       { projection: { _id: 1 } },
     ).sort({ _id: 1 }).limit(boundedBatchSize).toArray();
     if (!documents.length) break;
     const operations = documents.map((document) => ({
       updateOne: {
-        filter: { _id: document._id, operationKey: { $type: "string" } },
-        update: { $unset: Object.fromEntries(LEGACY_LIFECYCLE_BINDING_FIELDS.map((field) => [field, ""])) },
+        filter: { _id: document._id, "operationKeys.0": { $exists: true } },
+        update: {
+          $unset: Object.fromEntries(
+            LEGACY_LIFECYCLE_BINDING_FIELDS.map((field) => [field, ""]),
+          ),
+        },
       },
     }));
     const result = await collection.bulkWrite(operations, { ordered: true });
@@ -328,12 +620,65 @@ async function migrateConversionOperationLifecycles({
   return report;
 }
 
+async function assertArtifactLifecycleKeyCoverage({
+  model = ConversionOperationLifecycle,
+  hmacSecret,
+  activeKeyId,
+  previousKeys,
+  rotationHorizon,
+  now = () => new Date(),
+} = {}) {
+  const keyRing = artifactLifecycleKeyRing({
+    hmacSecret,
+    activeKeyId,
+    previousKeys,
+    rotationHorizon,
+    now,
+  });
+  await assertArtifactLifecycleKeyCanaries({ model, keyRing, now });
+  if (typeof model?.countDocuments !== "function") {
+    throw new Error("MongoDB lifecycle model is required for lifecycle key coverage");
+  }
+  const configuredKeyIds = keyRing.entries.map(({ keyId }) => keyId);
+  const unsafe = await model.countDocuments({
+    $or: [
+      {
+        status: { $in: ["active", "purging"] },
+        operationKeys: { $not: { $elemMatch: { keyId: { $in: configuredKeyIds } } } },
+      },
+      {
+        keyRingRetainUntil: { $gt: now() },
+        requiredPreviousKeyIds: { $elemMatch: { $nin: configuredKeyIds } },
+      },
+    ],
+  });
+  if (unsafe > 0) {
+    throw new Error("Previous lifecycle key cannot be removed before the retention horizon");
+  }
+  return { checked: true, configuredKeyIds: configuredKeyIds.length };
+}
+
 function createMongooseOperationLifecycleRepository(Model = ConversionOperationLifecycle, {
   hmacSecret,
+  activeKeyId,
+  previousKeys,
+  rotationHorizon,
   leaseLifetimeMs = 30_000,
   lifecycleRetentionMs = DEFAULT_LIFECYCLE_RETENTION_MS,
 } = {}) {
-  const secret = artifactLifecycleSecret(hmacSecret);
+  const keyRing = artifactLifecycleKeyRing({
+    hmacSecret,
+    activeKeyId,
+    previousKeys,
+    rotationHorizon,
+  });
+  let keyCanariesReady;
+  const assertKeyCanaries = () => {
+    if (!keyCanariesReady) {
+      keyCanariesReady = assertArtifactLifecycleKeyCanaries({ model: Model, keyRing });
+    }
+    return keyCanariesReady;
+  };
   const boundedLeaseLifetimeMs = Math.min(
     Math.max(Number(leaseLifetimeMs) || 30_000, 100),
     15 * 60 * 1000,
@@ -352,45 +697,85 @@ function createMongooseOperationLifecycleRepository(Model = ConversionOperationL
       leaseLifetimeMs: boundedLeaseLifetimeMs,
     };
   };
+  const aliasUpdate = (binding) => {
+    const update = {
+      $set: {
+        operationKey: lifecycleCompatibilityAlias(binding, keyRing).operationKey,
+      },
+      $addToSet: {
+        operationKeys: { $each: lifecycleAliases(binding, keyRing) },
+      },
+    };
+    if (keyRing.previousKeyIds.length) {
+      update.$addToSet.requiredPreviousKeyIds = { $each: keyRing.previousKeyIds };
+      update.$max = { keyRingRetainUntil: keyRing.rotationHorizon };
+    }
+    return update;
+  };
+  const mergeUpdates = (...updates) => {
+    const merged = {};
+    for (const update of updates) {
+      for (const [operator, value] of Object.entries(update || {})) {
+        merged[operator] = { ...(merged[operator] || {}), ...value };
+      }
+    }
+    return merged;
+  };
   return {
     async find(binding, now = new Date()) {
+      await assertKeyCanaries();
       const document = await Model.findOneAndUpdate(
-        lifecycleFilter(binding, secret),
-        { $pull: { writeLeases: { leaseExpiresAt: { $lte: now } } } },
+        lifecycleFilter(binding, keyRing),
+        mergeUpdates(
+          { $pull: { writeLeases: { leaseExpiresAt: { $lte: now } } } },
+          aliasUpdate(binding),
+        ),
         { new: true },
       );
       return withLeaseCount(document);
     },
     async acquireWriteLease(binding, { retainUntil } = {}) {
+      await assertKeyCanaries();
       const leaseId = crypto.randomUUID();
       const lease = {
         leaseId,
         leaseExpiresAt: new Date(Date.now() + boundedLeaseLifetimeMs),
       };
-      const filter = { ...lifecycleFilter(binding, secret), status: "active" };
-      const update = { $push: { writeLeases: lease } };
+      const filter = { ...lifecycleFilter(binding, keyRing), status: "active" };
+      const update = mergeUpdates(
+        { $push: { writeLeases: lease } },
+        aliasUpdate(binding),
+      );
       if (retainUntil instanceof Date && !Number.isNaN(retainUntil.getTime())) {
-        update.$max = { retainUntil };
+        update.$max = { ...(update.$max || {}), retainUntil };
       }
       const current = await Model.findOneAndUpdate(filter, update, { new: true });
       if (current) return withLeaseCount(current, leaseId);
       try {
         return withLeaseCount(await Model.create({
-          ...lifecycleFilter(binding, secret),
+          operationKey: lifecycleCompatibilityAlias(binding, keyRing).operationKey,
+          operationKeys: lifecycleAliases(binding, keyRing),
+          requiredPreviousKeyIds: keyRing.previousKeyIds,
+          keyRingRetainUntil: keyRing.rotationHorizon,
           status: "active",
           writeLeases: [lease],
           retainUntil,
         }), leaseId);
       } catch (error) {
-        if (error?.code === 11000) throw lifecycleWriteError();
+        if (error?.code === 11000) {
+          const raced = await Model.findOneAndUpdate(filter, update, { new: true });
+          if (raced) return withLeaseCount(raced, leaseId);
+          throw lifecycleWriteError();
+        }
         throw error;
       }
     },
     async renewWriteLease(binding, leaseId, now = new Date()) {
+      await assertKeyCanaries();
       if (!leaseId) return null;
       const document = await Model.findOneAndUpdate(
         {
-          ...lifecycleFilter(binding, secret),
+          ...lifecycleFilter(binding, keyRing),
           status: "active",
           writeLeases: { $elemMatch: { leaseId, leaseExpiresAt: { $gt: now } } },
         },
@@ -404,60 +789,81 @@ function createMongooseOperationLifecycleRepository(Model = ConversionOperationL
       return withLeaseCount(document, leaseId);
     },
     async validateWriteLease(binding, leaseId, now = new Date()) {
+      await assertKeyCanaries();
       if (!leaseId) return null;
       const document = await Model.findOne({
-        ...lifecycleFilter(binding, secret),
+        ...lifecycleFilter(binding, keyRing),
         status: "active",
         writeLeases: { $elemMatch: { leaseId, leaseExpiresAt: { $gt: now } } },
       });
       return withLeaseCount(document, leaseId);
     },
     async releaseWriteLease(binding, leaseId) {
+      await assertKeyCanaries();
       if (!leaseId) throw lifecycleWriteError("Operation write lease is invalid");
       await Model.updateOne(
-        lifecycleFilter(binding, secret),
+        lifecycleFilter(binding, keyRing),
         { $pull: { writeLeases: { leaseId } } },
       );
     },
     async beginPurge(binding, now = new Date()) {
+      await assertKeyCanaries();
       const started = await Model.findOneAndUpdate(
-        { ...lifecycleFilter(binding, secret), status: "active" },
-        { $set: { status: "purging", purgeStartedAt: now } },
+        { ...lifecycleFilter(binding, keyRing), status: "active" },
+        mergeUpdates(
+          { $set: { status: "purging", purgeStartedAt: now } },
+          aliasUpdate(binding),
+        ),
         { new: true },
       );
       if (started) return withLeaseCount(started);
-      const existing = await Model.findOne(lifecycleFilter(binding, secret));
+      const existing = await Model.findOneAndUpdate(
+        lifecycleFilter(binding, keyRing),
+        aliasUpdate(binding),
+        { new: true },
+      );
       if (existing) return withLeaseCount(existing);
       try {
         return withLeaseCount(await Model.create({
-          ...lifecycleFilter(binding, secret),
+          operationKey: lifecycleCompatibilityAlias(binding, keyRing).operationKey,
+          operationKeys: lifecycleAliases(binding, keyRing),
+          requiredPreviousKeyIds: keyRing.previousKeyIds,
+          keyRingRetainUntil: keyRing.rotationHorizon,
           status: "purging",
           writeLeases: [],
           purgeStartedAt: now,
         }));
       } catch (error) {
         if (error?.code !== 11000) throw error;
-        return withLeaseCount(await Model.findOne(lifecycleFilter(binding, secret)));
+        return withLeaseCount(await Model.findOne(lifecycleFilter(binding, keyRing)));
       }
     },
     async markPurged(binding, now = new Date()) {
-      const current = await Model.findOne(lifecycleFilter(binding, secret));
+      await assertKeyCanaries();
+      const current = await Model.findOne(lifecycleFilter(binding, keyRing));
       const retainUntil = current?.retainUntil ? new Date(current.retainUntil) : now;
+      const keyRingRetainUntil = current?.keyRingRetainUntil
+        ? new Date(current.keyRingRetainUntil)
+        : now;
       const purgeAt = new Date(Math.max(
         now.getTime() + boundedLifecycleRetentionMs,
         Number.isNaN(retainUntil.getTime()) ? 0 : retainUntil.getTime(),
+        Number.isNaN(keyRingRetainUntil.getTime()) ? 0 : keyRingRetainUntil.getTime(),
       ));
       const result = await Model.findOneAndUpdate(
         {
-          ...lifecycleFilter(binding, secret),
+          ...lifecycleFilter(binding, keyRing),
           status: "purging",
           "writeLeases.0": { $exists: false },
         },
-        { $set: { status: "purged", purgedAt: now, purgeAt } },
+        mergeUpdates(
+          { $set: { status: "purged", purgedAt: now, purgeAt } },
+          aliasUpdate(binding),
+        ),
         { new: true },
       );
       if (result) return withLeaseCount(result);
-      const existing = await Model.findOne(lifecycleFilter(binding, secret));
+      const existing = await Model.findOne(lifecycleFilter(binding, keyRing));
       if (existing?.status === "purged" && !(existing.writeLeases?.length)) {
         return withLeaseCount(existing);
       }
@@ -500,15 +906,19 @@ function createMongooseArtifactRepository(Model = ConversionArtifact) {
     async createTombstone(metadata) {
       return plain(await Model.create({ ...metadata, tombstoneOnly: true }));
     },
-    async findExpired({ now, limit }) {
-      const documents = await Model.find({
+    async findExpired({ now, limit, afterId }) {
+      const expired = {
         $or: [
           { tombstoneOnly: false, status: "write_intent", writeIntentExpiresAt: { $lte: now } },
           { tombstoneOnly: false, status: "deletion_pending" },
           { tombstoneOnly: false, status: "available", expiresAt: { $lte: now } },
           { tombstoneOnly: true, status: "deletion_pending" },
         ],
-      }).sort({ purgeAt: 1, expiresAt: 1 }).limit(limit);
+      };
+      const filter = afterId == null
+        ? expired
+        : { $and: [expired, { _id: { $gt: afterId } }] };
+      const documents = await Model.find(filter).sort({ _id: 1 }).limit(limit);
       return documents.map(plain);
     },
     async findSessionArtifacts(binding, { limit }) {
@@ -522,6 +932,18 @@ function createMongooseArtifactRepository(Model = ConversionArtifact) {
         targetTemplateId: binding.targetTemplateId,
       }).sort({ _id: 1 }).limit(limit);
       return documents.map(plain);
+    },
+    async findSessionRetentionHorizon(binding) {
+      const document = await Model.findOne({
+        tombstoneOnly: false,
+        ownerScope: binding.ownerScope,
+        userId: binding.userId,
+        sessionId: binding.sessionId,
+        runId: binding.runId,
+        uploadId: binding.uploadId,
+        targetTemplateId: binding.targetTemplateId,
+      }).sort({ expiresAt: -1 }).select({ expiresAt: 1 });
+      return plain(document)?.expiresAt || null;
     },
     async deleteMetadata(gridFsObjectId) {
       return Model.deleteOne({ gridFsObjectId, tombstoneOnly: false });
@@ -588,6 +1010,7 @@ function createConversionArtifactService({
   clearIntervalImpl = clearInterval,
 } = {}) {
   if (!storageAdapter) throw new Error("MongoDB/GridFS artifact adapter is required");
+  let sweepAfterId = null;
   const lifecycleStore = lifecycleRepository || (
     typeof repository.acquireWriteLease === "function"
       ? repository
@@ -956,27 +1379,88 @@ function createConversionArtifactService({
   }
 
   async function sweepExpiredArtifacts({ limit = 100 } = {}) {
-    const candidates = await repository.findExpired({ now: now(), limit: Math.min(Math.max(Number(limit) || 100, 1), 1000) });
+    const successBudget = Math.min(Math.max(Number(limit) || 100, 1), 1000);
+    const scanLimit = Math.min(successBudget * 8, 1000);
+    const sweepNow = now();
+    let candidates = await repository.findExpired({
+      now: sweepNow,
+      limit: scanLimit,
+      afterId: sweepAfterId,
+    });
+    if (!Array.isArray(candidates)) throw purgeIncomplete("Artifact sweep returned an invalid result");
+    if (!candidates.length && sweepAfterId != null) {
+      sweepAfterId = null;
+      candidates = await repository.findExpired({ now: sweepNow, limit: scanLimit, afterId: null });
+      if (!Array.isArray(candidates)) throw purgeIncomplete("Artifact sweep returned an invalid result");
+    }
     let deleted = 0;
     let pending = 0;
+    let completedCandidates = 0;
+    let scanned = 0;
+    let lastInspectedId = null;
     const failures = [];
+    const inspectedOperations = new Set();
     for (const metadata of candidates) {
+      if (completedCandidates >= successBudget) break;
+      scanned += 1;
+      if (metadata?._id != null) lastInspectedId = metadata._id;
       try {
+        if (metadata.tombstoneOnly !== true) {
+          const candidateBinding = normalizeSessionBinding(metadata);
+          const candidateOperationKey = [
+            candidateBinding.ownerScope,
+            candidateBinding.userId,
+            candidateBinding.sessionId,
+            candidateBinding.uploadId,
+            candidateBinding.runId,
+            candidateBinding.targetTemplateId,
+          ].join("\0");
+          if (inspectedOperations.has(candidateOperationKey)) continue;
+        }
         if (
           metadata.tombstoneOnly !== true &&
           (
             metadata.status === "write_intent" ||
-            (metadata.status === "available" && new Date(metadata.expiresAt) <= now())
+            (metadata.status === "available" && new Date(metadata.expiresAt) <= sweepNow)
           )
         ) {
+          const binding = normalizeSessionBinding(metadata);
+          const operationKey = [
+            binding.ownerScope,
+            binding.userId,
+            binding.sessionId,
+            binding.uploadId,
+            binding.runId,
+            binding.targetTemplateId,
+          ].join("\0");
+          if (inspectedOperations.has(operationKey)) continue;
+          inspectedOperations.add(operationKey);
+          if (typeof repository.findSessionRetentionHorizon !== "function") {
+            throw purgeIncomplete("Operation retention verification is unavailable");
+          }
+          const [artifactHorizon, lifecycle] = await Promise.all([
+            repository.findSessionRetentionHorizon(binding),
+            lifecycleStore.find(binding, sweepNow),
+          ]);
+          const horizons = [artifactHorizon, lifecycle?.retainUntil]
+            .filter((value) => value != null)
+            .map((value) => new Date(value));
+          if (!horizons.length || horizons.some((value) => Number.isNaN(value.getTime()))) {
+            throw purgeIncomplete("Operation retention horizon is unavailable");
+          }
+          if (Math.max(...horizons.map((value) => value.getTime())) > sweepNow.getTime()) {
+            continue;
+          }
           const result = await purgeSessionArtifacts(metadata);
           deleted += Number(result.deletedArtifacts || 0);
+          completedCandidates += 1;
           continue;
         }
         await markDeletionPending(metadata);
         await storageAdapter.deleteArtifact({ objectId: metadata.gridFsObjectId });
         await repository.markStatus(metadata.gridFsObjectId, "expired", { purgeAt: purgeAt() });
         deleted += 1;
+        completedCandidates += 1;
       } catch (error) {
         pending += 1;
         let failure = error;
@@ -987,7 +1471,10 @@ function createConversionArtifactService({
         });
       }
     }
-    return { scanned: candidates.length, deleted, pending, failures };
+    sweepAfterId = lastInspectedId != null && (scanned < candidates.length || candidates.length === scanLimit)
+      ? lastInspectedId
+      : null;
+    return { scanned, deleted, pending, failures };
   }
 
   return {
@@ -1067,12 +1554,14 @@ async function ensureConversionArtifactIndexes({
   if (lifecycleModel.collection?.indexes && lifecycleModel.collection?.countDocuments) {
     const lifecycleIndexes = await readCollectionIndexes(lifecycleModel.collection);
     const oldLifecycleIndex = inspectLegacyLifecycleIndex(lifecycleIndexes);
+    const oldOperationKeyIndex = inspectLegacyOperationKeyIndex(lifecycleIndexes);
     const remainingLegacy = await lifecycleModel.collection.countDocuments(legacyLifecycleFilter());
     if (oldLifecycleIndex || remainingLegacy > 0) {
       throw new Error(
         "ARTIFACT_LIFECYCLE_MIGRATION_MODE=apply is required before lifecycle indexes can be created",
       );
     }
+    await assertArtifactLifecycleKeyCoverage({ model: lifecycleModel });
   }
   await model.createIndexes();
   await lifecycleModel.createIndexes();
@@ -1080,6 +1569,7 @@ async function ensureConversionArtifactIndexes({
 }
 
 module.exports = {
+  assertArtifactLifecycleKeyCoverage,
   assertArtifactStorageConfigured,
   assertArtifactStorageReachable,
   createConversionArtifactService,
