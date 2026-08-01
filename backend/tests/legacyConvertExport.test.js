@@ -1,4 +1,5 @@
 const assert = require("node:assert/strict");
+const express = require("express");
 const test = require("node:test");
 const jwt = require("jsonwebtoken");
 
@@ -316,39 +317,123 @@ test("bound legacy export rejects replayed, malformed, expired, and inconsistent
   });
 });
 
-function loadConvertRouter({ publicProxyEnabled, usageReady }) {
-  const names = ["NODE_ENV", "CONVERTER_PUBLIC_PROXY_ENABLED", "CONVERTER_GATEWAY_USAGE_READY"];
-  const previous = Object.fromEntries(names.map((name) => [name, process.env[name]]));
-  process.env.NODE_ENV = "test";
-  process.env.CONVERTER_PUBLIC_PROXY_ENABLED = String(publicProxyEnabled);
-  process.env.CONVERTER_GATEWAY_USAGE_READY = String(usageReady);
+function loadConvertRouter() {
   delete require.cache[require.resolve("../routes/convert")];
-  try {
-    return require("../routes/convert");
-  } finally {
-    for (const name of names) {
-      if (previous[name] == null) delete process.env[name];
-      else process.env[name] = previous[name];
-    }
-  }
+  return require("../routes/convert");
 }
 
-test("legacy export route is unavailable when gateway flags are off", () => {
-  const router = loadConvertRouter({ publicProxyEnabled: false, usageReady: false });
-  const exportRoute = router.stack.find((layer) => layer.route?.path === "/export");
+test("legacy convert router is an unconditional all-method tombstone", () => {
+  const router = loadConvertRouter();
+  const routes = router.stack.filter((layer) => layer.route);
 
-  assert.equal(exportRoute, undefined);
+  assert.equal(routes.length, 1);
+  assert.equal(routes[0].route.path, "*");
+  assert.equal(routes[0].route.methods._all, true);
+  assert.deepEqual(
+    routes[0].route.stack.map((layer) => layer.handle.name),
+    ["legacyConvertGone"],
+  );
 });
 
-test("legacy export route gates migration before canonical authentication when gateway is on", () => {
-  const router = loadConvertRouter({ publicProxyEnabled: true, usageReady: true });
-  const exportRoute = router.stack.find((layer) => layer.route?.path === "/export");
+test("anonymous 20 MiB legacy upload gets 410 without multipart conversion", async () => {
+  const app = express();
+  app.use("/api/convert", loadConvertRouter());
+  const server = app.listen(0, "127.0.0.1");
+  await new Promise((resolve) => server.once("listening", resolve));
+  try {
+    const { port } = server.address();
+    const response = await fetch(`http://127.0.0.1:${port}/api/convert`, {
+      method: "POST",
+      headers: { "content-type": "multipart/form-data; boundary=never-closed" },
+      body: Buffer.alloc(20 * 1024 * 1024, 0x41),
+    });
 
-  assert.ok(exportRoute);
-  assert.deepEqual(
-    exportRoute.route.stack.map((layer) => layer.handle.name),
-    ["legacyExportMigrationGate", "requireDb", "protect", "exportExcel"],
-  );
+    assert.equal(response.status, 410);
+    assert.deepEqual(await response.json(), {
+      success: false,
+      code: "LEGACY_CONVERT_GONE",
+      message:
+        "Legacy /api/convert is retired. Use the authenticated converter flow at /api/converter.",
+      migration_endpoint: "/api/converter",
+    });
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test("production middleware tombstones malformed and oversized legacy JSON first", async () => {
+  const { app } = require("../server");
+  const server = app.listen(0, "127.0.0.1");
+  await new Promise((resolve) => server.once("listening", resolve));
+  try {
+    const { port } = server.address();
+    const scenarios = [
+      {
+        method: "POST",
+        path: "/api/convert/export",
+        body: '{"rows":',
+      },
+      {
+        method: "PUT",
+        path: "/api/convert/retired/nested",
+        body: Buffer.alloc(50 * 1024 * 1024 + 1, 0x20),
+      },
+    ];
+
+    for (const scenario of scenarios) {
+      const response = await fetch(`http://127.0.0.1:${port}${scenario.path}`, {
+        method: scenario.method,
+        headers: { "content-type": "application/json" },
+        body: scenario.body,
+      });
+
+      assert.equal(response.status, 410, `${scenario.method} ${scenario.path}`);
+      assert.equal((await response.json()).code, "LEGACY_CONVERT_GONE");
+    }
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test("production legacy GET and OPTIONS keep CORS and request IDs", async () => {
+  const { app } = require("../server");
+  const server = app.listen(0, "127.0.0.1");
+  await new Promise((resolve) => server.once("listening", resolve));
+  try {
+    const { port } = server.address();
+    const origin = "http://localhost:5173";
+    const scenarios = [
+      { method: "GET", requestId: "legacy-get-request" },
+      { method: "OPTIONS", requestId: "legacy-options-request" },
+    ];
+
+    for (const scenario of scenarios) {
+      const headers = {
+        origin,
+        "x-request-id": scenario.requestId,
+      };
+      if (scenario.method === "OPTIONS") {
+        headers["access-control-request-method"] = "POST";
+        headers["access-control-request-headers"] = "content-type,x-request-id";
+      }
+      const response = await fetch(
+        `http://127.0.0.1:${port}/api/convert/retired/nested`,
+        { method: scenario.method, headers },
+      );
+
+      assert.equal(response.status, 410, scenario.method);
+      assert.equal(response.headers.get("access-control-allow-origin"), origin);
+      assert.equal(response.headers.get("access-control-allow-credentials"), "true");
+      assert.match(
+        response.headers.get("access-control-expose-headers") || "",
+        /(?:^|,\s*)X-Request-ID(?:\s*,|$)/i,
+      );
+      assert.equal(response.headers.get("x-request-id"), scenario.requestId);
+      assert.equal((await response.json()).code, "LEGACY_CONVERT_GONE");
+    }
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
 });
 
 test("legacy writer exposes preview headers but no workbook-generation API", () => {

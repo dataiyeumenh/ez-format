@@ -1,6 +1,10 @@
 import { useCallback, useEffect, useState } from "react";
 import api from "../services/api";
 import { isStudentAssistantAvailable } from "../utils/studentAssistant";
+import {
+  appendStudentUpload,
+  studentUploadMetadata,
+} from "./studentUploadPrivacy.js";
 
 const viteEnv = import.meta.env || {};
 
@@ -44,11 +48,6 @@ export const STUDENT_TEMPLATE_OPTIONS = [
   { id: "purchase_goods", label: "Mua hàng hóa" },
   { id: "purchase_service", label: "Mua dịch vụ" },
 ];
-
-function extensionFromFile(file) {
-  const match = String(file?.name || "").match(/(\.[^.]+)$/);
-  return match ? match[1].toLowerCase() : "";
-}
 
 async function requestStudent(config, fallback) {
   try {
@@ -119,12 +118,7 @@ export function useStudentAssistantApi() {
     try {
       const response = await api.post("/student/sessions", {
         workspaceId: workspaceId || undefined,
-        file: {
-          originalName: file.name,
-          sizeBytes: file.size,
-          extension: extensionFromFile(file),
-          contentHash: "",
-        },
+        file: studentUploadMetadata(file),
       });
       return response.data;
     } catch (error) {
@@ -134,7 +128,7 @@ export function useStudentAssistantApi() {
 
   const analyzeSession = useCallback(async (file, contextToken, targetTemplateId, sessionId) => {
     const formData = new FormData();
-    formData.append("file", file);
+    appendStudentUpload(formData, file);
     formData.append("context_token", contextToken);
     if (targetTemplateId) formData.append("target_template_id", targetTemplateId);
     return requestStudent(

@@ -15,6 +15,7 @@ const {
   buildOwnerScope,
   hashStudentQuestion,
   normalizeStudentQuestion,
+  sanitizeStudentFileMetadata,
 } = require("../services/studentSessionService");
 
 const DEFAULT_RETENTION_MS = 24 * 60 * 60 * 1000;
@@ -91,18 +92,6 @@ const UNSAFE_ACTIVITY_KEYS = new Set([
   "bytes",
 ]);
 
-function cleanFileName(value) {
-  return String(value || "")
-    .replace(/[\\/]/g, "")
-    .trim()
-    .slice(0, 255);
-}
-
-function cleanExtension(value) {
-  const extension = String(value || "").trim().toLowerCase().replace(/^\.+/, "");
-  return extension ? `.${extension.slice(0, 15)}` : "";
-}
-
 function cleanString(value, maxLength) {
   return String(value || "").trim().slice(0, maxLength);
 }
@@ -122,11 +111,12 @@ function studentContextScopesFromFlags(env = process.env) {
 
 function cleanStudentSessionPayload(body = {}) {
   const file = body.file || {};
+  const safeFile = sanitizeStudentFileMetadata({ extension: file.extension });
   const payload = {
     file: {
-      originalName: cleanFileName(file.originalName),
+      originalName: safeFile.originalName,
       sizeBytes: Number(file.sizeBytes),
-      extension: cleanExtension(file.extension),
+      extension: safeFile.extension,
       contentHash: cleanString(file.contentHash, 256),
       rawRetained: false,
     },
@@ -284,6 +274,7 @@ function secureTokenEquals(actual, expected) {
 }
 
 function serializeStudentSession(session) {
+  const safeFile = sanitizeStudentFileMetadata(session.file);
   return {
     id: String(session._id || session.id),
     workspaceId: session.workspaceId == null ? null : String(session.workspaceId),
@@ -291,9 +282,9 @@ function serializeStudentSession(session) {
     mode: session.mode,
     status: session.status,
     file: {
-      originalName: session.file?.originalName || "",
+      originalName: safeFile.originalName,
       sizeBytes: Number(session.file?.sizeBytes || 0),
-      extension: session.file?.extension || "",
+      extension: safeFile.extension,
       contentHash: session.file?.contentHash || "",
       rawRetained: false,
     },
@@ -471,8 +462,8 @@ async function purgeStudentOperationSession(req, session, forward = forwardJson)
 async function createStudentSession(req, res) {
   try {
     const payload = cleanStudentSessionPayload(req.body);
-    if (!payload.file.originalName) {
-      return res.status(400).json({ success: false, message: "Tên file là bắt buộc" });
+    if (!payload.file.extension) {
+      return res.status(400).json({ success: false, message: "Chỉ hỗ trợ file .xls hoặc .xlsx" });
     }
     if (!Number.isFinite(payload.file.sizeBytes) || payload.file.sizeBytes < 0) {
       return res.status(400).json({ success: false, message: "Kích thước file không hợp lệ" });

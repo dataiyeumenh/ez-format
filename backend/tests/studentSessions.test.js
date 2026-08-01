@@ -527,7 +527,7 @@ test("unanalyzed student session payload cannot bind raw converter state", () =>
     {
       workspaceId: "workspace-1",
       file: {
-        originalName: "..sales.xlsx",
+        originalName: "student-upload.xlsx",
         sizeBytes: 1024,
         extension: ".xlsx",
         contentHash: "sha256:example",
@@ -564,10 +564,30 @@ test("student session serializer never exposes raw workbook content", () => {
 
   const payload = serializeStudentSession(session);
   assert.equal(payload.id, "session-1");
+  assert.equal(payload.file.originalName, "student-upload.xlsx");
+  assert.equal(payload.file.extension, ".xlsx");
   assert.equal(payload.file.rawRows, undefined);
   assert.equal(payload.summary.rawRows, undefined);
   assert.equal(payload.rawRows, undefined);
   assert.equal(payload.workbookBytes, undefined);
+});
+
+test("StudentFileSession validation replaces raw filenames with a generic label", async () => {
+  const session = new StudentFileSession({
+    userId: "507f1f77bcf86cd799439011",
+    ownerScope: "user:507f1f77bcf86cd799439011",
+    file: {
+      originalName: "Nguyen Van A - MSSV 22123456.XLSX",
+      sizeBytes: 1024,
+      extension: "XLSX",
+    },
+    retentionExpiresAt: new Date(Date.now() + 60_000),
+  });
+
+  await session.validate();
+
+  assert.equal(session.file.originalName, "student-upload.xlsx");
+  assert.equal(session.file.extension, ".xlsx");
 });
 
 test("student session ownership requires the matching user and owner scope", () => {

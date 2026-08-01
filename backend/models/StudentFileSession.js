@@ -1,4 +1,7 @@
 const mongoose = require("mongoose");
+const {
+  sanitizeStudentFileMetadata,
+} = require("../services/studentSessionService");
 
 const fileMetadataSchema = new mongoose.Schema(
   {
@@ -19,6 +22,12 @@ const fileMetadataSchema = new mongoose.Schema(
   },
   { _id: false },
 );
+
+fileMetadataSchema.pre("validate", function sanitizeRawFilename() {
+  const safeFile = sanitizeStudentFileMetadata(this);
+  this.originalName = safeFile.originalName;
+  this.extension = safeFile.extension;
+});
 
 const studentFileSessionSchema = new mongoose.Schema(
   {

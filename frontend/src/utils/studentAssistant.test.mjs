@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  appendStudentUpload,
+  studentUploadMetadata,
+} from "../hooks/studentUploadPrivacy.js";
+import {
   createStudentSourceRowRequestContext,
   createStudentWorkDraft,
   buildStudentSourceRowItems,
@@ -30,6 +34,24 @@ import {
   resumeStudentSession,
   saveStudentSessionResume,
 } from "./studentAssistant.js";
+
+test("student upload sends only safe extension and a generic multipart label", () => {
+  const file = {
+    name: "Nguyen Van A - MSSV 22123456.XLSX",
+    size: 2048,
+  };
+  const calls = [];
+
+  assert.deepEqual(studentUploadMetadata(file), {
+    sizeBytes: 2048,
+    extension: ".xlsx",
+    contentHash: "",
+  });
+  appendStudentUpload({ append: (...args) => calls.push(args) }, file);
+  assert.deepEqual(calls, [["file", file, "student-upload.xlsx"]]);
+  assert.equal(JSON.stringify(studentUploadMetadata(file)).includes("Nguyen"), false);
+  assert.equal(JSON.stringify(calls.map((call) => call[2])).includes("22123456"), false);
+});
 
 test("student route requires both frontend flag and backend capability", () => {
   assert.equal(

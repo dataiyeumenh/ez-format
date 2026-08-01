@@ -151,11 +151,13 @@ function drainingPrivacyModel(name, { raw = [], retention = [] }, calls) {
 
 function privacyModels({
   rawEvents = [],
+  fileSessions = [],
   retiredAttempts = [],
   retiredProgresses = [],
 } = {}) {
   const calls = [];
   let rawRemaining = [...rawEvents];
+  let filenameRemaining = [...fileSessions];
   const questionEventModel = {
     find(filter) {
       calls.push(["question-find", filter]);
@@ -194,7 +196,21 @@ function privacyModels({
   const sessionModel = {
     find(filter) {
       calls.push(["session-find", filter]);
-      return emptyQuery(calls);
+      const scansFilenames = filter.$or?.some((item) =>
+        Object.keys(item).some((key) => key.startsWith("file.")),
+      );
+      return emptyQuery(calls, scansFilenames ? filenameRemaining : []);
+    },
+    async bulkWrite(operations) {
+      calls.push(["session-bulk-write", operations]);
+      const ids = new Set(
+        operations.map((operation) => String(operation.updateOne.filter._id)),
+      );
+      const before = filenameRemaining.length;
+      filenameRemaining = filenameRemaining.filter(
+        (session) => !ids.has(String(session._id)),
+      );
+      return { modifiedCount: before - filenameRemaining.length };
     },
   };
   return {
@@ -241,6 +257,8 @@ test("Student privacy migration defaults off and touches no model", async () => 
     scanned: 0,
     rawCandidates: 0,
     scrubbed: 0,
+    filenameCandidates: 0,
+    filenamesScrubbed: 0,
     backfilled: 0,
     orphansPurged: 0,
     retiredRawCandidates: 0,
@@ -250,6 +268,53 @@ test("Student privacy migration defaults off and touches no model", async () => 
       studentskillprogresses: { candidates: 0, purged: 0 },
     },
   });
+});
+
+test("Student privacy migration scrubs raw filenames and is idempotent", async () => {
+  const { models, calls } = privacyModels({
+    fileSessions: [
+      {
+        _id: "session-1",
+        file: {
+          originalName: "Nguyen Van A - MSSV 22123456.XLSX",
+          extension: "XLSX",
+        },
+      },
+      {
+        _id: "session-2",
+        file: { originalName: "Tran Thi B_22112233.xls", extension: "" },
+      },
+    ],
+  });
+
+  const first = await migrateStudentPrivacy(models, {
+    mode: "apply",
+    batchSize: 2,
+  });
+
+  assert.equal(first.filenameCandidates, 2);
+  assert.equal(first.filenamesScrubbed, 2);
+  const operations = calls.find(([type]) => type === "session-bulk-write")[1];
+  assert.deepEqual(
+    operations.map((operation) => operation.updateOne.update.$set),
+    [
+      {
+        "file.originalName": "student-upload.xlsx",
+        "file.extension": ".xlsx",
+      },
+      {
+        "file.originalName": "student-upload.xls",
+        "file.extension": ".xls",
+      },
+    ],
+  );
+
+  const repeated = await migrateStudentPrivacy(models, {
+    mode: "apply",
+    batchSize: 2,
+  });
+  assert.equal(repeated.filenameCandidates, 0);
+  assert.equal(repeated.filenamesScrubbed, 0);
 });
 
 test("Student privacy dry-run is bounded and performs no mutation", async () => {
@@ -473,7 +538,8 @@ test("Student privacy apply drains 150+ raw, orphan, and retired records with on
     questionEventModel,
     activityModel,
     sessionModel: {
-      find() {
+      find(filter) {
+        if (filter.$or) return emptyQuery(calls);
         return { select() { return this; }, lean: async () => [] };
       },
     },
@@ -530,7 +596,11 @@ test("Student privacy apply fails closed when raw and metadata exceed shared max
       {
         questionEventModel,
         activityModel: drainingPrivacyModel("activity", {}, calls),
-        sessionModel: { find: () => ({ select() { return this; }, lean: async () => [] }) },
+        sessionModel: {
+          find: (filter) => filter.$or
+            ? emptyQuery(calls)
+            : { select() { return this; }, lean: async () => [] },
+        },
         retiredCollections: {
           studentattempts: retiredCollection("studentattempts", [], calls),
           studentskillprogresses: retiredCollection("studentskillprogresses", [], calls),
@@ -620,6 +690,7 @@ test("Student privacy cleanup backfills live metadata and purges bounded orphans
   ]);
   const sessionModel = {
     find(filter) {
+      if (filter.$or) return retentionQuery([]);
       const requested = filter._id.$in;
       return {
         select() { return this; },

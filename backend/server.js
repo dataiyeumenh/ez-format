@@ -89,21 +89,29 @@ const allowedOrigins = [
   process.env.FRONTEND_URL_WWW, // www variant (e.g., https://www.ezformat.io.vn)
 ].filter(Boolean);
 
-console.log("[CORS] Allowed origins:", allowedOrigins);
+const corsOptions = {
+  origin: allowedOrigins,
+  credentials: true,
+  exposedHeaders: ["Content-Disposition", "X-Request-ID"],
+};
 
-app.use(
-  cors({
-    origin: allowedOrigins,
-    credentials: true,
-    exposedHeaders: ["Content-Disposition", "X-Request-ID"],
-  }),
-);
-app.use((req, res, next) => {
+function attachRequestId(req, res, next) {
   const supplied = String(req.headers["x-request-id"] || "").trim();
   req.requestId = supplied.slice(0, 128) || crypto.randomUUID();
   res.setHeader("X-Request-ID", req.requestId);
   next();
-});
+}
+
+console.log("[CORS] Allowed origins:", allowedOrigins);
+
+app.use(
+  "/api/convert",
+  cors({ ...corsOptions, preflightContinue: true }),
+  attachRequestId,
+  require("./routes/convert"),
+);
+app.use(cors(corsOptions));
+app.use(attachRequestId);
 app.use(express.json({ limit: "50mb" }));
 app.use(express.urlencoded({ extended: true, limit: "50mb" }));
 
@@ -116,7 +124,6 @@ if (converterGatewayUsageReady) {
 app.use("/api/auth", require("./routes/auth"));
 app.use("/api/plans", require("./routes/plans"));
 app.use("/api/admin", require("./routes/admin"));
-app.use("/api/convert", require("./routes/convert"));
 app.use("/api/conversion-runs", require("./routes/conversionRuns"));
 app.use("/api/payments", require("./routes/payments"));
 app.use("/api/feedback", require("./routes/feedback"));

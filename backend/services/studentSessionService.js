@@ -41,6 +41,32 @@ const RETIRED_STUDENT_COLLECTION_NAMES = Object.freeze([
 ]);
 const DEFAULT_RETIRED_MAX_TOTAL = 10_000;
 const DEFAULT_RETIRED_MAX_DURATION_MS = 30_000;
+const SAFE_STUDENT_FILE_EXTENSIONS = Object.freeze([".xls", ".xlsx"]);
+const SAFE_STUDENT_FILE_LABELS = Object.freeze([
+  "deleted",
+  "student-upload",
+  ...SAFE_STUDENT_FILE_EXTENSIONS.map((extension) => `student-upload${extension}`),
+]);
+
+function normalizeStudentFileExtension(value) {
+  const match = String(value || "")
+    .trim()
+    .toLowerCase()
+    .match(/(?:^|\.)(xlsx?)$/);
+  if (!match) return "";
+  const extension = `.${match[1]}`;
+  return SAFE_STUDENT_FILE_EXTENSIONS.includes(extension) ? extension : "";
+}
+
+function sanitizeStudentFileMetadata(file = {}) {
+  const extension =
+    normalizeStudentFileExtension(file.extension) ||
+    normalizeStudentFileExtension(file.originalName);
+  return {
+    originalName: `student-upload${extension}`,
+    extension,
+  };
+}
 
 async function ensureStudentPrivacyIndexes({
   sessionModel,
@@ -251,6 +277,8 @@ async function migrateStudentPrivacy(
     scanned: 0,
     rawCandidates: 0,
     scrubbed: 0,
+    filenameCandidates: 0,
+    filenamesScrubbed: 0,
     backfilled: 0,
     orphansPurged: 0,
     retiredRawCandidates: 0,
@@ -265,7 +293,25 @@ async function migrateStudentPrivacy(
   if (mode === "off") return report;
 
   const limit = boundedBatchSize(batchSize);
+  const filenameFilter = {
+    $or: [
+      { "file.originalName": { $exists: false } },
+      { "file.originalName": { $nin: SAFE_STUDENT_FILE_LABELS } },
+      { "file.extension": { $exists: false } },
+      { "file.extension": { $nin: ["", ...SAFE_STUDENT_FILE_EXTENSIONS] } },
+    ],
+  };
+  const findFilenameCandidates = (candidateLimit) =>
+    findBounded(
+      sessionModel,
+      filenameFilter,
+      candidateLimit,
+      { _id: 1, "file.originalName": 1, "file.extension": 1 },
+    );
   if (mode !== "apply") {
+    const filenameCandidates = await findFilenameCandidates(limit);
+    report.filenameCandidates = filenameCandidates.length;
+    report.scanned += filenameCandidates.length;
     const rawEvents = await findBounded(
       questionEventModel,
       {
@@ -371,6 +417,50 @@ async function migrateStudentPrivacy(
   );
 
   try {
+    while (true) {
+      assertTimeRemaining();
+      const filenameCandidates = await findFilenameCandidates(queryLimit());
+      assertTimeRemaining();
+      report.filenameCandidates += filenameCandidates.length;
+      report.scanned += filenameCandidates.length;
+      if (filenameCandidates.length === 0) break;
+      if (filenameCandidates.some((session) => !session?._id)) {
+        failDrain(
+          "STUDENT_PRIVACY_INVALID_FILENAME_RECORD",
+          "invalid-record",
+          "StudentFileSession filename chứa record không có _id",
+        );
+      }
+      assertCapacity(filenameCandidates.length);
+      if (typeof sessionModel?.bulkWrite !== "function") {
+        throw new Error("StudentFileSession model phải hỗ trợ bulkWrite");
+      }
+      const result = await sessionModel.bulkWrite(
+        filenameCandidates.map((session) => {
+          const safeFile = sanitizeStudentFileMetadata(session.file);
+          return {
+            updateOne: {
+              filter: { _id: session._id },
+              update: {
+                $set: {
+                  "file.originalName": safeFile.originalName,
+                  "file.extension": safeFile.extension,
+                },
+              },
+            },
+          };
+        }),
+      );
+      const scrubbed = Number(result?.modifiedCount || 0);
+      report.filenamesScrubbed += scrubbed;
+      recordMutation(scrubbed);
+      recordBatch();
+      if (scrubbed !== filenameCandidates.length) {
+        failIncomplete("StudentFileSession filename không được scrub đầy đủ");
+      }
+      assertTimeRemaining();
+    }
+
     if (typeof questionEventModel?.updateMany !== "function") {
       throw new Error("StudentQuestionEvent model phải hỗ trợ updateMany");
     }
@@ -493,6 +583,8 @@ module.exports = {
   ensureStudentPrivacyIndexes,
   hashStudentQuestion,
   migrateStudentPrivacy,
+  normalizeStudentFileExtension,
   normalizeStudentPrivacyMigrationMode,
   normalizeStudentQuestion,
+  sanitizeStudentFileMetadata,
 };
