@@ -95,6 +95,24 @@ function storageError(statusCode, message, code) {
   return error;
 }
 
+function stateConflict(message = "Operation state has changed") {
+  return storageError(409, message, "ARTIFACT_STATE_CONFLICT");
+}
+
+function normalizedSha256(value, { allowEmpty = false, label = "Artifact SHA-256" } = {}) {
+  const normalized = String(value || "").trim().toLowerCase();
+  if (allowEmpty && !normalized) return "";
+  if (!/^[a-f0-9]{64}$/.test(normalized)) {
+    throw storageError(400, `${label} is invalid`, "INVALID_ARTIFACT_SHA256");
+  }
+  return normalized;
+}
+
+function knownContentSize(content) {
+  if (Buffer.isBuffer(content) || content instanceof Uint8Array) return content.byteLength;
+  return null;
+}
+
 function normalizeIdentifier(value, label) {
   const normalized = String(value || "").trim();
   if (!SAFE_IDENTIFIER.test(normalized)) throw storageError(400, `${label} is invalid`, "INVALID_ARTIFACT_BINDING");
@@ -874,9 +892,10 @@ function createMongooseOperationLifecycleRepository(Model = ConversionOperationL
 
 function createMongooseArtifactRepository(Model = ConversionArtifact) {
   return {
-    async findLatest({ sessionId, runId, kind, revision }) {
+    async findLatest({ sessionId, runId, kind, revision, status }) {
       const filter = { tombstoneOnly: false, sessionId, runId, kind };
       if (revision != null) filter.revision = revision;
+      if (status) filter.status = status;
       return plain(await Model.findOne(filter).sort({ revision: -1 }));
     },
     async create(metadata) {
@@ -886,11 +905,22 @@ function createMongooseArtifactRepository(Model = ConversionArtifact) {
       return plain(await Model.create({ ...metadata, status: "write_intent" }));
     },
     async publishWriteIntent(gridFsObjectId, metadata) {
+      const filter = { gridFsObjectId, tombstoneOnly: false, status: "write_intent" };
+      if (metadata.kind === "state") {
+        filter.sha256 = metadata.sha256;
+        filter.previousRevision = metadata.previousRevision;
+        filter.previousSha256 = metadata.previousSha256;
+      }
       return plain(await Model.findOneAndUpdate(
-        { gridFsObjectId, tombstoneOnly: false, status: "write_intent" },
+        filter,
         {
           $set: { ...metadata, status: "available" },
-          $unset: { writeIntentExpiresAt: 1 },
+          $unset: {
+            writeIntentExpiresAt: 1,
+            writeLeaseId: 1,
+            cleanupClaimId: 1,
+            cleanupClaimExpiresAt: 1,
+          },
         },
         { new: true, runValidators: true },
       ));
@@ -910,6 +940,7 @@ function createMongooseArtifactRepository(Model = ConversionArtifact) {
       const expired = {
         $or: [
           { tombstoneOnly: false, status: "write_intent", writeIntentExpiresAt: { $lte: now } },
+          { tombstoneOnly: false, status: "write_cleanup", cleanupClaimExpiresAt: { $lte: now } },
           { tombstoneOnly: false, status: "deletion_pending" },
           { tombstoneOnly: false, status: "available", expiresAt: { $lte: now } },
           { tombstoneOnly: true, status: "deletion_pending" },
@@ -948,6 +979,59 @@ function createMongooseArtifactRepository(Model = ConversionArtifact) {
     async deleteMetadata(gridFsObjectId) {
       return Model.deleteOne({ gridFsObjectId, tombstoneOnly: false });
     },
+    async claimStaleWriteIntent(gridFsObjectId, staleAt, {
+      writeLeaseId,
+      cleanupClaimId,
+      cleanupClaimExpiresAt,
+    }) {
+      return plain(await Model.findOneAndUpdate({
+        gridFsObjectId,
+        tombstoneOnly: false,
+        status: "write_intent",
+        writeIntentExpiresAt: { $lte: staleAt },
+        writeLeaseId: writeLeaseId || null,
+      }, {
+        $set: { status: "write_cleanup", cleanupClaimId, cleanupClaimExpiresAt },
+        $unset: { purgeAt: 1 },
+      }, { new: true }));
+    },
+    async reclaimPendingWriteCleanup(gridFsObjectId, staleAt, {
+      writeLeaseId,
+      cleanupClaimId,
+      cleanupClaimExpiresAt,
+    }) {
+      return plain(await Model.findOneAndUpdate({
+        gridFsObjectId,
+        tombstoneOnly: false,
+        writeLeaseId: writeLeaseId || null,
+        $or: [
+          { status: "deletion_pending", writeIntentExpiresAt: { $ne: null } },
+          { status: "write_cleanup", cleanupClaimExpiresAt: { $lte: staleAt } },
+        ],
+      }, {
+        $set: { status: "write_cleanup", cleanupClaimId, cleanupClaimExpiresAt },
+        $unset: { purgeAt: 1 },
+      }, { new: true }));
+    },
+    async releaseWriteCleanup(gridFsObjectId, cleanupClaimId, pendingPurgeAt) {
+      return plain(await Model.findOneAndUpdate({
+        gridFsObjectId,
+        tombstoneOnly: false,
+        status: "write_cleanup",
+        cleanupClaimId,
+      }, {
+        $set: { status: "deletion_pending", purgeAt: pendingPurgeAt },
+        $unset: { cleanupClaimId: 1, cleanupClaimExpiresAt: 1 },
+      }, { new: true }));
+    },
+    async deleteClaimedWriteCleanup(gridFsObjectId, cleanupClaimId) {
+      return Model.deleteOne({
+        gridFsObjectId,
+        tombstoneOnly: false,
+        status: "write_cleanup",
+        cleanupClaimId,
+      });
+    },
   };
 }
 
@@ -984,7 +1068,8 @@ function assertBinding(metadata, input) {
     if (metadata[field] !== expected) throw storageError(403, "Artifact binding does not match this conversion", "ARTIFACT_BINDING_MISMATCH");
   }
   if (
-    metadata.status !== "write_intent" &&
+    !["write_intent", "write_cleanup"].includes(metadata.status) &&
+    metadata.writeIntentExpiresAt == null &&
     (!/^[a-f0-9]{64}$/.test(String(metadata.sha256 || "")) ||
       !Number.isSafeInteger(metadata.sizeBytes) || metadata.sizeBytes < 0)
   ) {
@@ -1005,6 +1090,7 @@ function createConversionArtifactService({
   purgeLeasePollMs = 10,
   leaseHeartbeatIntervalMs = 10_000,
   writeIntentTimeoutMs = DEFAULT_WRITE_INTENT_TIMEOUT_MS,
+  cleanupClaimFactory = () => crypto.randomUUID(),
   objectIdFactory = () => new mongoose.Types.ObjectId(),
   setIntervalImpl = setInterval,
   clearIntervalImpl = clearInterval,
@@ -1024,6 +1110,62 @@ function createConversionArtifactService({
 
   function purgeAt() {
     return new Date(now().getTime() + Math.max(60_000, tombstoneRetentionMs));
+  }
+
+  function normalizeStateCas(binding, input) {
+    if (binding.kind !== "state") return null;
+    const expectedPriorRevision = Number(input.expectedPriorRevision);
+    if (!Number.isSafeInteger(expectedPriorRevision) || expectedPriorRevision < 0) {
+      throw storageError(400, "Expected state revision is invalid", "INVALID_EXPECTED_STATE_REVISION");
+    }
+    if (binding.revision !== expectedPriorRevision + 1) {
+      throw stateConflict("Operation state revision is not the next revision");
+    }
+    const legacyExpectedPriorSha256 = Boolean(input.allowLegacyExpectedPriorSha256) &&
+      expectedPriorRevision > 0 && String(input.expectedPriorSha256 || "").trim() === "";
+    const expectedPriorSha256 = legacyExpectedPriorSha256
+      ? ""
+      : normalizedSha256(input.expectedPriorSha256, {
+        allowEmpty: expectedPriorRevision === 0,
+        label: "Expected state SHA-256",
+      });
+    if (!legacyExpectedPriorSha256 && (expectedPriorRevision === 0) !== (expectedPriorSha256 === "")) {
+      throw storageError(400, "Expected state SHA-256 does not match its revision", "INVALID_EXPECTED_STATE_SHA256");
+    }
+    return {
+      candidateSha256: normalizedSha256(input.sha256, { label: "Candidate state SHA-256" }),
+      expectedPriorRevision,
+      expectedPriorSha256,
+      legacyExpectedPriorSha256,
+    };
+  }
+
+  function exactStateReplay(existing, stateCas) {
+    if (!existing || existing.status !== "available" || new Date(existing.expiresAt) <= now()) return false;
+    if (existing.sha256 !== stateCas.candidateSha256) return false;
+    if (existing.previousRevision == null) return true;
+    if (existing.previousRevision !== stateCas.expectedPriorRevision) return false;
+    return stateCas.legacyExpectedPriorSha256 ||
+      String(existing.previousSha256 || "") === stateCas.expectedPriorSha256;
+  }
+
+  async function assertExpectedStateHead(binding, stateCas) {
+    const head = await repository.findLatest({ ...binding, revision: null });
+    if (stateCas.expectedPriorRevision === 0) {
+      if (head) throw stateConflict();
+      return;
+    }
+    if (!head || head.status !== "available" ||
+      head.revision !== stateCas.expectedPriorRevision ||
+      new Date(head.expiresAt) <= now()) {
+      throw stateConflict();
+    }
+    assertBinding(head, { ...binding, revision: head.revision });
+    if (stateCas.legacyExpectedPriorSha256) {
+      stateCas.expectedPriorSha256 = head.sha256;
+    } else if (head.sha256 !== stateCas.expectedPriorSha256) {
+      throw stateConflict();
+    }
   }
 
   async function markDeletionPending(metadata) {
@@ -1117,42 +1259,153 @@ function createConversionArtifactService({
     }
   }
 
+  function retryableWriteCleanup(intent, staleAt) {
+    if (intent.status === "deletion_pending") return intent.writeIntentExpiresAt != null;
+    if (intent.status !== "write_cleanup") return false;
+    const claimExpiry = new Date(intent.cleanupClaimExpiresAt);
+    return !Number.isNaN(claimExpiry.getTime()) && claimExpiry <= staleAt;
+  }
+
+  async function retireStaleWriteIntent(intent, binding, lease, heartbeat) {
+    const staleAt = now();
+    const intentExpiry = new Date(intent.writeIntentExpiresAt);
+    const staleWriteIntent = intent.status === "write_intent" &&
+      !Number.isNaN(intentExpiry.getTime()) && intentExpiry <= staleAt;
+    const retryableCleanup = retryableWriteCleanup(intent, staleAt);
+    if (!staleWriteIntent && !retryableCleanup) return false;
+
+    const writerLeaseId = String(intent.writeLeaseId || "").trim();
+    if (writerLeaseId) {
+      const writerLease = await lifecycleStore.validateWriteLease(binding, writerLeaseId);
+      if (writerLease?.status === "active") return false;
+    } else if (lease && Number(lease.activeLeases || 0) > 1) {
+      return false;
+    }
+    if (heartbeat && lease) {
+      await heartbeat.assertHealthy();
+      const currentLease = await lifecycleStore.validateWriteLease(binding, lease.leaseId);
+      if (!currentLease || currentLease.status !== "active") throw lifecycleWriteError();
+    }
+
+    const cleanupClaimId = cleanupClaimFactory();
+    const cleanupClaimExpiresAt = new Date(
+      staleAt.getTime() + Math.max(60_000, Number(writeIntentTimeoutMs) || DEFAULT_WRITE_INTENT_TIMEOUT_MS),
+    );
+    const claim = {
+      writeLeaseId: writerLeaseId,
+      cleanupClaimId,
+      cleanupClaimExpiresAt,
+    };
+    const claimed = staleWriteIntent
+      ? await repository.claimStaleWriteIntent(intent.gridFsObjectId, staleAt, claim)
+      : await repository.reclaimPendingWriteCleanup(intent.gridFsObjectId, staleAt, claim);
+    if (!claimed) return false;
+
+    try {
+      await storageAdapter.deleteArtifact({ objectId: intent.gridFsObjectId });
+      if (await storageAdapter.getArtifact({ objectId: intent.gridFsObjectId })) {
+        throw new Error("Stale write intent bytes remain");
+      }
+      const removed = await repository.deleteClaimedWriteCleanup(
+        intent.gridFsObjectId,
+        cleanupClaimId,
+      );
+      if (Number(removed?.deletedCount || 0) !== 1) {
+        const current = await repository.findLatest(binding);
+        if (!current || String(current.gridFsObjectId) !== String(intent.gridFsObjectId)) {
+          return true;
+        }
+        throw new Error("Stale write intent metadata remains");
+      }
+    } catch (error) {
+      try {
+        await repository.releaseWriteCleanup(
+          intent.gridFsObjectId,
+          cleanupClaimId,
+          purgeAt(),
+        );
+      } catch {
+        // The claimed cleanup remains durable and becomes reclaimable on expiry.
+      }
+      const pending = storageError(503, "Artifact cleanup remains pending", "ARTIFACT_CLEANUP_PENDING");
+      pending.cause = error;
+      throw pending;
+    }
+    return true;
+  }
+
   async function putArtifact(input) {
     const binding = normalizeBinding(input);
     if (binding.revision == null) throw storageError(400, "Artifact revision is required", "INVALID_ARTIFACT_REVISION");
+    const source = input.bytes ?? input.content;
+    const sourceSize = knownContentSize(source);
+    if (sourceSize != null && sourceSize > maxBytes) {
+      throw storageError(413, "Artifact exceeds size limit", "ARTIFACT_TOO_LARGE");
+    }
+    const stateCas = normalizeStateCas(binding, input);
     const expiresAt = new Date(input.expiresAt);
     if (Number.isNaN(expiresAt.getTime()) || expiresAt <= now()) throw storageError(400, "Artifact expiry is invalid", "INVALID_ARTIFACT_EXPIRY");
     const lease = await lifecycleStore.acquireWriteLease(binding, { retainUntil: expiresAt });
     if (!lease || lease.status !== "active") throw lifecycleWriteError();
     const heartbeat = startWriteLeaseHeartbeat(binding, lease.leaseId, lease.leaseLifetimeMs);
     try {
-      const existing = await repository.findLatest(binding);
+      let existing = await repository.findLatest(binding);
       if (existing) {
         assertBinding(existing, input);
+        const pendingCleanup = existing.status === "deletion_pending" || existing.status === "write_cleanup";
+        if (await retireStaleWriteIntent(existing, binding, lease, heartbeat)) {
+          existing = await repository.findLatest(binding);
+        } else if (pendingCleanup) {
+          existing = await repository.findLatest(binding);
+          if (existing && existing.status !== "available") {
+            throw storageError(503, "Artifact cleanup remains pending", "ARTIFACT_CLEANUP_PENDING");
+          }
+        }
+      }
+      if (existing) {
+        assertBinding(existing, input);
+        if (stateCas) {
+          if (exactStateReplay(existing, stateCas)) return existing;
+          throw stateConflict("Operation state revision already has different bytes");
+        }
         if (existing.status === "available" && new Date(existing.expiresAt) > now()) return existing;
         throw storageError(410, "Artifact revision has been retired", "ARTIFACT_REVISION_RETIRED");
       }
-      const expectedSha256 = input.sha256 == null ? "" : String(input.sha256).trim().toLowerCase();
+      if (stateCas) await assertExpectedStateHead(binding, stateCas);
+      const expectedSha256 = stateCas?.candidateSha256 || (
+        input.sha256 == null ? "" : normalizedSha256(input.sha256)
+      );
       const workspaceId = input.workspaceId == null || String(input.workspaceId).trim() === ""
         ? null
         : normalizeIdentifier(input.workspaceId, "Workspace id");
-      const intent = await repository.createWriteIntent({
-        ...binding,
-        workspaceId,
-        gridFsObjectId: objectIdFactory(),
-        sha256: "",
-        sizeBytes: 0,
-        mime: String(input.mime || input.contentType || "application/octet-stream").trim(),
-        expiresAt,
-        writeIntentExpiresAt: new Date(
-          now().getTime() + Math.max(60_000, Number(writeIntentTimeoutMs) || DEFAULT_WRITE_INTENT_TIMEOUT_MS),
-        ),
-      });
+      let intent;
+      try {
+        intent = await repository.createWriteIntent({
+          ...binding,
+          workspaceId,
+          gridFsObjectId: objectIdFactory(),
+          previousRevision: stateCas?.expectedPriorRevision ?? null,
+          previousSha256: stateCas?.expectedPriorSha256 || null,
+          sha256: stateCas?.candidateSha256 || "",
+          sizeBytes: 0,
+          mime: String(input.mime || input.contentType || "application/octet-stream").trim(),
+          expiresAt,
+          writeIntentExpiresAt: new Date(
+            now().getTime() + Math.max(60_000, Number(writeIntentTimeoutMs) || DEFAULT_WRITE_INTENT_TIMEOUT_MS),
+          ),
+          writeLeaseId: lease.leaseId,
+        });
+      } catch (error) {
+        if (!stateCas || error?.code !== 11000) throw error;
+        const concurrent = await repository.findLatest(binding);
+        if (exactStateReplay(concurrent, stateCas)) return concurrent;
+        throw stateConflict("Concurrent operation state publication won the revision");
+      }
       let uploaded;
       try {
         uploaded = await storageAdapter.putArtifact({
           objectId: intent.gridFsObjectId,
-          bytes: input.bytes || input.content,
+          bytes: source,
           metadata: {
             ...binding,
             mime: input.mime || input.contentType,
@@ -1168,11 +1421,17 @@ function createConversionArtifactService({
         ...binding,
         workspaceId,
         gridFsObjectId: uploaded.objectId,
+        previousRevision: stateCas?.expectedPriorRevision ?? null,
+        previousSha256: stateCas?.expectedPriorSha256 || null,
         sha256: uploaded.sha256,
         sizeBytes: uploaded.sizeBytes,
         mime: String(input.mime || input.contentType || uploaded.mime || "application/octet-stream").trim(),
         expiresAt,
       };
+      if (stateCas && metadata.sha256 !== stateCas.candidateSha256) {
+        await discardProvisionalArtifact(intent);
+        throw storageError(409, "Candidate state checksum mismatch", "ARTIFACT_CHECKSUM_MISMATCH");
+      }
       if (metadata.sizeBytes > maxBytes) {
         await discardProvisionalArtifact(intent);
         throw storageError(413, "Artifact exceeds size limit", "ARTIFACT_TOO_LARGE");
@@ -1206,10 +1465,16 @@ function createConversionArtifactService({
 
   async function validatedMetadata(input) {
     const binding = normalizeBinding(input);
-    const metadata = await repository.findLatest(binding);
+    const metadata = await repository.findLatest({
+      ...binding,
+      ...(binding.revision == null ? { status: "available" } : {}),
+    });
     if (!metadata) throw storageError(404, "Artifact was not found", "ARTIFACT_NOT_FOUND");
     assertBinding(metadata, input);
     if (metadata.status !== "available") throw storageError(410, "Artifact is unavailable", "ARTIFACT_UNAVAILABLE");
+    if (metadata.sizeBytes > maxBytes) {
+      throw storageError(413, "Stored artifact exceeds size limit", "ARTIFACT_TOO_LARGE");
+    }
     if (new Date(metadata.expiresAt) <= now()) {
       try {
         await markDeletionPending(metadata);
@@ -1253,6 +1518,10 @@ function createConversionArtifactService({
       transform: (chunk, _encoding, callback) => {
         const buffer = Buffer.from(chunk);
         streamedBytes += buffer.length;
+        if (streamedBytes > maxBytes) {
+          callback(storageError(413, "Stored artifact exceeds size limit", "ARTIFACT_TOO_LARGE"));
+          return;
+        }
         digest.update(buffer);
         callback(null, buffer);
       },
@@ -1405,6 +1674,17 @@ function createConversionArtifactService({
       scanned += 1;
       if (metadata?._id != null) lastInspectedId = metadata._id;
       try {
+        if (
+          metadata.tombstoneOnly !== true &&
+          retryableWriteCleanup(metadata, sweepNow)
+        ) {
+          const binding = normalizeBinding(metadata);
+          if (await retireStaleWriteIntent(metadata, binding, null, null)) {
+            deleted += 1;
+            completedCandidates += 1;
+          }
+          continue;
+        }
         if (metadata.tombstoneOnly !== true) {
           const candidateBinding = normalizeSessionBinding(metadata);
           const candidateOperationKey = [

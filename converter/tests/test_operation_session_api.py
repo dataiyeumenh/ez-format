@@ -14,7 +14,7 @@ import openpyxl
 import pytest
 from fastapi.testclient import TestClient
 
-from app.excel_io import InputTable
+from app.excel_io import InputTable, read_input_table
 from app.main import app
 from app.operation_store import (
     STUDENT_METADATA_STATE_CONTRACT,
@@ -22,6 +22,12 @@ from app.operation_store import (
     OperationStoreError,
     OperationStoreExpiredError,
     cleanup_expired_operation_sessions,
+)
+from app.operation_store_client import (
+    LEGACY_NODE_JSON_MAX_BODY_BYTES,
+    OperationStoreClientError,
+    _artifact_max_bytes,
+    _assert_legacy_node_json_body_size,
 )
 
 
@@ -174,6 +180,306 @@ def test_node_operation_store_client_purges_all_bound_remote_artifacts(monkeypat
     assert result["remote_operation_session_deleted"] is True
 
 
+def test_node_operation_store_client_publishes_exact_state_bytes_with_cas(monkeypatch):
+    from app.operation_store_client import NodeOperationStoreClient
+
+    node_client = object.__new__(NodeOperationStoreClient)
+    node_client.session_id = "session-1"
+    node_client.run_id = "run-1"
+    node_client._protocol = "raw-v2"
+    captured = {}
+    monkeypatch.setattr(
+        node_client,
+        "_request",
+        lambda method, path, **kwargs: captured.update(
+            {"method": method, "path": path, **kwargs}
+        )
+        or {
+            "session": {
+                "revision": 5,
+                "sha256": kwargs["params"]["sha256"],
+            },
+            "state": json.loads(kwargs["content"]),
+        },
+    )
+    state = {
+        "session": {"state_hash": "c" * 64, "label": "dữ liệu"},
+        "schema_version": 1,
+    }
+
+    result = node_client.put_state(
+        session_id="session-1",
+        run_id="run-1",
+        revision=5,
+        expected_revision=4,
+        expected_state_sha256="b" * 64,
+        state=state,
+        expires_at=datetime.now(timezone.utc) + timedelta(minutes=5),
+    )
+
+    expected_bytes = json.dumps(
+        state,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    assert captured["method"] == "PUT"
+    assert captured["path"] == "/converter-sessions/session-1/state"
+    assert captured["content"] == expected_bytes
+    assert captured["params"]["expected_revision"] == "4"
+    assert captured["params"]["expected_sha256"] == "b" * 64
+    assert captured["params"]["sha256"] == hashlib.sha256(expected_bytes).hexdigest()
+    assert result["state"] == state
+
+
+def test_node_operation_store_client_falls_back_to_legacy_json_for_old_node(monkeypatch):
+    from app.operation_store_client import NodeOperationStoreClient
+
+    node_client = object.__new__(NodeOperationStoreClient)
+    node_client.session_id = "session-1"
+    node_client.run_id = "run-1"
+    node_client._protocol = None
+    captured = {}
+
+    def request(method, path, **kwargs):
+        if path == "/converter-sessions/protocol":
+            raise OperationStoreClientError("not found", status_code=404)
+        captured.update({"method": method, "path": path, **kwargs})
+        payload = json.loads(kwargs["content"])
+        state = payload["state"]
+        encoded = json.dumps(
+            state, ensure_ascii=False, separators=(",", ":")
+        ).encode("utf-8")
+        return {
+            "state": state,
+            "session": {
+                "revision": payload["revision"],
+                "sha256": hashlib.sha256(encoded).hexdigest(),
+            },
+        }
+
+    monkeypatch.setattr(node_client, "_request", request)
+    state = {
+        "session": {"state_hash": "c" * 64, "label": "dữ liệu"},
+        "schema_version": 1,
+    }
+
+    node_client.put_state(
+        session_id="session-1",
+        run_id="run-1",
+        revision=2,
+        expected_revision=1,
+        expected_state_sha256="b" * 64,
+        state=state,
+        expires_at=datetime.now(timezone.utc) + timedelta(minutes=5),
+    )
+
+    payload = json.loads(captured["content"])
+    assert captured["headers"]["content-type"] == "application/json"
+    assert payload["run_id"] == "run-1"
+    assert payload["state"] == state
+    canonical_bytes = json.dumps(
+        state, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    assert list(payload["state"]) == ["schema_version", "session"]
+    assert "state_base64" not in payload
+    assert payload["sha256"] == hashlib.sha256(canonical_bytes).hexdigest()
+    assert payload["expected_revision"] == 1
+    assert payload["expected_sha256"] == "b" * 64
+
+
+def test_node_operation_store_client_uses_single_canonical_base64_for_new_legacy_node(
+    monkeypatch,
+):
+    from app.operation_store_client import NodeOperationStoreClient
+
+    node_client = object.__new__(NodeOperationStoreClient)
+    node_client.session_id = "session-1"
+    node_client.run_id = "run-1"
+    node_client._protocol = "legacy-json-v1"
+    node_client._legacy_json_state_encoding = "base64"
+    captured = {}
+
+    def request(method, path, **kwargs):
+        captured.update({"method": method, "path": path, **kwargs})
+        payload = json.loads(kwargs["content"])
+        content = base64.b64decode(payload["state_base64"])
+        return {
+            "state": json.loads(content),
+            "session": {
+                "revision": payload["revision"],
+                "sha256": hashlib.sha256(content).hexdigest(),
+            },
+        }
+
+    monkeypatch.setattr(node_client, "_request", request)
+    state = {"session": {"label": "dữ liệu"}, "schema_version": 1}
+
+    node_client.put_state(
+        session_id="session-1",
+        run_id="run-1",
+        revision=2,
+        expected_revision=1,
+        expected_state_sha256="b" * 64,
+        state=state,
+        expires_at=datetime.now(timezone.utc) + timedelta(minutes=5),
+    )
+
+    payload = json.loads(captured["content"])
+    canonical_bytes = json.dumps(
+        state, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    assert "state" not in payload
+    assert base64.b64decode(payload["state_base64"]) == canonical_bytes
+    assert payload["sha256"] == hashlib.sha256(canonical_bytes).hexdigest()
+
+
+def test_pinned_legacy_protocol_negotiates_new_node_canonical_encoding(monkeypatch):
+    from app.operation_store_client import NodeOperationStoreClient
+
+    node_client = object.__new__(NodeOperationStoreClient)
+    node_client._configured_protocol = "legacy-json-v1"
+    node_client._protocol = None
+    node_client._legacy_json_state_encoding = None
+    node_client._legacy_json_max_body_bytes = None
+    monkeypatch.setattr(
+        node_client,
+        "_request",
+        lambda method, path: {
+            "preferred": "raw-v2",
+            "supported": ["raw-v2", "legacy-json-v1"],
+            "legacy_json_state_encoding": "base64",
+            "legacy_json_max_body_bytes": 90 * 1024 * 1024,
+        },
+    )
+
+    assert node_client._operation_protocol() == "legacy-json-v1"
+    assert node_client._legacy_state_encoding() == "base64"
+    assert node_client._legacy_body_limit() == 90 * 1024 * 1024
+
+
+def test_legacy_node_json_body_preflight_enforces_exact_50_mib_boundary():
+    assert LEGACY_NODE_JSON_MAX_BODY_BYTES == 50 * 1024 * 1024
+    _assert_legacy_node_json_body_size(
+        b"x" * 32,
+        max_body_bytes=32,
+    )
+    with pytest.raises(OperationStoreClientError) as error:
+        _assert_legacy_node_json_body_size(
+            b"x" * 33,
+            max_body_bytes=32,
+        )
+    assert error.value.status_code == 413
+    assert error.value.code == "OPERATION_PROTOCOL_SIZE_MISMATCH"
+
+
+def test_node_operation_store_client_sends_legacy_base64_artifacts_to_old_node(monkeypatch):
+    from app.operation_store_client import NodeOperationStoreClient
+
+    node_client = object.__new__(NodeOperationStoreClient)
+    node_client.session_id = "session-1"
+    node_client.run_id = "run-1"
+    node_client._protocol = None
+    captured = {}
+
+    def request(method, path, **kwargs):
+        if path == "/converter-sessions/protocol":
+            raise OperationStoreClientError("not found", status_code=404)
+        captured.update({"method": method, "path": path, **kwargs})
+        payload = json.loads(kwargs["content"])
+        return {"artifact": {"revision": payload["revision"]}}
+
+    monkeypatch.setattr(node_client, "_request", request)
+    content = b"legacy artifact bytes"
+
+    node_client.put_artifact(
+        session_id="session-1",
+        run_id="run-1",
+        kind="upload",
+        revision=1,
+        content=content,
+        content_type="application/octet-stream",
+        expires_at=datetime.now(timezone.utc) + timedelta(minutes=5),
+    )
+
+    payload = json.loads(captured["content"])
+    assert base64.b64decode(payload["content_base64"]) == content
+    assert payload["sha256"] == hashlib.sha256(content).hexdigest()
+
+
+@pytest.mark.parametrize("operation", ["state", "artifact"])
+def test_old_node_fallback_rejects_oversized_legacy_json_before_put(
+    monkeypatch,
+    operation,
+):
+    import app.operation_store_client as client_module
+    from app.operation_store_client import NodeOperationStoreClient
+
+    node_client = object.__new__(NodeOperationStoreClient)
+    node_client.session_id = "session-1"
+    node_client.run_id = "run-1"
+    node_client._protocol = None
+    calls = []
+    monkeypatch.setattr(client_module, "LEGACY_NODE_JSON_MAX_BODY_BYTES", 256)
+
+    def request(method, path, **kwargs):
+        calls.append((method, path, kwargs))
+        if path == "/converter-sessions/protocol":
+            raise OperationStoreClientError("not found", status_code=404)
+        raise AssertionError("oversized legacy body must fail before PUT")
+
+    monkeypatch.setattr(node_client, "_request", request)
+
+    with pytest.raises(OperationStoreClientError) as error:
+        if operation == "state":
+            node_client.put_state(
+                session_id="session-1",
+                run_id="run-1",
+                revision=2,
+                expected_revision=1,
+                expected_state_sha256="b" * 64,
+                state={"value": "x" * 512},
+                expires_at=datetime.now(timezone.utc) + timedelta(minutes=5),
+            )
+        else:
+            node_client.put_artifact(
+                session_id="session-1",
+                run_id="run-1",
+                kind="upload",
+                revision=1,
+                content=b"x" * 512,
+                content_type="application/octet-stream",
+                expires_at=datetime.now(timezone.utc) + timedelta(minutes=5),
+            )
+
+    assert error.value.status_code == 413
+    assert error.value.code == "OPERATION_PROTOCOL_SIZE_MISMATCH"
+    assert [path for _method, path, _kwargs in calls] == [
+        "/converter-sessions/protocol"
+    ]
+
+
+@pytest.mark.parametrize(
+    "configured",
+    [
+        "",
+        "0",
+        "-1",
+        "1.5",
+        "1e6",
+        "0x100000",
+        "+1000",
+        " 1000 ",
+        "1_000",
+        "9007199254740992",
+        "invalid",
+    ],
+)
+def test_converter_artifact_invalid_max_bytes_uses_node_default(monkeypatch, configured):
+    monkeypatch.setenv("CONVERTER_ARTIFACT_MAX_BYTES", configured)
+    assert _artifact_max_bytes() == 64 * 1024 * 1024
+
+
 def test_converter_capability_endpoint_matches_health_source_of_truth(monkeypatch):
     monkeypatch.setenv("FEATURE_ANOMALY_DETECTION", "true")
     monkeypatch.setenv("FEATURE_AI_EXPLANATION", "false")
@@ -239,7 +545,9 @@ def test_local_operation_session_requires_explicit_dev_flag(tmp_path, monkeypatc
     assert response.status_code == 401
 
 
-def _create_test_operation_session(store, *, session_id=None, ttl_seconds=3600):
+def _create_test_operation_session(
+    store, *, session_id=None, ttl_seconds=3600, initial_context=None
+):
     return store.create_session(
         session_id=session_id,
         upload_id="student-upload",
@@ -256,8 +564,25 @@ def _create_test_operation_session(store, *, session_id=None, ttl_seconds=3600):
         raw_sha256="raw-hash",
         conversion_run_id=(f"student:{session_id}" if session_id else None),
         ttl_seconds=ttl_seconds,
+        initial_context=initial_context,
         state_contract=(STUDENT_METADATA_STATE_CONTRACT if session_id else None),
     )
+
+
+def _persisted_state_response(payload):
+    encoded = json.dumps(
+        payload["state"],
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return {
+        "state": json.loads(encoded),
+        "session": {
+            "revision": payload["revision"],
+            "sha256": hashlib.sha256(encoded).hexdigest(),
+        },
+    }
 
 
 def test_expired_local_operation_session_rejects_and_purges_raw_table(
@@ -289,20 +614,34 @@ def test_student_metadata_cache_rejects_expiry_and_purges_local_raw_state(
         def __init__(self):
             self.run_id = f"student:{session_id}"
             self.session_id = session_id
+            self.payload = None
+            self.expired = False
 
-        @staticmethod
-        def put_state(**payload):
-            return {"session": {"revision": payload["revision"]}}
+        def put_state(self, **payload):
+            self.payload = payload
+            return _persisted_state_response(payload)
 
-    store = OperationStore(root=tmp_path / "sessions", remote_client=RemoteStore())
+        def get_state(self, **_payload):
+            payload = dict(self.payload)
+            state = json.loads(json.dumps(payload["state"]))
+            if self.expired:
+                state["session"]["expires_at"] = (
+                    datetime.now(timezone.utc) - timedelta(seconds=1)
+                ).isoformat()
+            payload["state"] = state
+            return _persisted_state_response(payload)
+
+    remote = RemoteStore()
+    store = OperationStore(root=tmp_path / "sessions", remote_client=remote)
     session = _create_test_operation_session(
         store,
         session_id=session_id,
-        ttl_seconds=-1,
     )
     session_dir = store.root / session.session_id
-    assert (session_dir / "table.json").is_file()
+    assert not session_dir.exists()
+    assert list(store.root.iterdir()) == []
 
+    remote.expired = True
     with pytest.raises(OperationStoreExpiredError):
         store.load_session(session.session_id)
 
@@ -311,7 +650,7 @@ def test_student_metadata_cache_rejects_expiry_and_purges_local_raw_state(
     assert store._read_lifecycle_state(session.session_id)["status"] == "purging"
 
 
-def test_student_metadata_operation_session_survives_process_restart(
+def test_node_operation_session_full_state_survives_second_instance_without_local_state(
     tmp_path,
 ):
     session_id = "student-session-restart"
@@ -324,29 +663,63 @@ def test_student_metadata_operation_session_survives_process_restart(
 
         @staticmethod
         def put_state(**payload):
+            assert payload["expected_revision"] == 0
+            assert payload["expected_state_sha256"] == ""
+            encoded = json.dumps(
+                payload["state"],
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+            state_sha256 = hashlib.sha256(encoded).hexdigest()
             captured.update(payload)
-            return {"session": {"revision": payload["revision"]}}
+            captured["state_sha256"] = state_sha256
+            return {
+                "state": json.loads(encoded),
+                "session": {
+                    "revision": payload["revision"],
+                    "sha256": state_sha256,
+                },
+            }
 
         @staticmethod
         def get_state(**_payload):
             return {
                 "state": captured["state"],
-                "session": {"revision": captured["revision"]},
+                "session": {
+                    "revision": captured["revision"],
+                    "sha256": captured["state_sha256"],
+                },
             }
 
-    root = tmp_path / "sessions"
     first_store = OperationStore(
-        root=root,
+        root=tmp_path / "first-sessions",
         remote_client=RemoteStore(),
         conversion_run_id=f"student:{session_id}",
     )
     created = _create_test_operation_session(
         first_store,
         session_id=session_id,
+        initial_context={
+            "upload_metadata": {
+                "upload_id": "student-upload",
+                "filename": "student-workbook.xlsx",
+                "operation_session_id": session_id,
+                "target_template_id": "bsn_sales",
+                "conversion_run_id": f"student:{session_id}",
+                "owner_scope": "user:user-1",
+                "conversion_context": {
+                    "user_id": "user-1",
+                    "workspace_id": "",
+                    "owner_scope": "user:user-1",
+                    "conversion_run_id": f"student:{session_id}",
+                },
+            }
+        },
     )
 
     restarted_store = OperationStore(
-        root=root,
+        root=tmp_path / "second-sessions",
         remote_client=RemoteStore(),
         conversion_run_id=f"student:{session_id}",
     )
@@ -356,8 +729,341 @@ def test_student_metadata_operation_session_survives_process_restart(
     assert materialized.rows == [
         {"Họ tên": "Nguyễn Văn An", "CCCD": "079203001234"}
     ]
-    assert "table" not in captured["state"]
-    assert "table_metadata" in captured["state"]
+    assert captured["state"]["table"]["headers"] == ["Họ tên", "CCCD"]
+    assert captured["state"]["contract"] == STUDENT_METADATA_STATE_CONTRACT
+    assert not (first_store.root / created.session_id).exists()
+    assert not (restarted_store.root / created.session_id).exists()
+
+
+def test_transient_unavailable_node_state_does_not_mark_session_purging(tmp_path):
+    session_id = "student-session-write-intent"
+
+    class RemoteStore:
+        run_id = "student:student-session-write-intent"
+        session_id = "student-session-write-intent"
+
+        @staticmethod
+        def get_state(**_payload):
+            raise OperationStoreClientError(
+                "Artifact is unavailable",
+                status_code=410,
+                code="ARTIFACT_UNAVAILABLE",
+            )
+
+    store = OperationStore(
+        root=tmp_path / "sessions",
+        remote_client=RemoteStore(),
+        conversion_run_id=f"student:{session_id}",
+    )
+    store._write_lifecycle_state(session_id, "active")
+
+    with pytest.raises(OperationStoreError, match="unavailable"):
+        store.load_session(session_id)
+
+    assert store._read_lifecycle_state(session_id)["status"] == "active"
+
+
+def test_student_node_table_reader_uses_persisted_state_without_local_raw(
+    tmp_path,
+    monkeypatch,
+):
+    import app.misa_workflow as workflow
+
+    session_id = "student-session-table-reader-restart"
+    monkeypatch.setenv("OPERATION_STORE_PROVIDER", "node")
+    persisted = {}
+
+    class RemoteStore:
+        def __init__(self):
+            self.run_id = f"student:{session_id}"
+            self.session_id = session_id
+
+        @staticmethod
+        def put_state(**payload):
+            persisted.update(payload)
+            return _persisted_state_response(payload)
+
+        @staticmethod
+        def get_state(**_payload):
+            return _persisted_state_response(persisted)
+
+    first_store = OperationStore(
+        root=tmp_path / "first-sessions",
+        remote_client=RemoteStore(),
+        conversion_run_id=f"student:{session_id}",
+    )
+    created = _create_test_operation_session(
+        first_store,
+        session_id=session_id,
+        initial_context={
+            "upload_metadata": {
+                "upload_id": "student-upload",
+                "filename": "student-workbook.xlsx",
+                "operation_session_id": session_id,
+                "target_template_id": "bsn_sales",
+                "conversion_run_id": f"student:{session_id}",
+                "owner_scope": "user:user-1",
+                "conversion_context": {
+                    "user_id": "user-1",
+                    "workspace_id": "",
+                    "owner_scope": "user:user-1",
+                    "conversion_run_id": f"student:{session_id}",
+                },
+            }
+        },
+    )
+    restarted_store = OperationStore(
+        root=tmp_path / "second-sessions",
+        remote_client=RemoteStore(),
+        conversion_run_id=f"student:{session_id}",
+    )
+    monkeypatch.setattr(workflow, "UPLOAD_ROOT", tmp_path / "uploads")
+    stale_upload_dir = workflow.UPLOAD_ROOT / created.upload_id
+    stale_upload_dir.mkdir(parents=True)
+    stale_metadata_path = stale_upload_dir / "metadata.json"
+    stale_metadata_path.write_text(
+        json.dumps(
+            {
+                "operation_session_id": "replica-local-stale-session",
+                "target_template_id": "stale-template",
+                "input_path": str(stale_upload_dir / "input.xlsx"),
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(workflow, "OperationStore", lambda **_kwargs: restarted_store)
+
+    metadata = workflow._read_metadata(
+        created.upload_id,
+        operation_store=restarted_store,
+        session=created,
+    )
+    table = workflow._read_upload_table(
+        created.upload_id,
+        conversion_context_token="unused-by-fake",
+    )
+
+    assert metadata["operation_session_id"] == created.session_id
+    assert metadata["target_template_id"] == "bsn_sales"
+    assert metadata["operation_revision"] == created.active_revision
+    assert metadata["operation_state_hash"] == created.state_hash
+    assert metadata["operation_storage_revision"] == 1
+    assert len(metadata["operation_storage_sha256"]) == 64
+    assert table.headers == ["Họ tên", "CCCD"]
+    assert table.rows == [{"Họ tên": "Nguyễn Văn An", "CCCD": "079203001234"}]
+    assert not stale_metadata_path.exists()
+    assert not (first_store.root / created.session_id).exists()
+    assert not (restarted_store.root / created.session_id).exists()
+
+
+def test_legacy_student_metadata_state_drains_local_table_into_node(tmp_path):
+    root = tmp_path / "legacy-sessions"
+    local_store = OperationStore(root=root)
+    created = _create_test_operation_session(local_store)
+    table_payload = json.loads(
+        (root / created.session_id / "table.json").read_text(encoding="utf-8")
+    )
+    legacy_state = {
+        "schema_version": 1,
+        "contract": STUDENT_METADATA_STATE_CONTRACT,
+        "session": created.model_dump(mode="json"),
+    }
+    legacy_bytes = json.dumps(
+        legacy_state,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    persisted = {
+        "state": legacy_state,
+        "revision": 1,
+        "state_sha256": hashlib.sha256(legacy_bytes).hexdigest(),
+    }
+
+    class RemoteStore:
+        @staticmethod
+        def get_state(**_payload):
+            return {
+                "state": persisted["state"],
+                "session": {
+                    "revision": persisted["revision"],
+                    "sha256": persisted["state_sha256"],
+                },
+            }
+
+        @staticmethod
+        def put_state(**payload):
+            assert payload["expected_revision"] == 1
+            assert payload["expected_state_sha256"] == persisted["state_sha256"]
+            encoded = json.dumps(
+                payload["state"],
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+            persisted.update(
+                state=json.loads(encoded),
+                revision=payload["revision"],
+                state_sha256=hashlib.sha256(encoded).hexdigest(),
+            )
+            return RemoteStore.get_state()
+
+    remote = RemoteStore()
+    remote.session_id = created.session_id
+    remote.run_id = f"student:{created.session_id}"
+
+    restarted = OperationStore(
+        root=root,
+        remote_client=remote,
+        conversion_run_id=f"student:{created.session_id}",
+    )
+
+    table = restarted.materialize_table(created.session_id)
+
+    assert table.headers == table_payload["headers"]
+    assert table.rows == [item["values"] for item in table_payload["rows"]]
+    assert persisted["revision"] == 2
+    assert persisted["state"]["table"] == table_payload
+    assert not (root / created.session_id).exists()
+
+
+def test_legacy_student_metadata_state_recovers_bound_gridfs_upload(tmp_path):
+    workbook = openpyxl.Workbook()
+    sheet = workbook.active
+    sheet.title = "Student Data"
+    sheet.append(["Họ tên", "CCCD"])
+    sheet.append(["Nguyễn Văn An", "079203001234"])
+    workbook_path = tmp_path / "legacy-upload.xlsx"
+    workbook.save(workbook_path)
+    workbook_bytes = workbook_path.read_bytes()
+    table = read_input_table(workbook_path)
+
+    root = tmp_path / "legacy-gridfs-sessions"
+    local_store = OperationStore(root=root)
+    created = local_store.create_session(
+        upload_id="legacy-gridfs-upload",
+        owner_scope="user:user-1",
+        user_id="user-1",
+        workspace_id=None,
+        target_template_id="bsn_sales",
+        target_template_version="v1",
+        source_signature={"hash": "legacy-gridfs"},
+        table=table,
+        raw_sha256=hashlib.sha256(workbook_bytes).hexdigest(),
+        ttl_seconds=3600,
+        initial_context={"upload_metadata": {"filename": "legacy-upload.xlsx"}},
+    )
+    local_store.purge_local_session_state(created.session_id)
+    legacy_state = {
+        "schema_version": 1,
+        "contract": STUDENT_METADATA_STATE_CONTRACT,
+        "session": created.model_dump(mode="json"),
+    }
+    legacy_bytes = json.dumps(
+        legacy_state,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    persisted = {
+        "state": legacy_state,
+        "revision": 1,
+        "state_sha256": hashlib.sha256(legacy_bytes).hexdigest(),
+    }
+
+    class RemoteStore:
+        @staticmethod
+        def get_state(**_payload):
+            return {
+                "state": persisted["state"],
+                "session": {
+                    "revision": persisted["revision"],
+                    "sha256": persisted["state_sha256"],
+                },
+            }
+
+        @staticmethod
+        def get_artifact(**payload):
+            assert payload["kind"] == "upload"
+            assert payload["session_id"] == created.session_id
+            return workbook_bytes
+
+        @staticmethod
+        def put_state(**payload):
+            encoded = json.dumps(
+                payload["state"],
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+            persisted.update(
+                state=json.loads(encoded),
+                revision=payload["revision"],
+                state_sha256=hashlib.sha256(encoded).hexdigest(),
+            )
+            return RemoteStore.get_state()
+
+    remote = RemoteStore()
+    remote.session_id = created.session_id
+    remote.run_id = f"student:{created.session_id}"
+    restarted = OperationStore(
+        root=root,
+        remote_client=remote,
+        conversion_run_id=remote.run_id,
+    )
+
+    recovered = restarted.materialize_table(created.session_id)
+
+    assert recovered.headers == table.headers
+    assert recovered.rows == table.rows
+    assert persisted["revision"] == 2
+    assert persisted["state"]["table"]["headers"] == table.headers
+
+
+def test_legacy_student_metadata_without_durable_source_requires_operator_drain(
+    tmp_path,
+):
+    local_store = OperationStore(root=tmp_path / "legacy-source")
+    created = _create_test_operation_session(local_store)
+    local_store.purge_local_session_state(created.session_id)
+    legacy_state = {
+        "schema_version": 1,
+        "contract": STUDENT_METADATA_STATE_CONTRACT,
+        "session": created.model_dump(mode="json"),
+    }
+    legacy_bytes = json.dumps(
+        legacy_state,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+    class RemoteStore:
+        session_id = created.session_id
+        run_id = f"student:{created.session_id}"
+
+        @staticmethod
+        def get_state(**_payload):
+            return {
+                "state": legacy_state,
+                "session": {
+                    "revision": 1,
+                    "sha256": hashlib.sha256(legacy_bytes).hexdigest(),
+                },
+            }
+
+        @staticmethod
+        def get_artifact(**_payload):
+            raise OperationStoreClientError("not found", status_code=404)
+
+    restarted = OperationStore(
+        root=tmp_path / "legacy-source",
+        remote_client=RemoteStore(),
+        conversion_run_id=RemoteStore.run_id,
+    )
+
+    with pytest.raises(OperationStoreError, match="operator drain recovery"):
+        restarted.materialize_table(created.session_id)
 
 
 def test_operation_session_sweeper_is_bounded_and_restart_safe(
@@ -520,7 +1226,7 @@ def test_student_operation_create_is_atomic_through_remote_save_and_future_sweep
             captured.update(payload)
             remote_started.set()
             assert release_remote.wait(2)
-            return {"session": {"revision": payload["revision"]}}
+            return _persisted_state_response(payload)
 
     store = OperationStore(
         root=tmp_path / "sessions",
@@ -545,13 +1251,7 @@ def test_student_operation_create_is_atomic_through_remote_save_and_future_sweep
     published = store.root / session_id
     assert not published.exists()
     staging = [path for path in store.root.iterdir() if path.is_dir()]
-    assert len(staging) == 1
-    assert (staging[0] / ".creating.json").is_file()
-    assert (staging[0] / "table.json").is_file()
-    marker = json.loads((staging[0] / ".creating.json").read_text(encoding="utf-8"))
-    assert marker["session_id"] == session_id
-    assert marker["owner_type"] == "student"
-    assert marker["state_contract"] == STUDENT_METADATA_STATE_CONTRACT
+    assert staging == []
 
     deleted = cleanup_expired_operation_sessions(
         root=store.root,
@@ -559,16 +1259,15 @@ def test_student_operation_create_is_atomic_through_remote_save_and_future_sweep
         batch_size=10,
     )
     assert deleted == []
-    assert staging[0].is_dir()
+    assert list(store.root.iterdir()) == []
 
     release_remote.set()
     creator.join(2)
     assert not creator.is_alive()
     assert "error" not in result
-    assert (published / "session.json").is_file()
-    assert (published / "table.json").is_file()
-    assert not staging[0].exists()
-    assert "table" not in captured["state"]
+    assert not published.exists()
+    assert list(store.root.iterdir()) == []
+    assert captured["state"]["table"]["headers"] == ["Họ tên", "CCCD"]
 
 
 def test_student_operation_create_remote_failure_publishes_no_local_state(tmp_path):
@@ -609,7 +1308,7 @@ def test_student_operation_purge_removes_local_state_but_fails_closed_on_remote_
 
         @staticmethod
         def put_state(**payload):
-            return {"session": {"revision": payload["revision"]}}
+            return _persisted_state_response(payload)
 
         @staticmethod
         def delete_session_artifacts(**payload):
@@ -658,7 +1357,7 @@ def test_operation_purge_fence_drains_in_flight_create_and_survives_restart(
             remote_write_started.set()
             assert release_remote_write.wait(2)
             self.has_state = True
-            return {"session": {"revision": payload["revision"]}}
+            return _persisted_state_response(payload)
 
         def delete_session_artifacts(self, **payload):
             self.has_state = False
@@ -1321,6 +2020,113 @@ def _workbook(path):
     sheet.append(["HD001", "2026-07-01", "Khách A", "SP001", 2, 50000])
     workbook.save(path)
     return path
+
+
+def test_node_analyze_keeps_raw_only_in_bound_remote_artifact(tmp_path, monkeypatch):
+    import app.misa_workflow as workflow
+    import app.operation_store as operation_store_module
+
+    session_id = "a52a3c60-df68-46e5-a6a5-4a7bb44828c5"
+    upload_id = "e7270428-d19f-4fd9-bd86-1b4a5a632e0a"
+    run_id = "507f1f77bcf86cd799439011"
+    persisted = {}
+    artifacts = {}
+    remote_calls = []
+
+    class RemoteStore:
+        def __init__(self, _context_token):
+            self.session_id = session_id
+            self.run_id = run_id
+
+        @staticmethod
+        def put_state(**payload):
+            remote_calls.append("put_state")
+            encoded = json.dumps(
+                payload["state"],
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+            persisted.update(
+                {
+                    "state": json.loads(encoded),
+                    "revision": payload["revision"],
+                    "sha256": hashlib.sha256(encoded).hexdigest(),
+                }
+            )
+            return {
+                "state": persisted["state"],
+                "session": {
+                    "revision": persisted["revision"],
+                    "sha256": persisted["sha256"],
+                },
+            }
+
+        @staticmethod
+        def get_state(**_payload):
+            remote_calls.append("get_state")
+            assert persisted, "initial analyze read Node state before first publication"
+            return {
+                "state": persisted["state"],
+                "session": {
+                    "revision": persisted["revision"],
+                    "sha256": persisted["sha256"],
+                },
+            }
+
+        @staticmethod
+        def put_artifact(**payload):
+            artifacts[payload["kind"]] = bytes(payload["content"])
+            return {"artifact": {"sha256": hashlib.sha256(payload["content"]).hexdigest()}}
+
+    monkeypatch.setenv("CONVERSION_CONTEXT_SECRET", "test-secret")
+    monkeypatch.setenv("CONVERTER_SERVICE_TOKEN", "converter-service-secret")
+    monkeypatch.setenv("OPERATION_STORE_PROVIDER", "node")
+    monkeypatch.setenv("MAPPING_DB_PATH", str(tmp_path / "mapping.sqlite"))
+    monkeypatch.setenv("FEATURE_MAPPING_PROFILE_V2", "false")
+    monkeypatch.setenv("AI_PROVIDER", "disabled")
+    monkeypatch.setattr(workflow, "UPLOAD_ROOT", tmp_path / "uploads")
+    monkeypatch.setattr(operation_store_module, "NodeOperationStoreClient", RemoteStore)
+    token = _context_token(
+        {
+            "purpose": "misa_conversion",
+            "user_id": "user-1",
+            "owner_scope": "user:user-1",
+            "workspace_id": None,
+            "snapshot_set_hash": None,
+            "conversion_run_id": run_id,
+            "operation_session_id": session_id,
+            "upload_id": upload_id,
+            "target_template_id": "bsn_sales",
+            "scopes": ["analyze"],
+            "exp": int(time.time()) + 60,
+        }
+    )
+    source_path = _workbook(tmp_path / "raw.xlsx")
+    source_bytes = source_path.read_bytes()
+
+    result = workflow.analyze_upload(
+        filename="raw.xlsx",
+        content=source_bytes,
+        requested_target_template_id="bsn_sales",
+        conversion_context_token=token,
+        operation_session_id=session_id,
+        conversion_run_id=run_id,
+        preallocated_upload_id=upload_id,
+    )
+
+    assert result["session"]["session_id"] == session_id
+    assert remote_calls[0] == "put_state"
+    assert artifacts["upload"] == source_bytes
+    assert not (workflow.UPLOAD_ROOT / upload_id).exists()
+    assert not (tmp_path / "default-sessions" / session_id).exists()
+
+    analyze_call_count = len(remote_calls)
+    metadata = workflow._read_metadata(upload_id, conversion_context_token=token)
+
+    assert metadata["operation_session_id"] == session_id
+    assert remote_calls[analyze_call_count:]
+    assert set(remote_calls[analyze_call_count:]) == {"get_state"}
 
 
 def test_personal_conversion_context_owns_session_without_workspace(

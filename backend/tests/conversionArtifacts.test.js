@@ -17,6 +17,7 @@ const {
   normalizeArtifactLifecycleMigrationMode,
   startConversionArtifactSweeper,
 } = require("../services/conversionArtifactService");
+const { configuredMaxBytes } = require("../services/mongoGridFsArtifactStorage");
 
 function repository() {
   const documents = [];
@@ -38,19 +39,31 @@ function repository() {
     failStatusFor: null,
     failFinalDeleteStatus: false,
     async findLatest(binding) {
-      return documents.find(
-        (item) =>
-          item.sessionId === binding.sessionId &&
-          item.runId === binding.runId &&
-          item.kind === binding.kind &&
-          (binding.revision == null || item.revision === binding.revision),
-      ) || null;
+      return documents
+        .filter(
+          (item) =>
+            item.sessionId === binding.sessionId &&
+            item.runId === binding.runId &&
+            item.kind === binding.kind &&
+            (binding.status == null || item.status === binding.status) &&
+            (binding.revision == null || item.revision === binding.revision),
+        )
+        .sort((left, right) => right.revision - left.revision)[0] || null;
     },
     async create(metadata) {
       documents.push({ ...metadata });
       return metadata;
     },
     async createWriteIntent(metadata) {
+      if (documents.some((item) =>
+        item.sessionId === metadata.sessionId &&
+        item.kind === metadata.kind &&
+        item.revision === metadata.revision
+      )) {
+        const error = new Error("duplicate artifact revision");
+        error.code = 11000;
+        throw error;
+      }
       const intent = { ...metadata, status: "write_intent" };
       documents.push(intent);
       return intent;
@@ -59,6 +72,10 @@ function repository() {
       const intent = documents.find((item) => item.gridFsObjectId === objectId);
       if (!intent || intent.status !== "write_intent") return null;
       Object.assign(intent, metadata, { status: "available" });
+      delete intent.writeIntentExpiresAt;
+      delete intent.writeLeaseId;
+      delete intent.cleanupClaimId;
+      delete intent.cleanupClaimExpiresAt;
       return intent;
     },
     async markStatus(objectId, status, updates = {}) {
@@ -73,7 +90,12 @@ function repository() {
     },
     async findExpired({ now, limit }) {
       return [...documents, ...tombstones]
-        .filter((item) => item.status === "write_intent" || item.status === "deletion_pending" || (item.status === "available" && item.expiresAt <= now))
+        .filter((item) =>
+          item.status === "write_intent" ||
+          item.status === "deletion_pending" ||
+          (item.status === "write_cleanup" && item.cleanupClaimExpiresAt <= now) ||
+          (item.status === "available" && item.expiresAt <= now)
+        )
         .slice(0, limit);
     },
     async findSessionArtifacts(binding, { limit }) {
@@ -107,6 +129,70 @@ function repository() {
       if (index >= 0) documents.splice(index, 1);
       return { deletedCount: index >= 0 ? 1 : 0 };
     },
+    async claimStaleWriteIntent(objectId, staleAt, {
+      writeLeaseId,
+      cleanupClaimId,
+      cleanupClaimExpiresAt,
+    }) {
+      const item = documents.find((candidate) =>
+        candidate.gridFsObjectId === objectId &&
+        candidate.status === "write_intent" &&
+        candidate.writeIntentExpiresAt <= staleAt &&
+        String(candidate.writeLeaseId || "") === String(writeLeaseId || "")
+      );
+      if (!item) return null;
+      Object.assign(item, { status: "write_cleanup", cleanupClaimId, cleanupClaimExpiresAt });
+      delete item.purgeAt;
+      return item;
+    },
+    async reclaimPendingWriteCleanup(objectId, staleAt, {
+      writeLeaseId,
+      cleanupClaimId,
+      cleanupClaimExpiresAt,
+    }) {
+      const item = documents.find((candidate) =>
+        candidate.gridFsObjectId === objectId &&
+        String(candidate.writeLeaseId || "") === String(writeLeaseId || "") &&
+        (
+          (candidate.status === "deletion_pending" && candidate.writeIntentExpiresAt != null) ||
+          (candidate.status === "write_cleanup" && candidate.cleanupClaimExpiresAt <= staleAt)
+        )
+      );
+      if (!item) return null;
+      Object.assign(item, { status: "write_cleanup", cleanupClaimId, cleanupClaimExpiresAt });
+      delete item.purgeAt;
+      return item;
+    },
+    async releaseWriteCleanup(objectId, cleanupClaimId, purgeAt) {
+      const item = documents.find((candidate) =>
+        candidate.gridFsObjectId === objectId &&
+        candidate.status === "write_cleanup" &&
+        candidate.cleanupClaimId === cleanupClaimId
+      );
+      if (!item) return null;
+      Object.assign(item, { status: "deletion_pending", purgeAt });
+      delete item.cleanupClaimId;
+      delete item.cleanupClaimExpiresAt;
+      return item;
+    },
+    async deleteClaimedWriteCleanup(objectId, cleanupClaimId) {
+      const index = documents.findIndex((item) =>
+        item.gridFsObjectId === objectId &&
+        item.status === "write_cleanup" &&
+        item.cleanupClaimId === cleanupClaimId
+      );
+      if (index >= 0) documents.splice(index, 1);
+      return { deletedCount: index >= 0 ? 1 : 0 };
+    },
+    async deleteStaleWriteIntent(objectId, staleAt) {
+      const index = documents.findIndex((item) =>
+        item.gridFsObjectId === objectId &&
+        item.status === "write_intent" &&
+        item.writeIntentExpiresAt <= staleAt
+      );
+      if (index >= 0) documents.splice(index, 1);
+      return { deletedCount: index >= 0 ? 1 : 0 };
+    },
     async createTombstone(metadata) {
       tombstones.push(metadata);
       return metadata;
@@ -115,10 +201,10 @@ function repository() {
       const key = lifecycleKey(binding);
       const lifecycle = lifecycles.get(key);
       if (lifecycle && lifecycle.status !== "active") return null;
-      const active = lifecycle || { ...binding, status: "active", activeLeases: 0, renewals: 0 };
+      const active = lifecycle || { ...binding, status: "active", activeLeases: 0, renewals: 0, leaseIds: new Set() };
       const leaseId = `lease-${++leaseSequence}`;
-      active.activeLeases += 1;
-      active.leaseId = leaseId;
+      active.leaseIds.add(leaseId);
+      active.activeLeases = active.leaseIds.size;
       if (retainUntil && (!active.retainUntil || retainUntil > active.retainUntil)) {
         active.retainUntil = retainUntil;
       }
@@ -127,18 +213,21 @@ function repository() {
     },
     async renewWriteLease(binding, leaseId) {
       const lifecycle = lifecycles.get(lifecycleKey(binding));
-      if (!lifecycle || lifecycle.status !== "active" || lifecycle.leaseId !== leaseId) return null;
+      if (!lifecycle || lifecycle.status !== "active" || !lifecycle.leaseIds.has(leaseId)) return null;
       lifecycle.renewals += 1;
       return { ...lifecycle, leaseId };
     },
     async validateWriteLease(binding, leaseId) {
       const lifecycle = lifecycles.get(lifecycleKey(binding));
-      if (!lifecycle || lifecycle.status !== "active" || lifecycle.leaseId !== leaseId) return null;
+      if (!lifecycle || lifecycle.status !== "active" || !lifecycle.leaseIds.has(leaseId)) return null;
       return { ...lifecycle, leaseId };
     },
     async releaseWriteLease(binding, leaseId) {
       const lifecycle = lifecycles.get(lifecycleKey(binding));
-      if (lifecycle && lifecycle.leaseId === leaseId) lifecycle.activeLeases = Math.max(0, lifecycle.activeLeases - 1);
+      if (lifecycle) {
+        lifecycle.leaseIds.delete(leaseId);
+        lifecycle.activeLeases = lifecycle.leaseIds.size;
+      }
     },
     async beginPurge(binding) {
       const key = lifecycleKey(binding);
@@ -220,6 +309,67 @@ test("repository includes pending tombstones in the bounded sweep regardless of 
   await repo.findExpired({ now: new Date("2026-07-30T00:00:00.000Z"), limit: 5 });
   const tombstoneClause = filter.$or.find((item) => item.tombstoneOnly === true);
   assert.deepEqual(tombstoneClause, { tombstoneOnly: true, status: "deletion_pending" });
+});
+
+test("repository publication clears write-intent lease metadata", async () => {
+  let update;
+  const repo = createMongooseArtifactRepository({
+    findOneAndUpdate(_filter, value) {
+      update = value;
+      return Promise.resolve({ toObject: () => ({ status: "available" }) });
+    },
+  });
+
+  await repo.publishWriteIntent("object-1", {
+    kind: "state",
+    sha256: "a".repeat(64),
+    previousRevision: 0,
+    previousSha256: null,
+  });
+
+  assert.deepEqual(update.$unset, {
+    writeIntentExpiresAt: 1,
+    writeLeaseId: 1,
+    cleanupClaimId: 1,
+    cleanupClaimExpiresAt: 1,
+  });
+});
+
+test("repository claims only the exact expired write intent before cleanup", async () => {
+  let captured;
+  const repo = createMongooseArtifactRepository({
+    findOneAndUpdate(filter, update, options) {
+      captured = { filter, update, options };
+      return Promise.resolve(null);
+    },
+  });
+  const staleAt = new Date("2026-08-01T00:00:00.000Z");
+  const pendingUntil = new Date("2026-08-02T00:00:00.000Z");
+
+  await repo.claimStaleWriteIntent("object-1", staleAt, {
+    writeLeaseId: "lease-1",
+    cleanupClaimId: "cleanup-1",
+    cleanupClaimExpiresAt: pendingUntil,
+  });
+
+  assert.deepEqual(captured, {
+    filter: {
+      gridFsObjectId: "object-1",
+      tombstoneOnly: false,
+      status: "write_intent",
+      writeIntentExpiresAt: { $lte: staleAt },
+      writeLeaseId: "lease-1",
+    },
+    update: {
+      $set: {
+        status: "write_cleanup",
+        cleanupClaimId: "cleanup-1",
+        cleanupClaimExpiresAt: pendingUntil,
+      },
+      $unset: { purgeAt: 1 },
+    },
+    options: { new: true },
+  });
 });
 
 test("artifact index setup removes the legacy TTL before creating the durable pending-tombstone index", async () => {
@@ -812,7 +962,8 @@ test("internal artifact consumers stream downloads and bound state accumulation"
   const source = await readFile(path.join(__dirname, "..", "routes", "internalConverterSessions.js"), "utf8");
   assert.match(source, /pipeline\(found\.content, res\)/);
   assert.match(source, /for await \(const chunk of stream\)/);
-  assert.match(source, /size > MAX_STATE_BYTES/);
+  assert.match(source, /size > maxBytes/);
+  assert.match(source, /configuredMaxBytes\(\)/);
   assert.doesNotMatch(source, /res\.send\(found\.content\)|found\.content\.toString/);
 });
 
@@ -829,12 +980,338 @@ const binding = {
   contentType: "application/octet-stream",
 };
 
+function stateWrite(content, { revision = 1, expectedRevision = 0, expectedSha256 = "" } = {}) {
+  const bytes = Buffer.from(content);
+  return {
+    ...binding,
+    kind: "state",
+    revision,
+    content: bytes,
+    contentType: "application/json",
+    sha256: crypto.createHash("sha256").update(bytes).digest("hex"),
+    expectedPriorRevision: expectedRevision,
+    expectedPriorSha256: expectedSha256,
+  };
+}
+
+test("state publication CAS accepts exact replay and rejects a different payload", async () => {
+  const repo = repository();
+  const backend = storage();
+  const service = createConversionArtifactService({ repository: repo, storageAdapter: backend });
+  const firstInput = stateWrite('{"revision":1}');
+  const first = await service.putArtifact(firstInput);
+
+  const replay = await service.putArtifact(firstInput);
+  assert.equal(replay.gridFsObjectId, first.gridFsObjectId);
+  assert.equal(repo.documents.length, 1);
+
+  await assert.rejects(
+    service.putArtifact(stateWrite('{"revision":1,"tampered":true}')),
+    (error) => error.statusCode === 409 && error.code === "ARTIFACT_STATE_CONFLICT",
+  );
+  assert.equal(repo.documents.length, 1);
+});
+
+test("state publication CAS serializes concurrent candidates against the same prior state", async () => {
+  const repo = repository();
+  const backend = storage();
+  const firstService = createConversionArtifactService({ repository: repo, storageAdapter: backend });
+  const secondService = createConversionArtifactService({ repository: repo, storageAdapter: backend });
+  const initial = await firstService.putArtifact(stateWrite('{"revision":1}'));
+  const candidates = [
+    stateWrite('{"revision":2,"writer":"a"}', {
+      revision: 2,
+      expectedRevision: 1,
+      expectedSha256: initial.sha256,
+    }),
+    stateWrite('{"revision":2,"writer":"b"}', {
+      revision: 2,
+      expectedRevision: 1,
+      expectedSha256: initial.sha256,
+    }),
+  ];
+
+  const results = await Promise.allSettled([
+    firstService.putArtifact(candidates[0]),
+    secondService.putArtifact(candidates[1]),
+  ]);
+  assert.equal(results.filter((result) => result.status === "fulfilled").length, 1);
+  const rejected = results.find((result) => result.status === "rejected");
+  assert.equal(rejected.reason.statusCode, 409);
+  assert.equal(rejected.reason.code, "ARTIFACT_STATE_CONFLICT");
+  assert.equal(repo.documents.filter((item) => item.kind === "state" && item.status === "available").length, 2);
+});
+
+test("state publication retires only the exact stale write intent before retrying its revision", async () => {
+  const repo = repository();
+  const backend = storage();
+  const service = createConversionArtifactService({ repository: repo, storageAdapter: backend });
+  const first = await service.putArtifact(stateWrite('{"revision":1}'));
+  const candidate = stateWrite('{"revision":2}', {
+    revision: 2,
+    expectedRevision: 1,
+    expectedSha256: first.sha256,
+  });
+  const staleObjectId = "stale-state-object";
+  repo.documents.push({
+    ...candidate,
+    gridFsObjectId: staleObjectId,
+    previousRevision: 1,
+    previousSha256: first.sha256,
+    sizeBytes: 0,
+    mime: "application/json",
+    status: "write_intent",
+    writeIntentExpiresAt: new Date(Date.now() - 1_000),
+  });
+  backend.objects.set(staleObjectId, Buffer.from("partial"));
+  const originalDelete = backend.deleteArtifact;
+  backend.deleteArtifact = async ({ objectId }) => {
+    if (objectId === staleObjectId) {
+      assert.equal(
+        repo.documents.find((item) => item.gridFsObjectId === staleObjectId)?.status,
+        "write_cleanup",
+      );
+    }
+    return originalDelete.call(backend, { objectId });
+  };
+
+  const retried = await service.putArtifact(candidate);
+
+  assert.equal(retried.status, "available");
+  assert.equal(retried.revision, 2);
+  assert.equal(retried.sha256, candidate.sha256);
+  assert.equal(backend.objects.has(staleObjectId), false);
+  assert.equal(repo.documents.some((item) => item.gridFsObjectId === staleObjectId), false);
+  assert.equal(repo.documents.filter((item) => item.kind === "state" && item.revision === 2).length, 1);
+});
+
+test("state publication does not delete stale bytes unless exact cleanup claim wins", async () => {
+  const repo = repository();
+  const backend = storage();
+  const service = createConversionArtifactService({ repository: repo, storageAdapter: backend });
+  const first = await service.putArtifact(stateWrite('{"revision":1}'));
+  const candidate = stateWrite('{"revision":2}', {
+    revision: 2,
+    expectedRevision: 1,
+    expectedSha256: first.sha256,
+  });
+  const staleObjectId = "stale-claim-lost-object";
+  repo.documents.push({
+    ...candidate,
+    gridFsObjectId: staleObjectId,
+    previousRevision: 1,
+    previousSha256: first.sha256,
+    sizeBytes: 0,
+    mime: "application/json",
+    status: "write_intent",
+    writeIntentExpiresAt: new Date(Date.now() - 1_000),
+  });
+  backend.objects.set(staleObjectId, Buffer.from("partial"));
+  repo.claimStaleWriteIntent = async () => null;
+
+  await assert.rejects(
+    service.putArtifact(candidate),
+    (error) => error.statusCode === 409 && error.code === "ARTIFACT_STATE_CONFLICT",
+  );
+  assert.equal(backend.objects.has(staleObjectId), true);
+});
+
+test("failed stale-intent cleanup remains retryable and releases revision only after bytes are absent", async () => {
+  const repo = repository();
+  const backend = storage();
+  const service = createConversionArtifactService({ repository: repo, storageAdapter: backend });
+  const first = await service.putArtifact(stateWrite('{"revision":1}'));
+  const candidate = stateWrite('{"revision":2}', {
+    revision: 2,
+    expectedRevision: 1,
+    expectedSha256: first.sha256,
+  });
+  const staleObjectId = "retryable-stale-state-object";
+  repo.documents.push({
+    ...candidate,
+    gridFsObjectId: staleObjectId,
+    previousRevision: 1,
+    previousSha256: first.sha256,
+    sizeBytes: 0,
+    mime: "application/json",
+    status: "write_intent",
+    writeIntentExpiresAt: new Date(Date.now() - 1_000),
+  });
+  backend.objects.set(staleObjectId, Buffer.from("partial"));
+  backend.failDeletes = true;
+
+  await assert.rejects(
+    service.putArtifact(candidate),
+    (error) => error.statusCode === 503 && error.code === "ARTIFACT_CLEANUP_PENDING",
+  );
+  assert.equal(repo.documents.find((item) => item.gridFsObjectId === staleObjectId)?.status, "deletion_pending");
+  assert.equal(backend.objects.has(staleObjectId), true);
+  assert.equal(repo.documents.filter((item) => item.kind === "state" && item.revision === 2).length, 1);
+
+  backend.failDeletes = false;
+  const retried = await service.putArtifact(candidate);
+
+  assert.equal(retried.status, "available");
+  assert.equal(retried.revision, 2);
+  assert.equal(backend.objects.has(staleObjectId), false);
+  assert.equal(repo.documents.some((item) => item.gridFsObjectId === staleObjectId), false);
+  assert.equal(repo.documents.filter((item) => item.kind === "state" && item.revision === 2).length, 1);
+});
+
+test("sweeper repairs retryable deletion_pending intent and releases its unique revision", async () => {
+  const repo = repository();
+  const backend = storage();
+  const service = createConversionArtifactService({ repository: repo, storageAdapter: backend });
+  const first = await service.putArtifact(stateWrite('{"revision":1}'));
+  const candidate = stateWrite('{"revision":2}', {
+    revision: 2,
+    expectedRevision: 1,
+    expectedSha256: first.sha256,
+  });
+  const staleObjectId = "sweep-retryable-stale-state-object";
+  repo.documents.push({
+    ...candidate,
+    gridFsObjectId: staleObjectId,
+    previousRevision: 1,
+    previousSha256: first.sha256,
+    sizeBytes: 0,
+    mime: "application/json",
+    status: "write_intent",
+    writeIntentExpiresAt: new Date(Date.now() - 1_000),
+  });
+  backend.objects.set(staleObjectId, Buffer.from("partial"));
+  backend.failDeletes = true;
+  await assert.rejects(service.putArtifact(candidate), (error) => error.code === "ARTIFACT_CLEANUP_PENDING");
+
+  backend.failDeletes = false;
+  const swept = await service.sweepExpiredArtifacts({ limit: 1 });
+
+  assert.equal(swept.deleted, 1);
+  assert.equal(backend.objects.has(staleObjectId), false);
+  assert.equal(repo.documents.some((item) => item.gridFsObjectId === staleObjectId), false);
+  assert.equal((await service.putArtifact(candidate)).status, "available");
+});
+
+test("state publication never retires an unexpired intent during a concurrent retry", async () => {
+  const repo = repository();
+  const backend = storage();
+  const service = createConversionArtifactService({ repository: repo, storageAdapter: backend });
+  const first = await service.putArtifact(stateWrite('{"revision":1}'));
+  const candidate = stateWrite('{"revision":2}', {
+    revision: 2,
+    expectedRevision: 1,
+    expectedSha256: first.sha256,
+  });
+  const activeObjectId = "active-state-object";
+  repo.documents.push({
+    ...candidate,
+    gridFsObjectId: activeObjectId,
+    previousRevision: 1,
+    previousSha256: first.sha256,
+    sizeBytes: 0,
+    mime: "application/json",
+    status: "write_intent",
+    writeIntentExpiresAt: new Date(Date.now() + 60_000),
+  });
+  backend.objects.set(activeObjectId, Buffer.from("in-flight"));
+
+  await assert.rejects(
+    service.putArtifact(candidate),
+    (error) => error.statusCode === 409 && error.code === "ARTIFACT_STATE_CONFLICT",
+  );
+  assert.equal(backend.objects.has(activeObjectId), true);
+  assert.equal(repo.documents.some((item) => item.gridFsObjectId === activeObjectId), true);
+});
+
+test("state publication never retires an expired intent owned by an active writer lease", async () => {
+  const repo = repository();
+  const backend = storage();
+  const service = createConversionArtifactService({ repository: repo, storageAdapter: backend });
+  const first = await service.putArtifact(stateWrite('{"revision":1}'));
+  const candidate = stateWrite('{"revision":2}', {
+    revision: 2,
+    expectedRevision: 1,
+    expectedSha256: first.sha256,
+  });
+  const writerLease = await repo.acquireWriteLease(candidate, { retainUntil: candidate.expiresAt });
+  const activeObjectId = "expired-active-state-object";
+  repo.documents.push({
+    ...candidate,
+    gridFsObjectId: activeObjectId,
+    previousRevision: 1,
+    previousSha256: first.sha256,
+    sizeBytes: 0,
+    mime: "application/json",
+    status: "write_intent",
+    writeIntentExpiresAt: new Date(Date.now() - 1_000),
+    writeLeaseId: writerLease.leaseId,
+  });
+  backend.objects.set(activeObjectId, Buffer.from("in-flight"));
+
+  await assert.rejects(
+    service.putArtifact(candidate),
+    (error) => error.statusCode === 409 && error.code === "ARTIFACT_STATE_CONFLICT",
+  );
+  assert.equal(backend.objects.has(activeObjectId), true);
+  assert.equal(repo.documents.some((item) => item.gridFsObjectId === activeObjectId), true);
+});
+
+test("artifact max-size contract round-trips above 2 MiB and rejects above the configured limit", async () => {
+  const repo = repository();
+  const backend = storage();
+  const maxBytes = 3 * 1024 * 1024;
+  const service = createConversionArtifactService({ repository: repo, storageAdapter: backend, maxBytes });
+  const withinLimit = Buffer.alloc(2 * 1024 * 1024 + 17, 0x61);
+
+  await service.putArtifact({ ...binding, content: withinLimit });
+  assert.deepEqual(await collect((await service.getArtifact(binding)).content), withinLimit);
+
+  await assert.rejects(
+    service.putArtifact({ ...binding, revision: 2, content: Buffer.alloc(maxBytes + 1) }),
+    (error) => error.statusCode === 413 && error.code === "ARTIFACT_TOO_LARGE",
+  );
+  assert.equal(repo.documents.filter((item) => item.revision === 2).length, 0);
+});
+
+test("latest artifact reads skip a newer unpublished write intent", async () => {
+  const repo = repository();
+  const backend = storage();
+  const service = createConversionArtifactService({ repository: repo, storageAdapter: backend });
+  const published = await service.putArtifact({ ...binding, content: Buffer.from("published") });
+  repo.documents.push({
+    ...published,
+    gridFsObjectId: "pending-object",
+    revision: published.revision + 1,
+    status: "write_intent",
+  });
+
+  const found = await service.getArtifact({ ...binding, revision: null });
+
+  assert.equal(found.metadata.revision, published.revision);
+  assert.equal((await collect(found.content)).toString("utf8"), "published");
+});
+
+test("invalid artifact max-byte values use the same bounded default contract", () => {
+  const fallback = 64 * 1024 * 1024;
+  for (const value of ["", "0", "-1", "1.5", "1e6", "0x100000", "+1000", " 1000 ", "1_000", "9007199254740992", "invalid"]) {
+    assert.equal(configuredMaxBytes({ CONVERTER_ARTIFACT_MAX_BYTES: value }), fallback);
+  }
+  assert.equal(
+    configuredMaxBytes({ CONVERTER_ARTIFACT_MAX_BYTES: String(1024 * 1024 * 1024) }),
+    512 * 1024 * 1024,
+  );
+});
+
 test("all-artifact purge removes every revision, kind, metadata row, and byte", async () => {
   const repo = repository();
   const backend = storage();
   const service = createConversionArtifactService({ repository: repo, storageAdapter: backend });
-  await service.putArtifact({ ...binding, kind: "state", content: Buffer.from("state-1") });
-  await service.putArtifact({ ...binding, kind: "state", revision: 2, content: Buffer.from("state-2") });
+  const state1 = await service.putArtifact(stateWrite("state-1"));
+  await service.putArtifact(stateWrite("state-2", {
+    revision: 2,
+    expectedRevision: 1,
+    expectedSha256: state1.sha256,
+  }));
   await service.putArtifact({ ...binding, kind: "output", content: Buffer.from("output-1") });
   await service.putArtifact({ ...binding, kind: "upload", content: Buffer.from("upload-1") });
 
@@ -855,7 +1332,7 @@ test("all-artifact purge fails closed when byte deletion is pending", async () =
   const repo = repository();
   const backend = storage();
   const service = createConversionArtifactService({ repository: repo, storageAdapter: backend });
-  await service.putArtifact({ ...binding, kind: "state", content: Buffer.from("state") });
+  await service.putArtifact(stateWrite("state"));
   backend.failDeletes = true;
 
   await assert.rejects(
@@ -870,12 +1347,16 @@ test("durable operation purge fence rejects writes after purge across service re
   const repo = repository();
   const backend = storage();
   const service = createConversionArtifactService({ repository: repo, lifecycleRepository: repo, storageAdapter: backend });
-  await service.putArtifact({ ...binding, kind: "state", content: Buffer.from("state") });
+  const initial = await service.putArtifact(stateWrite("state"));
   await service.purgeSessionArtifacts(binding);
 
   const restarted = createConversionArtifactService({ repository: repo, lifecycleRepository: repo, storageAdapter: backend });
   await assert.rejects(
-    restarted.putArtifact({ ...binding, revision: 2, content: Buffer.from("resurrect") }),
+    restarted.putArtifact(stateWrite("resurrect", {
+      revision: 2,
+      expectedRevision: 1,
+      expectedSha256: initial.sha256,
+    })),
     (error) => error.code === "ARTIFACT_OPERATION_PURGED" && error.statusCode === 410,
   );
   assert.equal(repo.documents.length, 0);
@@ -904,7 +1385,7 @@ test("operation purge drains an in-flight write lease before proving zero artifa
     purgeLeasePollMs: 1,
   });
 
-  const write = service.putArtifact({ ...binding, kind: "state", content: Buffer.from("state") });
+  const write = service.putArtifact(stateWrite("state"));
   await writeStarted;
   let purgeFinished = false;
   const purge = service.purgeSessionArtifacts(binding).finally(() => { purgeFinished = true; });
@@ -1150,10 +1631,8 @@ test("artifact sweeper waits for the maximum retention horizon across operation 
     now: () => current,
   });
   await service.putArtifact({
-    ...binding,
-    kind: "state",
+    ...stateWrite("early"),
     expiresAt: new Date("2026-07-31T00:01:00.000Z"),
-    content: Buffer.from("early"),
   });
   await service.putArtifact({
     ...binding,

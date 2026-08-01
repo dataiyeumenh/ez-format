@@ -14,7 +14,10 @@ function artifactError(statusCode, message, code) {
 }
 
 function configuredMaxBytes(env = process.env) {
-  const value = Number(env.CONVERTER_ARTIFACT_MAX_BYTES || DEFAULT_MAX_BYTES);
+  const raw = env.CONVERTER_ARTIFACT_MAX_BYTES;
+  if (raw == null || raw === "") return DEFAULT_MAX_BYTES;
+  if (typeof raw !== "string" || !/^[0-9]+$/.test(raw)) return DEFAULT_MAX_BYTES;
+  const value = Number(raw);
   return Number.isSafeInteger(value) && value > 0
     ? Math.min(value, 512 * 1024 * 1024)
     : DEFAULT_MAX_BYTES;

@@ -8,6 +8,39 @@ FastAPI service for Excel → MISA import conversion.
 python -m pip install -r requirements.txt
 ```
 
+## Distributed operation state
+
+Production uses `OPERATION_STORE_PROVIDER=node`; MongoDB/GridFS is the only
+durable source of operation state and workbook artifacts. Keep
+`OPERATION_STORE_PROTOCOL=auto` during mixed-version rolling deploys: the
+converter probes `raw-v2`, then falls back to `legacy-json-v1` only when the old
+Node route returns `404` or `405`. Pin `raw-v2` only after every Node replica
+supports it.
+
+Legacy JSON carries one state representation per request. New Node advertises
+canonical base64 and verifies its exact SHA-256; old Node fallback carries only
+the canonical state object. The converter serializes the complete JSON body
+before sending and rejects bodies above the old Node 50 MiB parser limit with
+`OPERATION_PROTOCOL_SIZE_MISMATCH`. Deploy raw-v2 before retrying oversized
+legacy operations. New Node bounds its authenticated JSON parser to one base64
+payload plus fixed metadata allowance.
+
+Set `CONVERTER_ARTIFACT_MAX_BYTES=67108864` identically on Node and the
+converter. Only unsigned safe decimal integers are accepted; scientific notation,
+hexadecimal, signs, whitespace, separators, zero, and invalid values use the
+64 MiB default. Valid safe integers above 512 MiB are capped. Artifacts above the effective
+bound are rejected before publication. Raw files materialized by FastAPI are
+request-scoped and purged when the operation returns; do not configure local or
+S3 production fallback.
+
+Production Student deployments also require an explicit legacy-state gate.
+Use `STUDENT_METADATA_V1_ROLLOUT_MODE=drain` with
+`STUDENT_METADATA_V1_QUIESCE_ACKNOWLEDGED=true` while new analyses are blocked
+and recoverable metadata-only sessions are CAS-migrated into Node. Set the mode
+to `complete` only after the release drain inventory proves no metadata-only
+`student_metadata_v1` session remains. Startup fails closed when this gate is
+missing or unacknowledged.
+
 Templates live in `fixtures/templates/`. Their reviewed SHA-256 and exact workbook
 schema live in the tracked, versioned `config/misa-template-manifest.json`.
 Test samples live in `fixtures/samples/`. They are deterministic synthetic files

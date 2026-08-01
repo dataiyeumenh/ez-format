@@ -92,6 +92,8 @@ from app.operation_store import (
     OperationStoreError,
     OperationStoreExpiredError,
     assert_operation_store_configured,
+    assert_student_metadata_v1_new_sessions_allowed,
+    assert_student_metadata_v1_rollout_configured,
     cleanup_expired_operation_sessions,
     operation_context_required,
     unauthenticated_local_operations_enabled,
@@ -203,6 +205,7 @@ async def attach_request_id(request: Request, call_next):
 def _assert_converter_security_config() -> None:
     assert_secure_production_config()
     assert_operation_store_configured()
+    assert_student_metadata_v1_rollout_configured()
     assert_student_anonymization_config()
 
 
@@ -550,6 +553,10 @@ async def analyze_student_session(
 ) -> JSONResponse:
     try:
         rate_claims = _verified_student_rate_claims(context_token, "analyze")
+        try:
+            assert_student_metadata_v1_new_sessions_allowed()
+        except OperationStoreError as exc:
+            raise StudentWorkflowError(503, str(exc)) from exc
         _check_student_rate_limit(
             _student_rate_key("analyze", rate_claims),
             limit=_positive_env_int("STUDENT_ANALYZE_LIMIT_PER_15_MINUTES", 5),
@@ -603,6 +610,7 @@ async def purge_student_session_state(
 @app.get("/api/v1/student/sessions/{session_id}/overview")
 async def student_session_overview(
     session_id: str,
+    x_conversion_context: Annotated[str | None, Header()] = None,
     x_student_context: Annotated[str | None, Header()] = None,
 ) -> JSONResponse:
     try:
@@ -610,6 +618,7 @@ async def student_session_overview(
             get_student_overview,
             session_id=session_id,
             context_token=x_student_context or "",
+            operation_context_token=x_conversion_context,
         )
         return JSONResponse(jsonable_encoder(payload))
     except StudentWorkflowError as exc:
@@ -619,6 +628,7 @@ async def student_session_overview(
 @app.get("/api/v1/student/sessions/{session_id}/accounting-map")
 async def student_session_accounting_map(
     session_id: str,
+    x_conversion_context: Annotated[str | None, Header()] = None,
     x_student_context: Annotated[str | None, Header()] = None,
 ) -> JSONResponse:
     try:
@@ -626,6 +636,7 @@ async def student_session_accounting_map(
             get_student_accounting_map,
             session_id=session_id,
             context_token=x_student_context or "",
+            operation_context_token=x_conversion_context,
         )
         return JSONResponse(jsonable_encoder(payload))
     except StudentWorkflowError as exc:
@@ -635,6 +646,7 @@ async def student_session_accounting_map(
 @app.get("/api/v1/student/sessions/{session_id}/reconciliation")
 async def student_session_reconciliation(
     session_id: str,
+    x_conversion_context: Annotated[str | None, Header()] = None,
     x_student_context: Annotated[str | None, Header()] = None,
 ) -> JSONResponse:
     try:
@@ -642,6 +654,7 @@ async def student_session_reconciliation(
             get_student_reconciliation,
             session_id=session_id,
             context_token=x_student_context or "",
+            operation_context_token=x_conversion_context,
         )
         return JSONResponse(jsonable_encoder(payload))
     except StudentWorkflowError as exc:
@@ -652,6 +665,7 @@ async def student_session_reconciliation(
 async def student_session_anonymization_preview(
     session_id: str,
     request: StudentAnonymizationRequest,
+    x_conversion_context: Annotated[str | None, Header()] = None,
     x_student_context: Annotated[str | None, Header()] = None,
 ) -> JSONResponse:
     try:
@@ -669,6 +683,7 @@ async def student_session_anonymization_preview(
             preview_student_anonymization,
             session_id=session_id,
             context_token=x_student_context or "",
+            operation_context_token=x_conversion_context,
             full_document_numbers=request.full_document_numbers,
         )
         return JSONResponse(jsonable_encoder(payload))
@@ -680,6 +695,7 @@ async def student_session_anonymization_preview(
 async def student_session_anonymization_export(
     session_id: str,
     request: StudentAnonymizationRequest,
+    x_conversion_context: Annotated[str | None, Header()] = None,
     x_student_context: Annotated[str | None, Header()] = None,
 ) -> Response:
     try:
@@ -694,6 +710,7 @@ async def student_session_anonymization_export(
             export_student_anonymized_workbook,
             session_id=session_id,
             context_token=x_student_context or "",
+            operation_context_token=x_conversion_context,
             full_document_numbers=request.full_document_numbers,
         )
         media_type = (
@@ -717,6 +734,7 @@ async def student_session_anonymization_export(
 async def student_session_internship_report(
     session_id: str,
     request: StudentInternshipReportRequest,
+    x_conversion_context: Annotated[str | None, Header()] = None,
     x_student_context: Annotated[str | None, Header()] = None,
 ) -> Response:
     try:
@@ -731,6 +749,7 @@ async def student_session_internship_report(
             build_student_internship_report,
             session_id=session_id,
             context_token=x_student_context or "",
+            operation_context_token=x_conversion_context,
             activity_ids=request.activity_ids,
             approved_notes=request.approved_notes,
         )
@@ -749,6 +768,7 @@ async def student_session_internship_report(
 async def student_session_question(
     session_id: str,
     request: StudentQuestionRequest,
+    x_conversion_context: Annotated[str | None, Header()] = None,
     x_student_context: Annotated[str | None, Header()] = None,
 ) -> JSONResponse:
     try:
@@ -763,6 +783,7 @@ async def student_session_question(
             ask_student_question,
             session_id=session_id,
             context_token=x_student_context or "",
+            operation_context_token=x_conversion_context,
             question=request.question,
         )
         return JSONResponse(jsonable_encoder(payload))
@@ -774,6 +795,7 @@ async def student_session_question(
 async def student_session_source_row(
     session_id: str,
     worksheet_row: int,
+    x_conversion_context: Annotated[str | None, Header()] = None,
     x_student_context: Annotated[str | None, Header()] = None,
 ) -> JSONResponse:
     try:
@@ -782,6 +804,7 @@ async def student_session_source_row(
             session_id=session_id,
             worksheet_row=worksheet_row,
             context_token=x_student_context or "",
+            operation_context_token=x_conversion_context,
         )
         return JSONResponse(jsonable_encoder(payload))
     except StudentWorkflowError as exc:

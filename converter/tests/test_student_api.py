@@ -9,6 +9,7 @@ from concurrent.futures import ThreadPoolExecutor
 from io import BytesIO
 from pathlib import Path
 from threading import Event, Lock
+from types import SimpleNamespace
 
 import openpyxl
 import pytest
@@ -250,6 +251,7 @@ def student_api(tmp_path, monkeypatch):
     monkeypatch.setenv("STUDENT_INTERNSHIP_ENABLED", "false")
     monkeypatch.setenv("CONVERSION_CONTEXT_SECRET", "student-secret")
     monkeypatch.setenv("CONVERTER_SERVICE_TOKEN", TEST_SERVICE_TOKEN)
+    monkeypatch.setenv("OPERATION_SESSION_DIR", str(tmp_path / "operation-sessions"))
     monkeypatch.setenv("STUDENT_ANONYMIZATION_SECRET", "student-anonymization-secret")
     monkeypatch.setenv("MAPPING_DB_PATH", str(tmp_path / "profiles.sqlite"))
     monkeypatch.setenv("AI_PROVIDER", "disabled")
@@ -319,10 +321,39 @@ def test_converter_startup_validates_student_anonymization_config(monkeypatch):
         lambda: checks.append("student"),
         raising=False,
     )
+    monkeypatch.setattr(
+        main_module,
+        "assert_operation_store_configured",
+        lambda: checks.append("operation-store"),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "assert_student_metadata_v1_rollout_configured",
+        lambda: checks.append("legacy-drain"),
+    )
 
     main_module._assert_converter_security_config()
 
-    assert checks == ["gateway", "student"]
+    assert checks == ["gateway", "operation-store", "legacy-drain", "student"]
+
+
+def test_student_legacy_drain_rejects_new_analysis_before_reading_upload(
+    student_api,
+    monkeypatch,
+):
+    client, _ = student_api
+    monkeypatch.setenv("OPERATION_STORE_PROVIDER", "node")
+    monkeypatch.setenv("STUDENT_METADATA_V1_ROLLOUT_MODE", "drain")
+
+    async def unexpected_read(_file):
+        raise AssertionError("drain gate must run before upload bytes are read")
+
+    monkeypatch.setattr(main_module, "_read_limited_student_upload", unexpected_read)
+
+    response = _analyze(client, _student_token())
+
+    assert response.status_code == 503
+    assert "new Student analyses are disabled" in response.json()["detail"]
 
 
 def test_student_analyze_requires_valid_signed_context(student_api):
@@ -334,13 +365,14 @@ def test_student_analyze_requires_valid_signed_context(student_api):
     assert "context" in invalid.json()["detail"].lower()
 
 
-def test_student_analyze_uses_node_binding_with_metadata_only_remote_state(
+def test_student_analyze_persists_full_node_state_and_bound_raw_artifact(
     student_api,
     monkeypatch,
     tmp_path,
 ):
     client, _ = student_api
     captured_puts = []
+    captured_artifacts = []
     session_id = "507f1f77bcf86cd799439011"
     upload_id = "00000000-0000-4000-8000-000000000011"
 
@@ -351,10 +383,46 @@ def test_student_analyze_uses_node_binding_with_metadata_only_remote_state(
 
         def put_state(self, **payload):
             captured_puts.append(payload)
-            return {"session": {"revision": payload["revision"]}}
+            encoded = json.dumps(
+                payload["state"],
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+            return {
+                "state": json.loads(encoded),
+                "session": {
+                    "revision": payload["revision"],
+                    "sha256": hashlib.sha256(encoded).hexdigest(),
+                },
+            }
 
-        def put_artifact(self, **_payload):
-            raise AssertionError("Student analysis must not persist raw upload artifacts remotely")
+        def get_state(self, **_payload):
+            payload = captured_puts[-1]
+            encoded = json.dumps(
+                payload["state"],
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+            return {
+                "state": json.loads(encoded),
+                "session": {
+                    "revision": payload["revision"],
+                    "sha256": hashlib.sha256(encoded).hexdigest(),
+                },
+            }
+
+        def put_artifact(self, **payload):
+            captured_artifacts.append(payload)
+            return {
+                "artifact": {
+                    "sha256": hashlib.sha256(payload["content"]).hexdigest()
+                }
+            }
+
+        def get_artifact(self, **_payload):
+            return captured_artifacts[-1]["content"]
 
     remote = CapturingRemoteStore()
     monkeypatch.setenv("OPERATION_STORE_PROVIDER", "node")
@@ -364,6 +432,7 @@ def test_student_analyze_uses_node_binding_with_metadata_only_remote_state(
         lambda _token: remote,
     )
     student_token = _student_token()
+    source_bytes = _workbook_bytes()
 
     response = client.post(
         "/api/v1/student/sessions/analyze",
@@ -378,7 +447,7 @@ def test_student_analyze_uses_node_binding_with_metadata_only_remote_state(
         files={
             "file": (
                 "sales.xlsx",
-                _workbook_bytes(),
+                source_bytes,
                 "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             )
         },
@@ -388,22 +457,291 @@ def test_student_analyze_uses_node_binding_with_metadata_only_remote_state(
     assert len(captured_puts) == 1
     state = captured_puts[0]["state"]
     assert state["contract"] == "student_metadata_v1"
-    assert "audit_events" not in state["session"]
+    assert state["table"]["headers"]
+    assert state["table"]["rows"]
+    assert state["session"]["audit_events"] == []
     retention_expires_at = verify_student_context(student_token, "analyze").retention_expires_at
     assert time.time() + 23 * 60 * 60 < captured_puts[0]["expires_at"].timestamp()
     assert captured_puts[0]["expires_at"].timestamp() <= retention_expires_at
-    serialized = json.dumps(state, ensure_ascii=False)
-    for forbidden in (
-        "headers",
-        "rows",
-        "values",
-        "Mã hóa đơn",
-        "Tên khách hàng",
-        "HD001",
-        "Khách A",
-        "SP001",
-    ):
-        assert forbidden not in serialized
+    assert len(captured_artifacts) == 1
+    assert captured_artifacts[0]["kind"] == "upload"
+    assert captured_artifacts[0]["session_id"] == session_id
+    assert captured_artifacts[0]["run_id"] == f"student:{session_id}"
+    assert captured_artifacts[0]["content"] == source_bytes
+    assert not (tmp_path / "uploads" / upload_id).exists()
+
+
+def test_student_overview_resumes_from_node_without_replica_local_metadata(
+    student_api,
+    monkeypatch,
+    tmp_path,
+):
+    client, _ = student_api
+    session_id = "507f1f77bcf86cd799439011"
+    upload_id = "00000000-0000-4000-8000-000000000012"
+    persisted = {}
+    artifacts = {}
+
+    class RemoteStore:
+        @staticmethod
+        def put_state(**payload):
+            encoded = json.dumps(
+                payload["state"],
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+            persisted.update(
+                state=json.loads(encoded),
+                revision=payload["revision"],
+                sha256=hashlib.sha256(encoded).hexdigest(),
+            )
+            return RemoteStore.get_state()
+
+        @staticmethod
+        def get_state(**_payload):
+            return {
+                "state": persisted["state"],
+                "session": {
+                    "revision": persisted["revision"],
+                    "sha256": persisted["sha256"],
+                },
+            }
+
+        @staticmethod
+        def put_artifact(**payload):
+            artifacts[payload["kind"]] = payload["content"]
+            return {
+                "artifact": {
+                    "sha256": hashlib.sha256(payload["content"]).hexdigest()
+                }
+            }
+
+        @staticmethod
+        def get_artifact(**payload):
+            return artifacts[payload["kind"]]
+
+    remote = RemoteStore()
+    remote.run_id = f"student:{session_id}"
+    remote.session_id = session_id
+    monkeypatch.setenv("OPERATION_STORE_PROVIDER", "node")
+    monkeypatch.setenv("OPERATION_SESSION_DIR", str(tmp_path / "operation-sessions"))
+    monkeypatch.setattr(
+        "app.operation_store.NodeOperationStoreClient",
+        lambda _token: remote,
+    )
+    student_token = _student_token()
+    analyzed = client.post(
+        "/api/v1/student/sessions/analyze",
+        headers={
+            "X-Student-Context": student_token,
+            "X-Conversion-Context": _student_operation_token(upload_id=upload_id),
+        },
+        data={"context_token": student_token, "target_template_id": "bsn_sales"},
+        files={
+            "file": (
+                "sales.xlsx",
+                _workbook_bytes(),
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+        },
+    )
+    assert analyzed.status_code == 200, analyzed.text
+    assert not (tmp_path / "uploads" / upload_id).exists()
+
+    resumed = client.get(
+        f"/api/v1/student/sessions/{session_id}/overview",
+        headers={
+            "X-Student-Context": student_token,
+            "X-Conversion-Context": _student_operation_token(
+                upload_id=upload_id,
+                scopes=["explain"],
+            ),
+        },
+    )
+
+    assert resumed.status_code == 200, resumed.text
+    assert resumed.json()["upload_id"] == upload_id
+    assert not (tmp_path / "uploads" / upload_id).exists()
+
+    asked = client.post(
+        f"/api/v1/student/sessions/{session_id}/questions",
+        headers={
+            "X-Student-Context": student_token,
+            "X-Conversion-Context": _student_operation_token(
+                upload_id=upload_id,
+                scopes=["ask"],
+            ),
+        },
+        json={"question": "Có bao nhiêu dòng dữ liệu?"},
+    )
+    assert asked.status_code == 200, asked.text
+    assert not (tmp_path / "uploads" / upload_id).exists()
+
+    source_row = client.get(
+        f"/api/v1/student/sessions/{session_id}/source-rows/2",
+        headers={
+            "X-Student-Context": student_token,
+            "X-Conversion-Context": _student_operation_token(
+                upload_id=upload_id,
+                scopes=["ask"],
+            ),
+        },
+    )
+    assert source_row.status_code == 200, source_row.text
+    assert source_row.json()["worksheet_row"] == 2
+    assert not (tmp_path / "uploads" / upload_id).exists()
+
+    monkeypatch.setenv("STUDENT_ACCOUNTING_MAP_ENABLED", "true")
+    accounting_map = client.get(
+        f"/api/v1/student/sessions/{session_id}/accounting-map",
+        headers={
+            "X-Student-Context": student_token,
+            "X-Conversion-Context": _student_operation_token(
+                upload_id=upload_id,
+                scopes=["accounting_map"],
+            ),
+        },
+    )
+    assert accounting_map.status_code == 200, accounting_map.text
+    assert not (tmp_path / "uploads" / upload_id).exists()
+
+    monkeypatch.setenv("STUDENT_RECONCILIATION_ENABLED", "true")
+    reconciliation = client.get(
+        f"/api/v1/student/sessions/{session_id}/reconciliation",
+        headers={
+            "X-Student-Context": student_token,
+            "X-Conversion-Context": _student_operation_token(
+                upload_id=upload_id,
+                scopes=["reconcile"],
+            ),
+        },
+    )
+    assert reconciliation.status_code == 200, reconciliation.text
+    assert not (tmp_path / "uploads" / upload_id).exists()
+
+    monkeypatch.setenv("STUDENT_INTERNSHIP_ENABLED", "true")
+    export_headers = {
+        "X-Student-Context": student_token,
+        "X-Conversion-Context": _student_operation_token(
+            upload_id=upload_id,
+            scopes=["export"],
+        ),
+    }
+    anonymization = client.post(
+        f"/api/v1/student/sessions/{session_id}/anonymization/preview",
+        headers=export_headers,
+        json={"full_document_numbers": False},
+    )
+    assert anonymization.status_code == 200, anonymization.text
+    assert not (tmp_path / "uploads" / upload_id).exists()
+
+    exported = client.post(
+        f"/api/v1/student/sessions/{session_id}/anonymization/export",
+        headers=export_headers,
+        json={"full_document_numbers": False},
+    )
+    assert exported.status_code == 200, exported.text
+    assert not (tmp_path / "uploads" / upload_id).exists()
+
+    monkeypatch.setattr(
+        student_workflow,
+        "get_verified_activities",
+        lambda _token, _session_id: {
+            "activities": [
+                {
+                    "id": "activity-1",
+                    "event_type": "reconciliation_completed",
+                    "skill": "VAT reconciliation",
+                    "summary": "Verified activity",
+                    "evidence_count": 1,
+                    "resolved_issues": [],
+                }
+            ]
+        },
+    )
+    report = client.post(
+        f"/api/v1/student/sessions/{session_id}/internship-report",
+        headers=export_headers,
+        json={"activity_ids": ["activity-1"], "approved_notes": []},
+    )
+    assert report.status_code == 200, report.text
+    assert not (tmp_path / "uploads" / upload_id).exists()
+
+
+@pytest.mark.parametrize(
+    ("method", "path", "handler_name", "body", "handler_result"),
+    [
+        ("get", "overview", "get_student_overview", None, {}),
+        ("get", "accounting-map", "get_student_accounting_map", None, {}),
+        ("get", "reconciliation", "get_student_reconciliation", None, {}),
+        (
+            "post",
+            "anonymization/preview",
+            "preview_student_anonymization",
+            {"full_document_numbers": False},
+            {},
+        ),
+        (
+            "post",
+            "anonymization/export",
+            "export_student_anonymized_workbook",
+            {"full_document_numbers": False},
+            SimpleNamespace(content=b"workbook", filename="student.xlsx"),
+        ),
+        (
+            "post",
+            "internship-report",
+            "build_student_internship_report",
+            {"activity_ids": ["activity-1"], "approved_notes": []},
+            "report",
+        ),
+        (
+            "post",
+            "questions",
+            "ask_student_question",
+            {"question": "Tóm tắt dữ liệu"},
+            {},
+        ),
+        (
+            "get",
+            "source-rows/2",
+            "get_student_source_row",
+            None,
+            {},
+        ),
+    ],
+)
+def test_student_operations_forward_signed_operation_context(
+    student_api,
+    monkeypatch,
+    method,
+    path,
+    handler_name,
+    body,
+    handler_result,
+):
+    client, _ = student_api
+    captured = []
+
+    def handler(**kwargs):
+        captured.append(kwargs)
+        return handler_result
+
+    monkeypatch.setattr(main_module, handler_name, handler)
+    headers = {
+        "X-Student-Context": _student_token(),
+        "X-Conversion-Context": "signed-operation-context",
+    }
+    request = getattr(client, method)
+    response = request(
+        f"/api/v1/student/sessions/507f1f77bcf86cd799439011/{path}",
+        headers=headers,
+        **({"json": body} if body is not None else {}),
+    )
+
+    assert response.status_code == 200, response.text
+    assert captured[0]["operation_context_token"] == "signed-operation-context"
 
 
 @pytest.mark.parametrize(
@@ -426,6 +764,7 @@ def test_production_student_analysis_fails_with_truthful_cleanup_status(
     upload_id = "00000000-0000-4000-8000-000000000021"
     deleted_remote = []
     remote_state = {}
+    remote_artifacts = []
 
     class RemoteStore:
         run_id = "student:507f1f77bcf86cd799439011"
@@ -434,14 +773,36 @@ def test_production_student_analysis_fails_with_truthful_cleanup_status(
         @staticmethod
         def put_state(**payload):
             remote_state.update(payload)
-            return {"session": {"revision": payload["revision"]}}
+            return RemoteStore.get_state()
 
         @staticmethod
         def get_state(**_payload):
+            encoded = json.dumps(
+                remote_state["state"],
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
             return {
-                "state": remote_state["state"],
-                "session": {"revision": remote_state["revision"]},
+                "state": json.loads(encoded),
+                "session": {
+                    "revision": remote_state["revision"],
+                    "sha256": hashlib.sha256(encoded).hexdigest(),
+                },
             }
+
+        @staticmethod
+        def put_artifact(**payload):
+            remote_artifacts.append(payload)
+            return {
+                "artifact": {
+                    "sha256": hashlib.sha256(payload["content"]).hexdigest()
+                }
+            }
+
+        @staticmethod
+        def get_artifact(**_payload):
+            return remote_artifacts[-1]["content"]
 
         @staticmethod
         def delete_session_artifacts(**payload):
@@ -535,6 +896,7 @@ def test_student_purge_contract_removes_raw_upload_and_operation_session(
     upload_id = "00000000-0000-4000-8000-000000000031"
     captured = {}
     remote_deletes = []
+    remote_artifacts = []
 
     class RemoteStore:
         def __init__(self):
@@ -544,14 +906,36 @@ def test_student_purge_contract_removes_raw_upload_and_operation_session(
         @staticmethod
         def put_state(**payload):
             captured.update(payload)
-            return {"session": {"revision": payload["revision"]}}
+            return RemoteStore.get_state()
 
         @staticmethod
         def get_state(**_payload):
+            encoded = json.dumps(
+                captured["state"],
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
             return {
-                "state": captured["state"],
-                "session": {"revision": captured["revision"]},
+                "state": json.loads(encoded),
+                "session": {
+                    "revision": captured["revision"],
+                    "sha256": hashlib.sha256(encoded).hexdigest(),
+                },
             }
+
+        @staticmethod
+        def put_artifact(**payload):
+            remote_artifacts.append(payload)
+            return {
+                "artifact": {
+                    "sha256": hashlib.sha256(payload["content"]).hexdigest()
+                }
+            }
+
+        @staticmethod
+        def get_artifact(**_payload):
+            return remote_artifacts[-1]["content"]
 
         @staticmethod
         def delete_session_artifacts(**payload):
@@ -592,8 +976,8 @@ def test_student_purge_contract_removes_raw_upload_and_operation_session(
     )
     assert analyzed.status_code == 200, analyzed.text
     assert analyzed.json()["upload_id"] == upload_id
-    assert (student_store.UPLOAD_ROOT / upload_id / "input.xlsx").is_file()
-    assert (operation_root / session_id / "table.json").is_file()
+    assert not (student_store.UPLOAD_ROOT / upload_id).exists()
+    assert not (operation_root / session_id).exists()
 
     purged = client.delete(
         f"/api/v1/student/sessions/{session_id}/purge",

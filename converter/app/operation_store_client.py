@@ -3,7 +3,9 @@ from __future__ import annotations
 import base64
 import hashlib
 import ipaddress
+import json
 import os
+import re
 from datetime import datetime
 from typing import Any
 from urllib.parse import urlsplit
@@ -11,6 +13,10 @@ from urllib.parse import urlsplit
 import httpx
 
 from app.master_data_client import verify_conversion_context_token
+
+
+LEGACY_NODE_JSON_MAX_BODY_BYTES = 50 * 1024 * 1024
+LEGACY_JSON_METADATA_ALLOWANCE_BYTES = 64 * 1024
 
 
 class OperationStoreClientError(ValueError):
@@ -51,6 +57,15 @@ class NodeOperationStoreClient:
             if timeout_seconds is not None
             else _positive_timeout("OPERATION_STORE_TIMEOUT_SECONDS", 15.0)
         )
+        configured_protocol = os.getenv("OPERATION_STORE_PROTOCOL", "auto").strip().lower()
+        if configured_protocol not in {"auto", "raw-v2", "legacy-json-v1"}:
+            raise OperationStoreClientError(
+                "OPERATION_STORE_PROTOCOL không hợp lệ", status_code=503
+            )
+        self._configured_protocol = configured_protocol
+        self._protocol = "raw-v2" if configured_protocol == "raw-v2" else None
+        self._legacy_json_state_encoding: str | None = None
+        self._legacy_json_max_body_bytes: int | None = None
 
     def put_state(
         self,
@@ -58,19 +73,56 @@ class NodeOperationStoreClient:
         session_id: str,
         run_id: str,
         revision: int,
+        expected_revision: int,
+        expected_state_sha256: str,
         state: dict[str, Any],
         expires_at: datetime,
     ) -> dict[str, Any]:
         self._assert_binding(session_id, run_id)
+        content = json.dumps(
+            state,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        _assert_artifact_size(content)
+        digest = hashlib.sha256(content).hexdigest()
+        if self._operation_protocol() == "legacy-json-v1":
+            payload: dict[str, Any] = {
+                "run_id": run_id,
+                "revision": revision,
+                "expected_revision": expected_revision,
+                "expected_sha256": expected_state_sha256,
+                "expires_at": expires_at.isoformat(),
+                "sha256": digest,
+            }
+            if self._legacy_state_encoding() == "base64":
+                payload["state_base64"] = base64.b64encode(content).decode("ascii")
+            else:
+                payload["state"] = json.loads(content.decode("utf-8"))
+            body = _encode_json_body(payload)
+            _assert_legacy_node_json_body_size(
+                body,
+                max_body_bytes=self._legacy_body_limit(),
+            )
+            return self._request(
+                "PUT",
+                f"/converter-sessions/{session_id}/state",
+                content=body,
+                headers={"content-type": "application/json"},
+            )
         return self._request(
             "PUT",
             f"/converter-sessions/{session_id}/state",
-            json={
+            params={
                 "run_id": run_id,
-                "revision": revision,
-                "state": state,
+                "revision": str(revision),
+                "expected_revision": str(expected_revision),
+                "expected_sha256": expected_state_sha256,
+                "sha256": digest,
                 "expires_at": expires_at.isoformat(),
             },
+            content=content,
         )
 
     def get_state(self, *, session_id: str, run_id: str) -> dict[str, Any]:
@@ -103,18 +155,40 @@ class NodeOperationStoreClient:
         expires_at: datetime,
     ) -> dict[str, Any]:
         self._assert_binding(session_id, run_id)
+        _assert_artifact_size(content)
         digest = hashlib.sha256(content).hexdigest()
+        if self._operation_protocol() == "legacy-json-v1":
+            body = _encode_json_body(
+                {
+                    "run_id": run_id,
+                    "revision": revision,
+                    "content_base64": base64.b64encode(content).decode("ascii"),
+                    "content_type": content_type,
+                    "expires_at": expires_at.isoformat(),
+                    "sha256": digest,
+                }
+            )
+            _assert_legacy_node_json_body_size(
+                body,
+                max_body_bytes=self._legacy_body_limit(),
+            )
+            return self._request(
+                "PUT",
+                f"/converter-sessions/{session_id}/artifacts/{kind}",
+                content=body,
+                headers={"content-type": "application/json"},
+            )
         return self._request(
             "PUT",
             f"/converter-sessions/{session_id}/artifacts/{kind}",
-            json={
+            params={
                 "run_id": run_id,
-                "revision": revision,
-                "content_base64": base64.b64encode(content).decode("ascii"),
+                "revision": str(revision),
                 "content_type": content_type,
                 "expires_at": expires_at.isoformat(),
                 "sha256": digest,
             },
+            content=content,
         )
 
     def get_artifact(
@@ -126,21 +200,51 @@ class NodeOperationStoreClient:
         revision: int | None = None,
     ) -> bytes:
         self._assert_binding(session_id, run_id)
-        response = self._request_response(
-            "GET",
-            f"/converter-sessions/{session_id}/artifacts/{kind}",
-            params={
-                "run_id": run_id,
-                **({"revision": str(revision)} if revision is not None else {}),
-            },
-        )
-        content = response.content
-        expected = str(response.headers.get("x-artifact-sha256") or "").lower()
-        if expected and hashlib.sha256(content).hexdigest() != expected:
+        params = {
+            "run_id": run_id,
+            **({"revision": str(revision)} if revision is not None else {}),
+        }
+        digest = hashlib.sha256()
+        chunks: list[bytes] = []
+        size = 0
+        try:
+            with httpx.stream(
+                "GET",
+                f"{self.base_url}/converter-sessions/{session_id}/artifacts/{kind}",
+                headers=self._headers(),
+                params=params,
+                timeout=self.timeout_seconds,
+            ) as response:
+                if response.status_code >= 400:
+                    response.read()
+                    message, code = _error_details(response)
+                    raise OperationStoreClientError(
+                        message, status_code=response.status_code, code=code
+                    )
+                expected = str(
+                    response.headers.get("x-artifact-sha256") or ""
+                ).lower()
+                for chunk in response.iter_bytes():
+                    size += len(chunk)
+                    if size > _artifact_max_bytes():
+                        raise OperationStoreClientError(
+                            "Artifact vượt giới hạn kích thước",
+                            status_code=413,
+                            code="ARTIFACT_TOO_LARGE",
+                        )
+                    digest.update(chunk)
+                    chunks.append(chunk)
+        except OperationStoreClientError:
+            raise
+        except httpx.HTTPError as exc:
+            raise OperationStoreClientError(
+                f"Không kết nối được Node operation store: {exc}"
+            ) from exc
+        if expected and digest.hexdigest() != expected:
             raise OperationStoreClientError(
                 "Artifact checksum không khớp", status_code=409, code="ARTIFACT_CHECKSUM_MISMATCH"
             )
-        return content
+        return b"".join(chunks)
 
     def _assert_binding(self, session_id: str, run_id: str) -> None:
         if str(session_id) != self.session_id or str(run_id) != self.run_id:
@@ -149,6 +253,78 @@ class NodeOperationStoreClient:
                 status_code=403,
                 code="CONTEXT_BINDING_MISMATCH",
             )
+
+    def _operation_protocol(self) -> str:
+        if self._protocol == "raw-v2":
+            return self._protocol
+        if self._protocol == "legacy-json-v1" and getattr(
+            self, "_legacy_json_state_encoding", None
+        ) in {"base64", "state"}:
+            return self._protocol
+        configured_protocol = getattr(self, "_configured_protocol", "auto")
+        try:
+            payload = self._request("GET", "/converter-sessions/protocol")
+        except OperationStoreClientError as exc:
+            if exc.status_code not in {404, 405}:
+                raise
+            if configured_protocol == "raw-v2":
+                raise OperationStoreClientError(
+                    "Node operation store không hỗ trợ raw-v2",
+                    status_code=503,
+                    code="OPERATION_PROTOCOL_MISMATCH",
+                ) from exc
+            self._protocol = "legacy-json-v1"
+            self._legacy_json_state_encoding = "state"
+            self._legacy_json_max_body_bytes = LEGACY_NODE_JSON_MAX_BODY_BYTES
+            return self._protocol
+        supported = payload.get("supported") if isinstance(payload, dict) else None
+        preferred = str(payload.get("preferred") or "") if isinstance(payload, dict) else ""
+        if (
+            configured_protocol != "legacy-json-v1"
+            and preferred == "raw-v2"
+            and isinstance(supported, list)
+            and "raw-v2" in supported
+        ):
+            self._protocol = "raw-v2"
+            return self._protocol
+        if isinstance(supported, list) and "legacy-json-v1" in supported:
+            self._protocol = "legacy-json-v1"
+            advertised_encoding = str(
+                payload.get("legacy_json_state_encoding") or "state"
+            ).strip().lower()
+            self._legacy_json_state_encoding = (
+                "base64" if advertised_encoding == "base64" else "state"
+            )
+            advertised_limit = payload.get("legacy_json_max_body_bytes")
+            self._legacy_json_max_body_bytes = (
+                advertised_limit
+                if isinstance(advertised_limit, int) and advertised_limit > 0
+                else LEGACY_NODE_JSON_MAX_BODY_BYTES
+            )
+            return self._protocol
+        raise OperationStoreClientError(
+            "Node operation store không công bố protocol tương thích",
+            status_code=503,
+            code="OPERATION_PROTOCOL_MISMATCH",
+        )
+
+    def _legacy_state_encoding(self) -> str:
+        return (
+            "base64"
+            if getattr(self, "_legacy_json_state_encoding", None) == "base64"
+            else "state"
+        )
+
+    def _legacy_body_limit(self) -> int:
+        configured = getattr(self, "_legacy_json_max_body_bytes", None)
+        if isinstance(configured, int) and configured > 0:
+            return configured
+        if self._legacy_state_encoding() == "state":
+            return LEGACY_NODE_JSON_MAX_BODY_BYTES
+        return (
+            4 * ((_artifact_max_bytes() + 2) // 3)
+            + LEGACY_JSON_METADATA_ALLOWANCE_BYTES
+        )
 
     def _headers(self) -> dict[str, str]:
         service_token = os.getenv("CONVERTER_SERVICE_TOKEN", "").strip()
@@ -172,11 +348,13 @@ class NodeOperationStoreClient:
         return payload
 
     def _request_response(self, method: str, path: str, **kwargs: Any) -> httpx.Response:
+        headers = self._headers()
+        headers.update(kwargs.pop("headers", {}) or {})
         try:
             response = httpx.request(
                 method,
                 f"{self.base_url}{path}",
-                headers=self._headers(),
+                headers=headers,
                 timeout=self.timeout_seconds,
                 **kwargs,
             )
@@ -210,6 +388,47 @@ def _positive_timeout(name: str, default: float) -> float:
         return max(0.1, float(os.getenv(name, str(default))))
     except ValueError:
         return default
+
+
+def _encode_json_body(payload: dict[str, Any]) -> bytes:
+    return json.dumps(
+        payload,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+
+def _assert_legacy_node_json_body_size(
+    body: bytes,
+    *,
+    max_body_bytes: int = LEGACY_NODE_JSON_MAX_BODY_BYTES,
+) -> None:
+    if len(body) > max_body_bytes:
+        raise OperationStoreClientError(
+            "Legacy Node 50 MiB JSON protocol cannot carry this artifact; raw-v2 is required",
+            status_code=413,
+            code="OPERATION_PROTOCOL_SIZE_MISMATCH",
+        )
+
+
+def _artifact_max_bytes() -> int:
+    default = 64 * 1024 * 1024
+    raw = os.getenv("CONVERTER_ARTIFACT_MAX_BYTES")
+    if raw is None or re.fullmatch(r"[0-9]+", raw) is None:
+        return default
+    configured = int(raw)
+    if configured <= 0 or configured > (2**53 - 1):
+        configured = default
+    return min(configured, 512 * 1024 * 1024)
+
+
+def _assert_artifact_size(content: bytes) -> None:
+    if len(content) > _artifact_max_bytes():
+        raise OperationStoreClientError(
+            "Artifact vượt giới hạn kích thước",
+            status_code=413,
+            code="ARTIFACT_TOO_LARGE",
+        )
 
 
 def _validated_base_url(value: str) -> str:

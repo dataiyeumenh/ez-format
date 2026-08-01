@@ -5,7 +5,7 @@ const requiredWhenPublished = function requiredWhenPublished() {
 };
 
 const requiredAfterWriteIntent = function requiredAfterWriteIntent() {
-  return this.status !== "write_intent";
+  return !["write_intent", "write_cleanup"].includes(this.status) && !this.writeIntentExpiresAt;
 };
 
 const conversionArtifactSchema = new mongoose.Schema(
@@ -27,19 +27,24 @@ const conversionArtifactSchema = new mongoose.Schema(
       immutable: true,
     },
     revision: { type: Number, required: requiredWhenPublished, min: 1, immutable: true },
+    previousRevision: { type: Number, default: null, min: 0, immutable: true },
+    previousSha256: { type: String, default: null, trim: true, lowercase: true, immutable: true },
     sha256: { type: String, required: requiredAfterWriteIntent, default: "", trim: true, lowercase: true },
     sizeBytes: { type: Number, required: requiredAfterWriteIntent, default: 0, min: 0 },
     mime: { type: String, required: true, trim: true, immutable: true },
     expiresAt: { type: Date, required: true, immutable: true },
     status: {
       type: String,
-      enum: ["write_intent", "available", "deletion_pending", "expired", "deleted", "missing", "corrupted"],
+      enum: ["write_intent", "write_cleanup", "available", "deletion_pending", "expired", "deleted", "missing", "corrupted"],
       default: "available",
       required: true,
       index: true,
     },
     purgeAt: { type: Date, default: null },
     writeIntentExpiresAt: { type: Date, default: null },
+    writeLeaseId: { type: String, default: null },
+    cleanupClaimId: { type: String, default: null },
+    cleanupClaimExpiresAt: { type: Date, default: null },
   },
   { timestamps: true },
 );

@@ -88,7 +88,6 @@ const allowedOrigins = [
   process.env.FRONTEND_URL, // Production (e.g., https://ezformat.io.vn)
   process.env.FRONTEND_URL_WWW, // www variant (e.g., https://www.ezformat.io.vn)
 ].filter(Boolean);
-
 const corsOptions = {
   origin: allowedOrigins,
   credentials: true,
@@ -112,6 +111,10 @@ app.use(
 );
 app.use(cors(corsOptions));
 app.use(attachRequestId);
+if (converterGatewayUsageReady) {
+  // Internal artifact uploads use their own bounded raw parser before global JSON parsing.
+  app.use("/api/internal/converter-sessions", require("./routes/internalConverterSessions"));
+}
 app.use(express.json({ limit: "50mb" }));
 app.use(express.urlencoded({ extended: true, limit: "50mb" }));
 
@@ -119,7 +122,6 @@ app.use(express.urlencoded({ extended: true, limit: "50mb" }));
 if (converterGatewayUsageReady) {
   app.use("/api/converter", require("./routes/converterGateway").router);
   app.use("/api/converter/context", require("./routes/conversionContext"));
-  app.use("/api/internal/converter-sessions", require("./routes/internalConverterSessions"));
 }
 app.use("/api/auth", require("./routes/auth"));
 app.use("/api/plans", require("./routes/plans"));

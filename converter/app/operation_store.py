@@ -6,6 +6,7 @@ import hmac
 import json
 import os
 import shutil
+import tempfile
 import threading
 import uuid
 from contextlib import ExitStack, contextmanager
@@ -15,7 +16,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterator
 
 from app.conversion_types import BACKEND_ROOT
-from app.excel_io import InputTable
+from app.excel_io import InputTable, read_input_table
 from app.internal_auth import unauthenticated_local_operations_enabled as _local_mode_enabled
 from app.master_data_client import ConversionContextError, verify_conversion_context_token
 from app.operation_models import DerivedRevision, NormalizedSession
@@ -63,6 +64,37 @@ def local_operation_store_enabled() -> bool:
 
 def node_operation_store_enabled() -> bool:
     return os.getenv("OPERATION_STORE_PROVIDER", "").strip().lower() == "node"
+
+
+def assert_student_metadata_v1_rollout_configured() -> str:
+    mode = os.getenv("STUDENT_METADATA_V1_ROLLOUT_MODE", "").strip().lower()
+    production_student_node = (
+        os.getenv("NODE_ENV", "").strip().lower() == "production"
+        and node_operation_store_enabled()
+        and _env_enabled("STUDENT_ASSISTANT_ENABLED")
+    )
+    if not production_student_node:
+        return mode or "not_required"
+    if mode not in {"drain", "complete"}:
+        raise OperationStoreError(
+            "STUDENT_METADATA_V1_ROLLOUT_MODE must be drain or complete in production"
+        )
+    if not _env_enabled("STUDENT_METADATA_V1_QUIESCE_ACKNOWLEDGED"):
+        raise OperationStoreError(
+            "STUDENT_METADATA_V1_QUIESCE_ACKNOWLEDGED=true is required before production Student startup"
+        )
+    return mode
+
+
+def assert_student_metadata_v1_new_sessions_allowed() -> None:
+    if (
+        node_operation_store_enabled()
+        and os.getenv("STUDENT_METADATA_V1_ROLLOUT_MODE", "").strip().lower()
+        == "drain"
+    ):
+        raise OperationStoreError(
+            "Legacy Student drain is active; new Student analyses are disabled"
+        )
 
 
 def assert_operation_store_configured(*, remote_client: Any | None = None) -> str:
@@ -283,6 +315,7 @@ class OperationStore:
         self._remote_run_id = str(conversion_run_id or "").strip()
         self._remote_payloads: dict[str, dict[str, Any]] = {}
         self._remote_storage_revisions: dict[str, int] = {}
+        self._remote_state_sha256s: dict[str, str] = {}
         self._state_contracts: dict[str, str] = {}
         if (
             conversion_context_token
@@ -402,14 +435,12 @@ class OperationStore:
         creation_lock.acquire()
         if state_contract:
             self._state_contracts[session_id] = state_contract
-        persist_local = (
-            self._remote_client is None
-            or state_contract == STUDENT_METADATA_STATE_CONTRACT
-        )
+        persist_local = self._remote_client is None
         directory = self._directory(session_id)
         staging_directory: Path | None = None
         creation_key: tuple[str, str] | None = None
         remote_saved = False
+        remote_attempted = False
         try:
             if persist_local:
                 staging_directory = self.root / (
@@ -444,6 +475,7 @@ class OperationStore:
                 self._atomic_write(staging_directory / "table.json", table_payload)
 
             if self._remote_client is not None:
+                remote_attempted = True
                 self._save_remote_state(session, table_payload)
                 remote_saved = True
 
@@ -465,7 +497,7 @@ class OperationStore:
             return session
         except Exception:
             rollback_complete = True
-            if self._remote_client is not None and staging_directory is not None:
+            if self._remote_client is not None and (remote_attempted or remote_saved):
                 rollback_complete = self._rollback_remote_creation(session)
             with _OPERATION_SESSION_DIRECTORY_LOCK:
                 if creation_key is not None:
@@ -476,6 +508,7 @@ class OperationStore:
                     _remove_operation_session_directory(self.root, staging_directory)
             self._remote_payloads.pop(session_id, None)
             self._remote_storage_revisions.pop(session_id, None)
+            self._remote_state_sha256s.pop(session_id, None)
             self._state_contracts.pop(session_id, None)
             if staging_directory is not None:
                 self._write_lifecycle_state(
@@ -496,15 +529,6 @@ class OperationStore:
 
     def _load_session_with_active_fence(self, session_id: str) -> NormalizedSession:
         if self._remote_client is not None:
-            if self._state_contracts.get(session_id) == STUDENT_METADATA_STATE_CONTRACT:
-                cached = self._remote_payloads.get(session_id)
-                if cached is not None:
-                    session = cached["session"]
-                    if session.expires_at <= datetime.now(timezone.utc):
-                        self._write_lifecycle_state(session_id, "purging")
-                        self._purge_local_state(session_id)
-                        raise OperationStoreExpiredError("Phiên chuyển đổi đã hết hạn")
-                    return session
             try:
                 session, _ = self._load_remote_state(session_id)
                 return session
@@ -513,7 +537,7 @@ class OperationStore:
                 self._purge_local_state(session_id)
                 raise
             except OperationStoreClientError as exc:
-                if exc.status_code == 410:
+                if self._remote_error_requires_purge(exc):
                     self._write_lifecycle_state(session_id, "purging")
                     self._purge_local_state(session_id)
                 self._raise_remote_error(exc)
@@ -778,8 +802,6 @@ class OperationStore:
             raise OperationStoreError("Không tải được artifact từ Node") from exc
 
     def _read_table(self, session_id: str) -> dict[str, Any]:
-        if self._state_contracts.get(session_id) == STUDENT_METADATA_STATE_CONTRACT:
-            return self._read_local_table(session_id)
         if self._remote_client is not None:
             payload = self._remote_payloads.get(session_id)
             if payload is None:
@@ -817,20 +839,12 @@ class OperationStore:
     ) -> None:
         if self._remote_client is not None:
             self._save_remote_state(session, table_payload or self._read_table(session.session_id))
-            if (
-                self._state_contracts.get(session.session_id)
-                == STUDENT_METADATA_STATE_CONTRACT
-            ):
-                self._atomic_write(
-                    self._directory(session.session_id) / "session.json",
-                    session.model_dump(mode="json"),
-                )
             return
         payload = session.model_dump(mode="json")
         self._atomic_write(self._directory(session.session_id) / "session.json", payload)
 
     def _load_remote_state(
-        self, session_id: str
+        self, session_id: str, *, migrate_legacy: bool = True
     ) -> tuple[NormalizedSession, dict[str, Any]]:
         run_id = self._remote_run_id
         if not run_id:
@@ -844,14 +858,126 @@ class OperationStore:
         state = result.get("state") if isinstance(result, dict) and "state" in result else result
         if not isinstance(state, dict):
             raise OperationStoreError("Session state từ Node không hợp lệ")
-        session, table_payload = self._validate_remote_state(session_id, state)
         metadata = result.get("session") if isinstance(result, dict) else None
-        if isinstance(metadata, dict):
-            stored_revision = metadata.get("revision")
-            if isinstance(stored_revision, int) and stored_revision >= 1:
-                self._remote_storage_revisions[session_id] = stored_revision
+        if not isinstance(metadata, dict):
+            raise OperationStoreError("Node thiếu persisted session metadata")
+        stored_revision = metadata.get("revision")
+        stored_sha256 = str(metadata.get("sha256") or "").strip().lower()
+        if (
+            not isinstance(stored_revision, int)
+            or stored_revision < 1
+            or not _is_sha256(stored_sha256)
+        ):
+            raise OperationStoreError("Node trả về persisted session metadata không hợp lệ")
+        self._remote_storage_revisions[session_id] = stored_revision
+        self._remote_state_sha256s[session_id] = stored_sha256
+        if (
+            state.get("contract") == STUDENT_METADATA_STATE_CONTRACT
+            and not isinstance(state.get("table"), dict)
+        ):
+            if not migrate_legacy:
+                raise OperationStoreError(
+                    "Legacy student session migration chưa khả dụng; vui lòng thử lại"
+                )
+            return self._migrate_legacy_student_state(session_id, state)
+        session, table_payload = self._validate_remote_state(session_id, state)
         self._remote_payloads[session_id] = {"session": session, "table": table_payload}
         return session, table_payload
+
+    def _migrate_legacy_student_state(
+        self, session_id: str, state: dict[str, Any]
+    ) -> tuple[NormalizedSession, dict[str, Any]]:
+        session = self._validate_remote_session(session_id, state)
+        self._state_contracts[session_id] = STUDENT_METADATA_STATE_CONTRACT
+        table_payload = self._recover_legacy_student_table(session)
+        try:
+            self._save_remote_state(session, table_payload)
+        except OperationStoreConflictError:
+            return self._load_remote_state(session_id, migrate_legacy=False)
+        self._remove_replica_local_directory(session_id)
+        persisted = self._remote_payloads[session_id]
+        return persisted["session"], dict(persisted["table"])
+
+    def _recover_legacy_student_table(
+        self, session: NormalizedSession
+    ) -> dict[str, Any]:
+        local_path = self._directory(session.session_id) / "table.json"
+        if local_path.is_file():
+            try:
+                local_payload = self._read_local_table(session.session_id)
+                if self._table_payload_matches_session(local_payload, session):
+                    return local_payload
+            except OperationStoreError:
+                pass
+
+        try:
+            content = self._remote_client.get_artifact(
+                session_id=session.session_id,
+                run_id=self._remote_run_id,
+                kind="upload",
+                revision=None,
+            )
+            context = self._revision(session, session.active_revision).context
+            upload_metadata = context.get("upload_metadata")
+            filename = str(
+                upload_metadata.get("filename")
+                if isinstance(upload_metadata, dict)
+                else "legacy-upload.xlsx"
+            )
+            suffix = Path(filename).suffix.lower()
+            if suffix not in {".xls", ".xlsx"}:
+                suffix = ".xlsx"
+            with tempfile.TemporaryDirectory(prefix="legacy-operation-drain-") as directory:
+                source_path = Path(directory) / f"input{suffix}"
+                source_path.write_bytes(content)
+                recovered = read_input_table(source_path)
+            payload = self._table_payload(recovered)
+            if self._table_payload_matches_session(payload, session):
+                return payload
+        except OperationStoreClientError as exc:
+            if exc.status_code == 404:
+                raise OperationStoreError(
+                    "Legacy student session has no durable table source; operator drain recovery is required before release"
+                ) from exc
+            raise OperationStoreError(
+                "Legacy student session migration source is temporarily unavailable while drain remains active"
+            ) from exc
+        except Exception as exc:
+            raise OperationStoreError(
+                "Legacy student session migration source is temporarily unavailable while drain remains active"
+            ) from exc
+        raise OperationStoreError(
+            "Legacy student session has no durable table source; operator drain recovery is required before release"
+        )
+
+    @staticmethod
+    def _table_payload(table: InputTable) -> dict[str, Any]:
+        return {
+            "headers": list(table.headers),
+            "rows": [
+                {"row_id": f"r{index}", "values": _json_safe(row)}
+                for index, row in enumerate(table.rows, start=1)
+            ],
+            "sheet_name": table.sheet_name,
+            "header_row_index": table.header_row_index,
+        }
+
+    @staticmethod
+    def _table_payload_matches_session(
+        table_payload: dict[str, Any], session: NormalizedSession
+    ) -> bool:
+        try:
+            current = OperationStore._revision(session, session.active_revision)
+            computed = _state_hash(table_payload, current.overlays, current.context)
+        except (KeyError, TypeError, ValueError, OperationStoreError):
+            return False
+        return current.state_hash == session.state_hash == computed
+
+    def _remove_replica_local_directory(self, session_id: str) -> None:
+        directory = self._directory(session_id)
+        with _OPERATION_SESSION_DIRECTORY_LOCK:
+            if directory.exists() or directory.is_symlink():
+                _remove_operation_session_directory(self.root, directory)
 
     def _save_remote_state(
         self, session: NormalizedSession, table_payload: dict[str, Any]
@@ -860,22 +986,23 @@ class OperationStore:
         if not run_id:
             raise OperationStoreError("Conversion run binding là bắt buộc")
         self._remote_run_id = run_id
-        storage_revision = self._remote_storage_revisions.get(session.session_id, 0) + 1
-        state = (
-            self._student_metadata_remote_state(session, table_payload)
-            if self._state_contracts.get(session.session_id)
-            == STUDENT_METADATA_STATE_CONTRACT
-            else {
-                "schema_version": 1,
-                "session": session.model_dump(mode="json"),
-                "table": table_payload,
-            }
-        )
+        expected_revision = self._remote_storage_revisions.get(session.session_id, 0)
+        expected_state_sha256 = self._remote_state_sha256s.get(session.session_id, "")
+        storage_revision = expected_revision + 1
+        state = {
+            "schema_version": 1,
+            "contract": self._state_contracts.get(session.session_id)
+            or "operation_state_v1",
+            "session": session.model_dump(mode="json"),
+            "table": table_payload,
+        }
         try:
             result = self._remote_client.put_state(
                 session_id=session.session_id,
                 run_id=run_id,
                 revision=storage_revision,
+                expected_revision=expected_revision,
+                expected_state_sha256=expected_state_sha256,
                 state=state,
                 expires_at=session.expires_at,
             )
@@ -883,79 +1010,28 @@ class OperationStore:
             self._raise_remote_error(exc)
         except Exception as exc:
             raise OperationStoreError("Không lưu được session state vào Node") from exc
+        persisted_state = result.get("state") if isinstance(result, dict) else None
         metadata = result.get("session") if isinstance(result, dict) else None
         remote_revision = metadata.get("revision") if isinstance(metadata, dict) else None
-        self._remote_storage_revisions[session.session_id] = (
-            remote_revision if isinstance(remote_revision, int) and remote_revision >= 1 else storage_revision
+        remote_sha256 = str(
+            metadata.get("sha256") if isinstance(metadata, dict) else ""
+        ).strip().lower()
+        if (
+            remote_revision != storage_revision
+            or not _is_sha256(remote_sha256)
+            or not isinstance(persisted_state, dict)
+        ):
+            raise OperationStoreError("Node không trả về persisted session state hợp lệ")
+        persisted_session, persisted_table = self._validate_remote_state(
+            session.session_id,
+            persisted_state,
         )
-        self._remote_payloads[session.session_id] = {"session": session, "table": table_payload}
-
-    @staticmethod
-    def _student_metadata_remote_state(
-        session: NormalizedSession, table_payload: dict[str, Any]
-    ) -> dict[str, Any]:
-        raw_session = session.model_dump(mode="json")
-        signature = session.source_signature if isinstance(session.source_signature, dict) else {}
-        session_payload = {
-            key: raw_session[key]
-            for key in (
-                "session_id",
-                "upload_id",
-                "user_id",
-                "workspace_id",
-                "owner_scope",
-                "target_template_id",
-                "target_template_version",
-                "primary_table_id",
-                "active_revision",
-                "state_hash",
-                "raw_sha256",
-                "created_at",
-                "expires_at",
-            )
+        self._remote_storage_revisions[session.session_id] = remote_revision
+        self._remote_state_sha256s[session.session_id] = remote_sha256
+        self._remote_payloads[session.session_id] = {
+            "session": persisted_session,
+            "table": persisted_table,
         }
-        session_payload["source_signature"] = {
-            "hash": str(signature.get("hash") or ""),
-            "row_count": len(table_payload.get("rows") or []),
-            "column_count": len(table_payload.get("headers") or []),
-        }
-        session_payload["revisions"] = [
-            OperationStore._student_metadata_revision(revision)
-            for revision in raw_session.get("revisions") or []
-            if isinstance(revision, dict)
-        ]
-        return {
-            "schema_version": 1,
-            "contract": STUDENT_METADATA_STATE_CONTRACT,
-            "session": session_payload,
-            "table_metadata": {
-                "row_count": len(table_payload.get("rows") or []),
-                "column_count": len(table_payload.get("headers") or []),
-                "header_row_index": int(table_payload.get("header_row_index") or 0),
-                "has_sheet_name": bool(table_payload.get("sheet_name")),
-            },
-        }
-
-    @staticmethod
-    def _student_metadata_revision(revision: dict[str, Any]) -> dict[str, Any]:
-        context = revision.get("context")
-        payload = {
-            key: revision.get(key)
-            for key in (
-                "revision",
-                "parent_revision",
-                "patch_set_id",
-                "state_hash",
-                "created_by",
-                "created_at",
-            )
-        }
-        payload["context"] = {
-            key: context[key]
-            for key in ("target_template_id", "conversion_run_id")
-            if isinstance(context, dict) and context.get(key) is not None
-        }
-        return payload
 
     @staticmethod
     def _run_id_from_session(session: NormalizedSession) -> str:
@@ -966,65 +1042,14 @@ class OperationStore:
     def _validate_remote_state(
         self, session_id: str, state: dict[str, Any]
     ) -> tuple[NormalizedSession, dict[str, Any]]:
-        raw_session = state.get("session")
+        remote_session = self._validate_remote_session(session_id, state)
         table_payload = state.get("table")
         contract = state.get("contract")
-        if not isinstance(raw_session, dict):
-            raise OperationStoreError("Session state từ Node không hợp lệ")
-        try:
-            remote_session = NormalizedSession.model_validate(raw_session)
-        except ValueError as exc:
-            raise OperationStoreError("Session metadata từ Node không hợp lệ") from exc
-        if remote_session.session_id != session_id:
-            raise OperationStoreError("Session binding từ Node không hợp lệ")
-        if remote_session.expires_at <= datetime.now(timezone.utc):
-            raise OperationStoreExpiredError("Phiên chuyển đổi đã hết hạn")
         if contract == STUDENT_METADATA_STATE_CONTRACT:
             self._state_contracts[session_id] = STUDENT_METADATA_STATE_CONTRACT
-            table_metadata = state.get("table_metadata")
-            if not isinstance(table_metadata, dict):
-                raise OperationStoreError("Student table metadata từ Node không hợp lệ")
-            session = self._load_local_session(session_id)
-            table_payload = self._read_local_table(session_id)
-            bound_fields = (
-                "session_id",
-                "upload_id",
-                "user_id",
-                "workspace_id",
-                "owner_scope",
-                "target_template_id",
-                "target_template_version",
-                "active_revision",
-                "state_hash",
-                "raw_sha256",
-                "expires_at",
-            )
-            if any(
-                getattr(session, field) != getattr(remote_session, field)
-                for field in bound_fields
-            ):
-                raise OperationStoreError("Student session metadata binding không hợp lệ")
-            try:
-                remote_row_count = int(table_metadata["row_count"])
-                remote_column_count = int(table_metadata["column_count"])
-                remote_header_row_index = int(table_metadata["header_row_index"])
-            except (KeyError, TypeError, ValueError) as exc:
-                raise OperationStoreError(
-                    "Student table metadata binding không hợp lệ"
-                ) from exc
-            if (
-                remote_row_count != len(table_payload.get("rows") or [])
-                or remote_column_count != len(table_payload.get("headers") or [])
-                or remote_header_row_index
-                != int(table_payload.get("header_row_index") or 0)
-                or bool(table_metadata.get("has_sheet_name"))
-                != bool(table_payload.get("sheet_name"))
-            ):
-                raise OperationStoreError("Student table metadata binding không hợp lệ")
-        else:
-            session = remote_session
-            if not isinstance(table_payload, dict):
-                raise OperationStoreError("Session state từ Node không hợp lệ")
+        session = remote_session
+        if not isinstance(table_payload, dict):
+            raise OperationStoreError("Session state từ Node không hợp lệ")
         if not isinstance(table_payload.get("headers"), list) or not isinstance(
             table_payload.get("rows"), list
         ):
@@ -1035,9 +1060,27 @@ class OperationStore:
             raise OperationStoreError("Session state hash không hợp lệ")
         return session, table_payload
 
+    @staticmethod
+    def _validate_remote_session(
+        session_id: str, state: dict[str, Any]
+    ) -> NormalizedSession:
+        raw_session = state.get("session")
+        if not isinstance(raw_session, dict):
+            raise OperationStoreError("Session state từ Node không hợp lệ")
+        try:
+            remote_session = NormalizedSession.model_validate(raw_session)
+        except ValueError as exc:
+            raise OperationStoreError("Session metadata từ Node không hợp lệ") from exc
+        if remote_session.session_id != session_id:
+            raise OperationStoreError("Session binding từ Node không hợp lệ")
+        if remote_session.expires_at <= datetime.now(timezone.utc):
+            raise OperationStoreExpiredError("Phiên chuyển đổi đã hết hạn")
+        return remote_session
+
     def _purge_local_state(self, session_id: str) -> None:
         self._remote_payloads.pop(session_id, None)
         self._remote_storage_revisions.pop(session_id, None)
+        self._remote_state_sha256s.pop(session_id, None)
         self._state_contracts.pop(session_id, None)
         directory = self._directory(session_id)
         with _OPERATION_SESSION_DIRECTORY_LOCK:
@@ -1118,9 +1161,20 @@ class OperationStore:
     def state_contract(self, session_id: str) -> str | None:
         return self._state_contracts.get(session_id)
 
+    def bound_remote_session_id(self) -> str:
+        return str(getattr(self._remote_client, "session_id", "") or "").strip()
+
+    def persisted_state_binding(self, session_id: str) -> dict[str, Any]:
+        if session_id not in self._remote_storage_revisions:
+            self._load_remote_state(session_id)
+        return {
+            "revision": self._remote_storage_revisions[session_id],
+            "sha256": self._remote_state_sha256s[session_id],
+        }
+
     @staticmethod
     def _raise_remote_error(exc: OperationStoreClientError) -> None:
-        if exc.status_code == 410:
+        if OperationStore._remote_error_requires_purge(exc):
             raise OperationStoreExpiredError("Phiên chuyển đổi đã hết hạn") from exc
         if exc.status_code == 409:
             raise OperationStoreConflictError(str(exc)) from exc
@@ -1129,6 +1183,10 @@ class OperationStore:
         if exc.status_code == 404:
             raise OperationStoreError("Session not found") from exc
         raise OperationStoreError(str(exc)) from exc
+
+    @staticmethod
+    def _remote_error_requires_purge(exc: OperationStoreClientError) -> bool:
+        return exc.status_code == 410 and exc.code == "ARTIFACT_EXPIRED"
 
     @staticmethod
     def _assert_current(
@@ -2119,6 +2177,10 @@ def _state_hash(
         separators=(",", ":"),
     ).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def _is_sha256(value: str) -> bool:
+    return len(value) == 64 and all(char in "0123456789abcdef" for char in value)
 
 
 def _validate_owner_binding(

@@ -8,6 +8,7 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass, replace
+from functools import wraps
 from pathlib import Path
 from typing import Any
 
@@ -76,6 +77,7 @@ from app.operation_store import (
     OperationStore,
     OperationStoreConflictError,
     OperationStoreError,
+    node_operation_store_enabled,
     operation_context_required,
     STUDENT_METADATA_STATE_CONTRACT,
     unauthenticated_local_operations_enabled,
@@ -94,6 +96,7 @@ from app.student_store import (
 
 UPLOAD_ROOT = BACKEND_ROOT / ".artifacts" / "uploads"
 _UPLOAD_CACHE_LOCK = threading.RLock()
+_REQUEST_SCOPED_UPLOADS = threading.local()
 EXPORT_MEDIA_TYPE = "application/vnd.ms-excel"
 UPLOAD_METADATA_CONTEXT_KEY = "upload_metadata"
 DETERMINISTIC_BSN_SALES_RAW_HEADERS = (
@@ -110,6 +113,25 @@ class ReadinessGateError(ValueError):
     def __init__(self, report: MisaReadinessReport) -> None:
         self.report = report
         super().__init__("MISA readiness gate failed")
+
+
+def _purge_request_scoped_node_uploads(function):
+    @wraps(function)
+    def wrapped(*args, **kwargs):
+        previous = getattr(_REQUEST_SCOPED_UPLOADS, "paths", None)
+        if previous is not None:
+            return function(*args, **kwargs)
+        request_uploads: list[Path] = []
+        _REQUEST_SCOPED_UPLOADS.paths = request_uploads
+        try:
+            return function(*args, **kwargs)
+        finally:
+            with _UPLOAD_CACHE_LOCK:
+                for directory in reversed(request_uploads):
+                    shutil.rmtree(directory, ignore_errors=True)
+            delattr(_REQUEST_SCOPED_UPLOADS, "paths")
+
+    return wrapped
 
 
 @dataclass(frozen=True)
@@ -172,6 +194,13 @@ def save_upload(
     directory = _upload_dir(upload_id)
     with _UPLOAD_CACHE_LOCK:
         directory.mkdir(parents=True, exist_ok=False)
+        if node_operation_store_enabled():
+            request_uploads = getattr(_REQUEST_SCOPED_UPLOADS, "paths", None)
+            if request_uploads is None:
+                raise OperationStoreError(
+                    "Node-backed upload must be created inside a request scope"
+                )
+            request_uploads.append(directory)
         if student_claims is not None:
             if student_ttl_seconds is None:
                 raise ValueError("Student upload TTL là bắt buộc")
@@ -191,6 +220,7 @@ def save_upload(
     return upload_id, input_path
 
 
+@_purge_request_scoped_node_uploads
 def analyze_upload(
     *,
     filename: str,
@@ -458,18 +488,23 @@ def analyze_upload(
             },
             "conversion_context": (
                 {
-                    "user_id": context_claims.get("user_id"),
+                    "user_id": (operation_claims or context_claims).get("user_id"),
                     "owner_scope": owner_scope,
                     "workspace_id": workspace_id,
-                    "snapshot_set_hash": context_claims.get("snapshot_set_hash"),
-                    "conversion_run_id": context_claims.get("conversion_run_id"),
+                    "snapshot_set_hash": (operation_claims or context_claims).get(
+                        "snapshot_set_hash"
+                    ),
+                    "conversion_run_id": (operation_claims or context_claims).get(
+                        "conversion_run_id"
+                    ),
                 }
-                if context_claims
+                if operation_claims or context_claims
                 else None
             ),
             "owner_scope": owner_scope,
             "conversion_run_id": str(
-                (context_claims or {}).get("conversion_run_id") or ""
+                (operation_claims or context_claims or {}).get("conversion_run_id")
+                or ""
             )
             or None,
             "operation_session_id": trusted_session_id,
@@ -541,14 +576,13 @@ def analyze_upload(
                 "operation_session_expires_at": session_expires_at,
             }
         )
-        if not student_claims:
-            operation_store.put_artifact(
-                session.session_id,
-                kind="upload",
-                revision=1,
-                content=content,
-                content_type=_upload_content_type(filename),
-            )
+        operation_store.put_artifact(
+            session.session_id,
+            kind="upload",
+            revision=1,
+            content=content,
+            content_type=_upload_content_type(filename),
+        )
     _write_metadata(upload_id, metadata)
     store.record_run(
         run_id=upload_id,
@@ -643,7 +677,7 @@ def preview_mapping(
     resolution = resolve_master_data(
         rows,
         context,
-        source_system=_source_system_for_upload(upload_id),
+        source_system=_source_system_for_upload(upload_id, conversion_context_token),
     )
     return {
         "headers": template.headers,
@@ -705,7 +739,7 @@ def readiness_mapping(
     resolution = resolve_master_data(
         rows,
         context,
-        source_system=_source_system_for_upload(upload_id),
+        source_system=_source_system_for_upload(upload_id, conversion_context_token),
     )
     report = build_readiness_report(
         table,
@@ -745,7 +779,10 @@ def confirm_mapping(
         conversion_context_token=conversion_context_token,
         required_scope="confirm",
     )
-    metadata = _read_metadata(upload_id)
+    metadata = _read_metadata(
+        upload_id,
+        conversion_context_token=conversion_context_token,
+    )
     _context_for_upload(upload_id, conversion_context_token)
     signature_payload = metadata.get("signature")
     if isinstance(signature_payload, dict):
@@ -1172,7 +1209,10 @@ def _resolve_confirmed_export(
             conversion_context_token=conversion_context_token
         ).materialize_rows_with_ids(session_id, revision=revision)
     table = _read_upload_table(upload_id, conversion_context_token=conversion_context_token)
-    metadata = _read_metadata(upload_id)
+    metadata = _read_metadata(
+        upload_id,
+        conversion_context_token=conversion_context_token,
+    )
     context, context_status, context_message = _context_for_upload(
         upload_id, conversion_context_token
     )
@@ -1254,7 +1294,7 @@ def _resolve_confirmed_export(
     resolution = resolve_master_data(
         rows,
         context,
-        source_system=_source_system_for_upload(upload_id),
+        source_system=_source_system_for_upload(upload_id, conversion_context_token),
     )
     rows = resolution.rows
     readiness = build_readiness_report(
@@ -1318,7 +1358,10 @@ def export_confirmed_profile(
     if session_id:
         edited_rows = None
     table = _read_upload_table(upload_id, conversion_context_token=conversion_context_token)
-    metadata = _read_metadata(upload_id)
+    metadata = _read_metadata(
+        upload_id,
+        conversion_context_token=conversion_context_token,
+    )
     context, context_status, context_message = _context_for_upload(
         upload_id, conversion_context_token
     )
@@ -1398,7 +1441,7 @@ def export_confirmed_profile(
     resolution = resolve_master_data(
         rows,
         context,
-        source_system=_source_system_for_upload(upload_id),
+        source_system=_source_system_for_upload(upload_id, conversion_context_token),
     )
     rows = resolution.rows
     readiness = build_readiness_report(
@@ -1524,6 +1567,8 @@ def _assert_student_upload_context(
     token: str | None,
     required_scope: str,
 ) -> StudentContextClaims | None:
+    if node_operation_store_enabled():
+        return _verify_student_token(token, required_scope)
     is_bound = student_upload_is_bound(upload_id)
     if not is_bound:
         if token:
@@ -1540,7 +1585,7 @@ def _assert_student_upload_context(
 def _context_for_upload(
     upload_id: str, token: str | None
 ) -> tuple[dict[str, Any] | None, str, str | None]:
-    metadata = _read_metadata(upload_id)
+    metadata = _read_metadata(upload_id, conversion_context_token=token)
     expected = metadata.get("conversion_context")
     if not expected:
         if token:
@@ -1568,8 +1613,16 @@ def _context_for_upload(
         return None, "unavailable", str(exc)
 
 
-def _source_system_for_upload(upload_id: str) -> str:
-    signature = (_read_metadata(upload_id).get("signature") or {})
+def _source_system_for_upload(
+    upload_id: str, conversion_context_token: str | None = None
+) -> str:
+    signature = (
+        _read_metadata(
+            upload_id,
+            conversion_context_token=conversion_context_token,
+        ).get("signature")
+        or {}
+    )
     if isinstance(signature, dict):
         return str(signature.get("hash") or "default")
     return "default"
@@ -1698,10 +1751,15 @@ def _is_known_deterministic_schema(
 def _read_upload_table(
     upload_id: str, *, conversion_context_token: str | None = None
 ) -> InputTable:
-    metadata = _read_metadata(upload_id)
+    if node_operation_store_enabled():
+        store = OperationStore(conversion_context_token=conversion_context_token)
+        metadata = _read_metadata(upload_id, operation_store=store)
+        return store.materialize_table(str(metadata["operation_session_id"]))
+    metadata = _read_metadata(
+        upload_id,
+        conversion_context_token=conversion_context_token,
+    )
     session_id = str(metadata.get("operation_session_id") or "")
-    if metadata.get("operation_state_contract") == STUDENT_METADATA_STATE_CONTRACT:
-        return read_input_table(Path(metadata["input_path"]))
     if session_id:
         return OperationStore(
             conversion_context_token=conversion_context_token
@@ -1720,15 +1778,39 @@ def _metadata_path(upload_id: str) -> Path:
 def _read_metadata(
     upload_id: str,
     *,
+    conversion_context_token: str | None = None,
     operation_store: OperationStore | None = None,
     session: Any | None = None,
 ) -> dict[str, Any]:
+    if node_operation_store_enabled():
+        request_metadata_path = _metadata_path(upload_id)
+        if (
+            operation_store is None
+            and session is None
+            and not conversion_context_token
+            and _is_request_scoped_path(request_metadata_path.parent)
+        ):
+            return json.loads(request_metadata_path.read_text(encoding="utf-8"))
+        store = operation_store or OperationStore(
+            conversion_context_token=conversion_context_token
+        )
+        active_session = session
+        if active_session is None:
+            session_id = store.bound_remote_session_id()
+            if not session_id:
+                raise OperationStoreError("Node operation session binding là bắt buộc")
+            active_session = store.load_session(session_id)
+        metadata = _restore_upload_from_session(upload_id, store, active_session)
+        stale_directory = _upload_dir(upload_id)
+        if stale_directory.exists() and not _is_request_scoped_path(stale_directory):
+            with _UPLOAD_CACHE_LOCK:
+                shutil.rmtree(stale_directory, ignore_errors=True)
+        return metadata
     path = _metadata_path(upload_id)
     if path.exists():
         metadata = json.loads(path.read_text(encoding="utf-8"))
         if operation_store is not None and session is not None:
             _assert_upload_metadata_binding(metadata, upload_id, session)
-            _restore_upload_bytes_if_missing(metadata, operation_store, session)
         return metadata
     if operation_store is None or session is None:
         raise KeyError(f"Upload not found: {upload_id}")
@@ -1737,8 +1819,18 @@ def _read_metadata(
 
 def _write_metadata(upload_id: str, metadata: dict[str, Any]) -> None:
     path = _metadata_path(upload_id)
+    if node_operation_store_enabled() and not _is_request_scoped_path(path.parent):
+        return
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _is_request_scoped_path(path: Path) -> bool:
+    request_paths = getattr(_REQUEST_SCOPED_UPLOADS, "paths", None)
+    if request_paths is None:
+        return False
+    resolved = path.resolve()
+    return any(resolved == candidate.resolve() for candidate in request_paths)
 
 def apply_optional_ai_mapping(
     *,
@@ -1859,7 +1951,10 @@ def sync_mapping_session(
         conversion_context_token=conversion_context_token,
         required_scope="confirm",
     )
-    metadata = _read_metadata(upload_id)
+    metadata = _read_metadata(
+        upload_id,
+        conversion_context_token=conversion_context_token,
+    )
     if str(metadata.get("target_template_id") or "") != target_template_id:
         raise ValueError("Template không khớp với lần phân tích ban đầu")
     template = get_misa_template(target_template_id)
@@ -1975,7 +2070,10 @@ def _assert_operation_state(
 ) -> None:
     if not session_id or revision is None or not state_hash:
         if student_owner_scope:
-            metadata = _read_metadata(upload_id)
+            metadata = _read_metadata(
+                upload_id,
+                conversion_context_token=conversion_context_token,
+            )
             if _owner_scope_from_upload_metadata(metadata) != student_owner_scope:
                 raise ConversionContextError(
                     "Student owner không khớp upload", status_code=403
@@ -2031,10 +2129,17 @@ def _assert_operation_state(
         raise KeyError("Operation session not found")
 
 def _portable_upload_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
+    runtime_fields = {
+        "input_path",
+        "operation_revision",
+        "operation_state_hash",
+        "operation_storage_revision",
+        "operation_storage_sha256",
+    }
     return {
         key: value
         for key, value in metadata.items()
-        if key != "input_path"
+        if key not in runtime_fields
     }
 
 def _restore_upload_from_session(
@@ -2055,59 +2160,38 @@ def _restore_upload_from_session(
     suffix = Path(filename).suffix.lower()
     if suffix not in {".xls", ".xlsx"}:
         raise OperationStoreError("Upload metadata có định dạng file không hợp lệ")
-    input_path = _upload_dir(upload_id) / f"input{suffix}"
-    metadata["input_path"] = str(input_path)
+    metadata["input_path"] = ""
+    request_paths = getattr(_REQUEST_SCOPED_UPLOADS, "paths", None)
+    if request_paths is not None:
+        content = operation_store.get_artifact(
+            session.session_id,
+            kind="upload",
+            revision=1,
+        )
+        if content is None:
+            raise OperationStoreError("Session thiếu owner-bound upload artifact")
+        directory = UPLOAD_ROOT / f".request-{upload_id}-{uuid.uuid4().hex}"
+        with _UPLOAD_CACHE_LOCK:
+            directory.mkdir(parents=True, exist_ok=False)
+            request_paths.append(directory)
+            input_path = directory / f"input{suffix}"
+            input_path.write_bytes(content)
+        metadata["input_path"] = str(input_path)
     metadata["raw_sha256"] = session.raw_sha256
     session_expires_at = int(session.expires_at.timestamp())
     metadata["expires_at"] = session_expires_at
     metadata["operation_session_expires_at"] = session_expires_at
-    _restore_upload_bytes_if_missing(metadata, operation_store, session)
-    _write_metadata(upload_id, metadata)
-    return metadata
-
-def _restore_upload_bytes_if_missing(
-    metadata: dict[str, Any],
-    operation_store: OperationStore,
-    session: Any,
-) -> None:
-    input_path = Path(str(metadata.get("input_path") or ""))
-    expected_sha256 = str(getattr(session, "raw_sha256", "") or "").strip().lower()
-    if not _is_sha256(expected_sha256):
-        raise OperationStoreError("Upload metadata checksum không hợp lệ")
-    if input_path.is_file():
-        try:
-            local_sha256 = _sha256_file(input_path)
-        except OSError:
-            local_sha256 = ""
-        if local_sha256 == expected_sha256:
-            return
-
-    content = operation_store.get_artifact(
-        session.session_id,
-        kind="upload",
-        revision=1,
+    state_binding = operation_store.persisted_state_binding(session.session_id)
+    metadata.update(
+        {
+            "operation_state_contract": STUDENT_METADATA_STATE_CONTRACT,
+            "operation_revision": session.active_revision,
+            "operation_state_hash": session.state_hash,
+            "operation_storage_revision": state_binding["revision"],
+            "operation_storage_sha256": state_binding["sha256"],
+        }
     )
-    if content is None:
-        raise OperationStoreError("Upload artifact không khả dụng")
-    if hashlib.sha256(content).hexdigest() != expected_sha256:
-        raise OperationStoreConflictError("Upload artifact checksum không khớp")
-    input_path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = input_path.with_name(f".{input_path.name}.{uuid.uuid4().hex}.tmp")
-    try:
-        temporary.write_bytes(content)
-        temporary.replace(input_path)
-    finally:
-        temporary.unlink(missing_ok=True)
-
-def _sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-def _is_sha256(value: str) -> bool:
-    return len(value) == 64 and all(char in "0123456789abcdef" for char in value)
+    return metadata
 
 def _assert_upload_metadata_binding(
     metadata: dict[str, Any],

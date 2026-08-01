@@ -14,6 +14,7 @@ from app.document_structure import inspect_workbook_structure
 from app.misa_templates import get_misa_template
 from app.master_data_client import ConversionContextError, verify_conversion_context_token
 from app.misa_workflow import (
+    _purge_request_scoped_node_uploads,
     _read_metadata,
     _read_upload_table,
     analyze_upload,
@@ -22,7 +23,7 @@ from app.misa_workflow import (
     readiness_mapping,
 )
 from app.normalization import normalize_header
-from app.operation_store import operation_context_required
+from app.operation_store import node_operation_store_enabled, operation_context_required
 from app.student_accounting_map import build_accounting_maps
 from app.student_anonymization import (
     AnonymizationExportError,
@@ -100,6 +101,7 @@ def _operation_state(metadata: dict[str, Any]) -> dict[str, Any]:
     return {}
 
 
+@_purge_request_scoped_node_uploads
 def analyze_student_file(
     *,
     filename: str,
@@ -130,6 +132,7 @@ def analyze_student_file(
                 upload_id=cleanup_upload_id,
                 token=context_token,
                 claims=claims,
+                operation_context_token=operation_context_token,
             )
             sync_payload = _analysis_completed_payload(overview)
             converter_upload_id = str(
@@ -214,6 +217,39 @@ def _student_operation_binding(
     }
 
 
+def _bound_student_upload_id(
+    student_claims: StudentContextClaims,
+    operation_context_token: str | None,
+    *,
+    required_scope: str,
+) -> str:
+    if not operation_context_required():
+        return find_student_upload_id(student_claims)
+    token = str(operation_context_token or "").strip()
+    if not token:
+        raise StudentWorkflowError(401, "Thiếu signed Student operation context")
+    try:
+        claims = verify_conversion_context_token(token)
+    except ConversionContextError as exc:
+        raise StudentWorkflowError(exc.status_code, str(exc)) from exc
+    expected = {
+        "operation_session_id": student_claims.session_id,
+        "conversion_run_id": f"student:{student_claims.session_id}",
+        "user_id": student_claims.user_id,
+        "owner_scope": student_claims.owner_scope,
+        "workspace_id": str(student_claims.workspace_id or ""),
+    }
+    if any(
+        str(claims.get(key) or "") != str(value)
+        for key, value in expected.items()
+    ) or required_scope not in (claims.get("scopes") or []):
+        raise StudentWorkflowError(403, "Student operation context không khớp phiên hỗ trợ")
+    upload_id = str(claims.get("upload_id") or "").strip()
+    if not upload_id:
+        raise StudentWorkflowError(409, "Student operation context thiếu upload binding")
+    return upload_id
+
+
 def _purge_failed_student_analysis(
     *,
     claims: StudentContextClaims,
@@ -241,13 +277,23 @@ def _purge_failed_student_analysis(
     )
 
 
-def get_student_overview(*, session_id: str, context_token: str) -> dict[str, Any]:
+@_purge_request_scoped_node_uploads
+def get_student_overview(
+    *,
+    session_id: str,
+    context_token: str,
+    operation_context_token: str | None = None,
+) -> dict[str, Any]:
     claims = _student_claims(context_token, "explain")
     normalized_session_id = str(session_id or "").strip()
     if claims.session_id != normalized_session_id:
         raise StudentWorkflowError(403, "Student context không thuộc phiên này")
     try:
-        upload_id = find_student_upload_id(claims)
+        upload_id = _bound_student_upload_id(
+            claims,
+            operation_context_token,
+            required_scope="explain",
+        )
     except StudentUploadConflictError as exc:
         raise StudentWorkflowError(409, str(exc)) from exc
     except KeyError as exc:
@@ -256,15 +302,25 @@ def get_student_overview(*, session_id: str, context_token: str) -> dict[str, An
         status_code = 410 if "hết hạn" in str(exc).lower() else 403
         raise StudentWorkflowError(status_code, str(exc)) from exc
 
-    return _build_current_overview(upload_id=upload_id, token=context_token, claims=claims)
+    return _build_current_overview(
+        upload_id=upload_id,
+        token=context_token,
+        claims=claims,
+        operation_context_token=operation_context_token,
+    )
 
 
+@_purge_request_scoped_node_uploads
 def get_student_accounting_map(
-    *, session_id: str, context_token: str
+    *,
+    session_id: str,
+    context_token: str,
+    operation_context_token: str | None = None,
 ) -> dict[str, Any]:
     claims, normalized_session_id, upload_id = _active_student_phase_session(
         session_id=session_id,
         context_token=context_token,
+        operation_context_token=operation_context_token,
         required_scope="accounting_map",
         feature_flag="STUDENT_ACCOUNTING_MAP_ENABLED",
         disabled_message="Student accounting map chưa được bật",
@@ -273,10 +329,17 @@ def get_student_accounting_map(
         upload_id=upload_id,
         token=context_token,
         claims=claims,
+        operation_context_token=operation_context_token,
     )
     try:
-        metadata = _read_metadata(upload_id)
-        table = _read_upload_table(upload_id)
+        metadata = _read_metadata(
+            upload_id,
+            conversion_context_token=operation_context_token,
+        )
+        table = _read_upload_table(
+            upload_id,
+            conversion_context_token=operation_context_token,
+        )
         target_template_id, mapping_source, _, _, defaults, _ = _effective_mapping(
             metadata
         )
@@ -319,12 +382,17 @@ def get_student_accounting_map(
     }
 
 
+@_purge_request_scoped_node_uploads
 def get_student_reconciliation(
-    *, session_id: str, context_token: str
+    *,
+    session_id: str,
+    context_token: str,
+    operation_context_token: str | None = None,
 ) -> dict[str, Any]:
     claims, normalized_session_id, upload_id = _active_student_phase_session(
         session_id=session_id,
         context_token=context_token,
+        operation_context_token=operation_context_token,
         required_scope="reconcile",
         feature_flag="STUDENT_RECONCILIATION_ENABLED",
         disabled_message="Student reconciliation chưa được bật",
@@ -333,9 +401,13 @@ def get_student_reconciliation(
         upload_id=upload_id,
         token=context_token,
         claims=claims,
+        operation_context_token=operation_context_token,
     )
     try:
-        metadata = _read_metadata(upload_id)
+        metadata = _read_metadata(
+            upload_id,
+            conversion_context_token=operation_context_token,
+        )
         target_template_id, _, _, mapping, defaults, formulas = _effective_mapping(
             metadata
         )
@@ -347,6 +419,7 @@ def get_student_reconciliation(
             defaults=defaults,
             formulas=formulas,
             student_context_token=context_token,
+            conversion_context_token=operation_context_token,
             **operation_state,
         )
         report = reconcile_session(
@@ -379,15 +452,18 @@ def get_student_reconciliation(
     return payload
 
 
+@_purge_request_scoped_node_uploads
 def preview_student_anonymization(
     *,
     session_id: str,
     context_token: str,
+    operation_context_token: str | None = None,
     full_document_numbers: bool = False,
 ) -> dict[str, Any]:
     _, normalized_session_id, upload_id = _active_student_phase_session(
         session_id=session_id,
         context_token=context_token,
+        operation_context_token=operation_context_token,
         required_scope="export",
         feature_flag="STUDENT_INTERNSHIP_ENABLED",
         disabled_message="Student internship assistant chưa được bật",
@@ -395,6 +471,7 @@ def preview_student_anonymization(
     exported, confidential_values = _anonymized_student_workbook(
         session_id=normalized_session_id,
         upload_id=upload_id,
+        operation_context_token=operation_context_token,
         full_document_numbers=full_document_numbers,
     )
     return {
@@ -413,15 +490,18 @@ def preview_student_anonymization(
     }
 
 
+@_purge_request_scoped_node_uploads
 def export_student_anonymized_workbook(
     *,
     session_id: str,
     context_token: str,
+    operation_context_token: str | None = None,
     full_document_numbers: bool = False,
 ) -> AnonymizedWorkbook:
     _, normalized_session_id, upload_id = _active_student_phase_session(
         session_id=session_id,
         context_token=context_token,
+        operation_context_token=operation_context_token,
         required_scope="export",
         feature_flag="STUDENT_INTERNSHIP_ENABLED",
         disabled_message="Student internship assistant chưa được bật",
@@ -429,6 +509,7 @@ def export_student_anonymized_workbook(
     exported, _ = _anonymized_student_workbook(
         session_id=normalized_session_id,
         upload_id=upload_id,
+        operation_context_token=operation_context_token,
         full_document_numbers=full_document_numbers,
     )
     _record_activity_best_effort(
@@ -442,23 +523,32 @@ def export_student_anonymized_workbook(
     return exported
 
 
+@_purge_request_scoped_node_uploads
 def build_student_internship_report(
     *,
     session_id: str,
     context_token: str,
+    operation_context_token: str | None = None,
     activity_ids: list[str],
     approved_notes: list[str],
 ) -> str:
     _, normalized_session_id, upload_id = _active_student_phase_session(
         session_id=session_id,
         context_token=context_token,
+        operation_context_token=operation_context_token,
         required_scope="export",
         feature_flag="STUDENT_INTERNSHIP_ENABLED",
         disabled_message="Student internship assistant chưa được bật",
     )
     try:
-        metadata = _read_metadata(upload_id)
-        table = _read_upload_table(upload_id)
+        metadata = _read_metadata(
+            upload_id,
+            conversion_context_token=operation_context_token,
+        )
+        table = _read_upload_table(
+            upload_id,
+            conversion_context_token=operation_context_token,
+        )
         signed_session_metadata = get_verified_activities(
             context_token,
             normalized_session_id,
@@ -489,26 +579,34 @@ def build_student_internship_report(
         raise StudentWorkflowError(400, str(exc)) from exc
 
 
+@_purge_request_scoped_node_uploads
 def ask_student_question(
     *,
     session_id: str,
     context_token: str,
+    operation_context_token: str | None = None,
     question: str,
 ) -> dict[str, Any]:
     claims, normalized_session_id, active_upload_id = _active_question_session(
         session_id=session_id,
         context_token=context_token,
+        operation_context_token=operation_context_token,
     )
 
-    overview = get_student_overview(
-        session_id=normalized_session_id,
-        context_token=context_token,
+    overview = _build_current_overview(
+        upload_id=active_upload_id,
+        token=context_token,
+        claims=claims,
+        operation_context_token=operation_context_token,
     )
     upload_id = str(overview["upload_id"])
     if upload_id != active_upload_id:
         raise StudentWorkflowError(409, "Student upload đã thay đổi trong khi kiểm tra phiên")
     try:
-        table = _read_upload_table(upload_id)
+        table = _read_upload_table(
+            upload_id,
+            conversion_context_token=operation_context_token,
+        )
     except KeyError as exc:
         raise StudentWorkflowError(404, str(exc)) from exc
     except ValueError as exc:
@@ -551,25 +649,33 @@ def ask_student_question(
     return payload
 
 
+@_purge_request_scoped_node_uploads
 def get_student_source_row(
     *,
     session_id: str,
     worksheet_row: int,
     context_token: str,
+    operation_context_token: str | None = None,
 ) -> dict[str, Any]:
     claims, normalized_session_id, active_upload_id = _active_question_session(
         session_id=session_id,
         context_token=context_token,
+        operation_context_token=operation_context_token,
     )
-    overview = get_student_overview(
-        session_id=normalized_session_id,
-        context_token=context_token,
+    overview = _build_current_overview(
+        upload_id=active_upload_id,
+        token=context_token,
+        claims=claims,
+        operation_context_token=operation_context_token,
     )
     upload_id = str(overview["upload_id"])
     if upload_id != active_upload_id:
         raise StudentWorkflowError(409, "Student upload đã thay đổi trong khi kiểm tra phiên")
     try:
-        table = _read_upload_table(upload_id)
+        table = _read_upload_table(
+            upload_id,
+            conversion_context_token=operation_context_token,
+        )
     except KeyError as exc:
         raise StudentWorkflowError(404, str(exc)) from exc
     except ValueError as exc:
@@ -598,6 +704,7 @@ def _active_question_session(
     *,
     session_id: str,
     context_token: str,
+    operation_context_token: str | None = None,
 ) -> tuple[StudentContextClaims, str, str]:
     if not _student_question_enabled():
         raise StudentWorkflowError(404, "Student file Q&A chưa được bật")
@@ -606,7 +713,11 @@ def _active_question_session(
     if claims.session_id != normalized_session_id:
         raise StudentWorkflowError(403, "Student context không thuộc phiên này")
     try:
-        upload_id = find_student_upload_id(claims)
+        upload_id = _bound_student_upload_id(
+            claims,
+            operation_context_token,
+            required_scope="ask",
+        )
     except StudentUploadConflictError as exc:
         raise StudentWorkflowError(409, str(exc)) from exc
     except KeyError as exc:
@@ -625,6 +736,7 @@ def _active_student_phase_session(
     *,
     session_id: str,
     context_token: str,
+    operation_context_token: str | None = None,
     required_scope: str,
     feature_flag: str,
     disabled_message: str,
@@ -636,7 +748,11 @@ def _active_student_phase_session(
     if claims.session_id != normalized_session_id:
         raise StudentWorkflowError(403, "Student context không thuộc phiên này")
     try:
-        upload_id = find_student_upload_id(claims)
+        upload_id = _bound_student_upload_id(
+            claims,
+            operation_context_token,
+            required_scope=required_scope,
+        )
     except StudentUploadConflictError as exc:
         raise StudentWorkflowError(409, str(exc)) from exc
     except KeyError as exc:
@@ -693,15 +809,22 @@ def _anonymized_student_workbook(
     *,
     session_id: str,
     upload_id: str,
+    operation_context_token: str | None,
     full_document_numbers: bool,
 ) -> tuple[AnonymizedWorkbook, dict[str, list[Any]]]:
     try:
-        metadata = _read_metadata(upload_id)
+        metadata = _read_metadata(
+            upload_id,
+            conversion_context_token=operation_context_token,
+        )
         input_path = Path(str(metadata.get("input_path") or ""))
         if not input_path.is_file():
             raise KeyError("Không tìm thấy workbook nguồn của phiên học")
         content = input_path.read_bytes()
-        table = _read_upload_table(upload_id)
+        table = _read_upload_table(
+            upload_id,
+            conversion_context_token=operation_context_token,
+        )
         sheet_name, header_row_index, headers = _analyzed_sheet_context(metadata)
         confidential_values = _student_confidential_values(table)
         exported = anonymize_workbook_bytes(
@@ -858,20 +981,31 @@ def _replacement_count(
 
 
 def _build_current_overview(
-    *, upload_id: str, token: str, claims: StudentContextClaims
+    *,
+    upload_id: str,
+    token: str,
+    claims: StudentContextClaims,
+    operation_context_token: str | None = None,
 ) -> dict[str, Any]:
-    try:
-        assert_upload_owner(upload_id, claims)
-    except KeyError as exc:
-        raise StudentWorkflowError(404, str(exc)) from exc
-    except ValueError as exc:
-        message = str(exc)
-        status_code = 410 if "hết hạn" in message.lower() else 403
-        raise StudentWorkflowError(status_code, message) from exc
+    if not node_operation_store_enabled():
+        try:
+            assert_upload_owner(upload_id, claims)
+        except KeyError as exc:
+            raise StudentWorkflowError(404, str(exc)) from exc
+        except ValueError as exc:
+            message = str(exc)
+            status_code = 410 if "hết hạn" in message.lower() else 403
+            raise StudentWorkflowError(status_code, message) from exc
 
     try:
-        metadata = _read_metadata(upload_id)
-        table = _read_upload_table(upload_id)
+        metadata = _read_metadata(
+            upload_id,
+            conversion_context_token=operation_context_token,
+        )
+        table = _read_upload_table(
+            upload_id,
+            conversion_context_token=operation_context_token,
+        )
         workbook_structure, structure_issues = _student_workbook_structure(metadata)
         (
             target_template_id,
@@ -890,6 +1024,7 @@ def _build_current_overview(
             defaults=defaults,
             formulas=formulas,
             student_context_token=token,
+            conversion_context_token=operation_context_token,
             **operation_state,
         )
         readiness = readiness_mapping(
@@ -899,6 +1034,7 @@ def _build_current_overview(
             defaults=defaults,
             formulas=formulas,
             student_context_token=token,
+            conversion_context_token=operation_context_token,
             **operation_state,
         )
         readiness = _merge_student_structure_warnings(readiness, structure_issues)
@@ -1219,6 +1355,8 @@ def _overview_path(upload_id: str) -> Path:
 
 
 def _write_overview_cache(upload_id: str, payload: dict[str, Any]) -> None:
+    if node_operation_store_enabled():
+        return
     path = _overview_path(upload_id)
     temporary = path.with_suffix(".tmp")
     safe_payload = _safe_overview_cache(payload)

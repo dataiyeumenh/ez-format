@@ -140,8 +140,12 @@ CONVERTER_INTERNAL_URL=https://<converter-service>.onrender.com
 CONVERTER_TIMEOUT_MS=60000
 CONVERTER_PUBLIC_PROXY_ENABLED=false
 CONVERTER_GATEWAY_USAGE_READY=false
+CONVERTER_INTERNAL_WRITE_RATE_LIMIT=120
+CONVERTER_INTERNAL_RATE_LIMIT_MAX_KEYS=10000
+CONVERTER_INTERNAL_RATE_LIMIT_WINDOW_MS=60000
 CONVERTER_ARTIFACT_STORAGE_DRIVER=mongodb
 CONVERTER_MONGODB_GRIDFS_BUCKET=conversion_artifacts
+CONVERTER_ARTIFACT_MAX_BYTES=67108864
 MASTER_DATA_WORKSPACES_ENABLED=false
 MISA_IMPORT_REPAIR_ENABLED=false
 STUDENT_ASSISTANT_ENABLED=false
@@ -197,8 +201,12 @@ CONVERSION_CONTEXT_SECRET=<same-private-value-as-node>
 CONVERTER_SERVICE_TOKEN=<same-private-value-as-node>
 NODE_INTERNAL_API_URL=https://<node-service>.onrender.com/api/internal
 OPERATION_STORE_PROVIDER=node
+OPERATION_STORE_PROTOCOL=auto
+STUDENT_METADATA_V1_ROLLOUT_MODE=complete
+STUDENT_METADATA_V1_QUIESCE_ACKNOWLEDGED=true
 OPERATION_STORE_ALLOW_LOCAL=false
 ALLOW_UNAUTHENTICATED_LOCAL_OPERATIONS=false
+CONVERTER_ARTIFACT_MAX_BYTES=67108864
 CORS_ORIGINS=https://<vercel-domain>
 AI_PROVIDER=disabled
 AI_REQUIRED=false
@@ -423,8 +431,12 @@ Set this exact Node group:
 ```env
 CONVERTER_PUBLIC_PROXY_ENABLED=true
 CONVERTER_GATEWAY_USAGE_READY=true
+CONVERTER_INTERNAL_WRITE_RATE_LIMIT=120
+CONVERTER_INTERNAL_RATE_LIMIT_MAX_KEYS=10000
+CONVERTER_INTERNAL_RATE_LIMIT_WINDOW_MS=60000
 CONVERTER_ARTIFACT_STORAGE_DRIVER=mongodb
 CONVERTER_MONGODB_GRIDFS_BUCKET=conversion_artifacts
+CONVERTER_ARTIFACT_MAX_BYTES=67108864
 ```
 
 Keep these production boundaries:
@@ -443,6 +455,46 @@ secret. The current backend
 contract uses `conversion_artifacts`, matching `backend/.env.example`.
 `CONVERTER_OBJECT_STORAGE_REQUIRED` is not consumed by the current code; do not
 add it. No S3 or other object-storage variable is part of this stage.
+
+Keep `CONVERTER_ARTIFACT_MAX_BYTES` identical on Node and FastAPI. Missing,
+zero, scientific notation, hexadecimal, signs, whitespace, separators, and
+other non-decimal or unsafe-integer values resolve to 64 MiB; larger valid safe
+decimal values cap at 512 MiB. Node authenticates and applies the bounded keyed write limiter
+before selecting the raw-v2 or legacy JSON parser, preventing
+unauthenticated request bodies from consuming artifact-sized memory. During a
+mixed-version rolling deploy, keep converter `OPERATION_STORE_PROTOCOL=auto`;
+fallback to `legacy-json-v1` occurs only for `404`/`405`. Pin `raw-v2` after all
+Node replicas have the new internal routes.
+
+Each legacy JSON state request carries exactly one representation. New Node
+advertises canonical base64 and verifies the exact candidate SHA-256; old Node
+fallback sends only the canonical state object. FastAPI pre-serializes the
+complete old-protocol body and fails with
+`OPERATION_PROTOCOL_SIZE_MISMATCH` above 50 MiB, before PUT. This includes
+base64 expansion for legacy artifact uploads. Do not retry an oversized legacy
+request until raw-v2 Node is available. New Node's authenticated legacy parser
+budget is bounded to one base64 artifact plus 64 KiB metadata overhead, never
+the former duplicated object-plus-base64 payload.
+
+Before the first distributed Student rollout, quiesce new
+`/api/v1/student/sessions/analyze` admission at the gateway. Keep existing
+session routes available. Set `STUDENT_METADATA_V1_ROLLOUT_MODE=drain` and
+`STUDENT_METADATA_V1_QUIESCE_ACKNOWLEDGED=true`; converter startup then allows
+resume traffic but rejects new analyses. Drain each legacy replica without
+discarding its local operation directory. A resume on the owning replica
+CAS-migrates `table.json`; sessions with an owner-bound GridFS `upload` recover
+and CAS-migrate on any replica. Verify the persisted Node state contains
+`table`, then remove the local copy.
+
+Do not replace a replica holding the only legacy `table.json`. If neither that
+file nor an owner-bound GridFS upload exists, stop the release and recover from
+an operator backup or retained replica; never ask the live user to re-upload.
+The converter has no unbound session-list API, so the release owner must use
+the deployment session inventory to prove zero metadata-only
+`student_metadata_v1` sessions. Record that evidence, set
+`STUDENT_METADATA_V1_ROLLOUT_MODE=complete`, keep the quiesce acknowledgement
+true for this compatibility release, deploy, then reopen new Student analyses.
+Missing/invalid mode or acknowledgement fails production Student startup.
 
 Required gates:
 
