@@ -1,7 +1,7 @@
 {
   "schema_version": "1.0",
   "subject": {
-    "revision": "task11-code-test-gate-tree-sha256:e9882edd90044b643e5e5a0d75dd646017fa7be522563292d6659142f09d8578",
+    "revision": "task11-code-test-gate-tree-sha256:c88edc887bfa8a07251237a7a6447de851314594a021444a2da7b72f5f18bf88",
     "scope": "Task 11 merged main-first integration release QA; code matrix, release gate, conflict and storage scans",
     "exclusions": [
       "No live replica MongoDB execution",
@@ -134,8 +134,8 @@
       "evidence": [
         {
           "path": "docs/qa/task-11-command-results.json",
-          "sha256": "9caf3c8a27539435f74ecdd5b669a6bac0ee857a985931048bb4836d96886d9c",
-          "size": 3422
+          "sha256": "1b1567308f90238918b397a29da1e15f4ab1fc5ba14fdeae5de77af40eb51f7d",
+          "size": 3351
         }
       ]
     },
@@ -152,8 +152,8 @@
       "evidence": [
         {
           "path": "docs/qa/task-11-command-results.json",
-          "sha256": "9caf3c8a27539435f74ecdd5b669a6bac0ee857a985931048bb4836d96886d9c",
-          "size": 3422
+          "sha256": "1b1567308f90238918b397a29da1e15f4ab1fc5ba14fdeae5de77af40eb51f7d",
+          "size": 3351
         }
       ]
     },
@@ -169,8 +169,8 @@
       "evidence": [
         {
           "path": "docs/qa/task-11-command-results.json",
-          "sha256": "9caf3c8a27539435f74ecdd5b669a6bac0ee857a985931048bb4836d96886d9c",
-          "size": 3422
+          "sha256": "1b1567308f90238918b397a29da1e15f4ab1fc5ba14fdeae5de77af40eb51f7d",
+          "size": 3351
         }
       ]
     },
@@ -187,8 +187,8 @@
       "evidence": [
         {
           "path": "docs/qa/task-11-command-results.json",
-          "sha256": "9caf3c8a27539435f74ecdd5b669a6bac0ee857a985931048bb4836d96886d9c",
-          "size": 3422
+          "sha256": "1b1567308f90238918b397a29da1e15f4ab1fc5ba14fdeae5de77af40eb51f7d",
+          "size": 3351
         }
       ]
     }
@@ -199,6 +199,6 @@
   "verdict": "INCOMPLETE",
   "verdict_reasons": [
     "Release prerequisites are absent: replica MongoDB, real GridFS, and live gateway evidence.",
-    "Local code matrix passed, but skipped external gates cannot be converted to PASS."
+    "The first refreshed local matrix stopped at the expected stale evidence-binding guard; rerun is pending."
   ]
 }

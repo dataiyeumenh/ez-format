@@ -1,7 +1,7 @@
 {
   "schema_version": "1",
   "scope": "Task 11 reproducible command/result manifest",
-  "tested_tree_binding": "sha256-path-v1 e9882edd90044b643e5e5a0d75dd646017fa7be522563292d6659142f09d8578; canonical LF text hashing; no commit SHA asserted.",
+  "tested_tree_binding": "sha256-path-v1 c88edc887bfa8a07251237a7a6447de851314594a021444a2da7b72f5f18bf88; canonical LF text hashing; no commit SHA asserted.",
   "commands": [
     {
       "id": "release_preflight",
@@ -18,9 +18,9 @@
     {
       "id": "local_matrix",
       "command": "npm run qa:main-integration:local-incomplete",
-      "exit_code": 0,
-      "status": "PASS",
-      "result": "Backend 407 total / 395 passed / 0 failed / 12 skipped; converter 550 passed / 2 skipped / 0 failed / 1 warning; frontend 109 passed; lint/build exit 0; Playwright gateway UI 2 skipped, API 1 skipped, MISA 8 passed; qa:fast 9 steps passed; scans clean."
+      "exit_code": 1,
+      "status": "FAIL",
+      "result": "Refresh run reached full backend tests: 460 passed, 12 skipped, 2 stale Task 11 evidence-binding failures; evidence digest regeneration required before the full matrix can continue."
     },
     {
       "id": "focused_task11_contracts",
