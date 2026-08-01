@@ -198,7 +198,7 @@ function repairState(fixture, stage) {
   }));
   return {
     repairId: `repair-${fixture.id}`,
-    status: resolved ? (stage === "resolved_unknown" ? "retry_blocked" : "retry_ready") : "needs_match_review",
+    status: resolved ? (stage === "resolved_unknown" ? "retry_blocked" : "ready_for_repair") : "needs_match_review",
     version: stage === "schema" ? 2 : 3,
     issues,
     documentGroupStatuses: groupStatuses,
@@ -216,7 +216,12 @@ function repairState(fixture, stage) {
         ? [{ severity: "warning", code: "review_workbook", message: "Rà soát hidden row và formula", field: "Mã hàng", rowNumber: 2 }]
         : [],
     },
-    retryGate: { enabled: resolved && !ambiguous && !unknown },
+    retryGate: {
+      allowed: resolved && !ambiguous && !unknown,
+      reason: unknown
+        ? "Còn document group chưa xác nhận trạng thái import"
+        : "Sẵn sàng tạo retry export",
+    },
   };
 }
 
@@ -229,6 +234,10 @@ function installApiRoutes(page, actor, options = {}) {
     mapping: null,
     conversionRun: null,
     conversionRunSequence: 0,
+    repairStatusOverride: undefined,
+    repairGateOverride: undefined,
+    repairVersionOverride: undefined,
+    readinessOverride: undefined,
   };
   page.on("request", (request) => {
     if (request.url().includes("/api/")) state.requests.push(request);
@@ -345,14 +354,16 @@ function installApiRoutes(page, actor, options = {}) {
       if (options.expireRead) return json(route, { error: "Phiên sửa lỗi đã hết hạn. Tải lại file lỗi MISA để bắt đầu một phiên mới." }, 410);
       if (request.method() === "GET" && repairPath === "") {
         const next = repairState(fixture, state.stage);
+        if (state.repairStatusOverride !== undefined) next.status = state.repairStatusOverride;
+        if (state.repairVersionOverride !== undefined) next.version = state.repairVersionOverride;
         return json(route, {
           session: next,
           issues: next.issues,
           documentGroups: next.documentGroupStatuses,
           nextCursor: null,
           nextGroupCursor: null,
-          readiness: next.readiness,
-          retryGate: next.retryGate,
+          readiness: state.readinessOverride || next.readiness,
+          retryGate: state.repairGateOverride || next.retryGate,
         });
       }
       if (repairPath === "/schema" && request.method() === "POST") {
@@ -583,6 +594,107 @@ test("production app completes purchase, sales, multiline, and warning repair jo
   }
 });
 
+test("ready repair exports, then an unknown backend status resets step 5 to step 4", async ({ browser }) => {
+  const fixture = fixtures.find((item) => item.flow === "unique");
+  const context = await browser.newContext();
+  await seedAuth(context, appUser);
+  await context.addInitScript(({ userId, repairId }) => {
+    localStorage.setItem(
+      `ezformat:misa-repair:v1:${userId}`,
+      JSON.stringify({ repairId }),
+    );
+  }, { userId: appUser.id, repairId: `repair-${fixture.id}` });
+  const page = await context.newPage();
+  const state = installApiRoutes(page, appUser);
+  state.stage = "resolved";
+
+  await page.goto(`${appOrigin}/convert`, { waitUntil: "domcontentloaded" });
+  const step4 = page.getByRole("button", { name: /4 Sửa và kiểm tra lại/ });
+  const step5 = page.getByRole("button", { name: /5 Xuất lại chứng từ thất bại/ });
+  await expect(step5).toHaveAttribute("aria-current", "step");
+  await expect(step5).toBeEnabled();
+  await expect(page.getByRole("button", { name: "Tạo file xuất lại" })).toBeEnabled();
+  await page.getByRole("button", { name: "Tạo file xuất lại" }).click();
+  await expect.poll(() => state.requests.some((request) =>
+    request.method() === "POST" && request.url().endsWith("/retry-batches"),
+  )).toBe(true);
+
+  state.repairStatusOverride = "future_backend_status";
+  await page.getByRole("button", { name: "Tiếp tục phiên sửa lỗi" }).click();
+  await expect(step4).toHaveAttribute("aria-current", "step");
+  await expect(step5).toBeDisabled();
+  await expect(page.getByText(/Rà từng lỗi, xác nhận chứng từ/)).toBeVisible();
+  await context.close();
+});
+
+test("auto-resume opens retry_blocked on step 5 and honors the backend denial", async ({ browser }) => {
+  const fixture = fixtures.find((item) => item.flow === "unique");
+  const context = await browser.newContext();
+  await seedAuth(context, appUser);
+  await context.addInitScript(({ userId, repairId }) => {
+    localStorage.setItem(
+      `ezformat:misa-repair:v1:${userId}`,
+      JSON.stringify({ repairId }),
+    );
+  }, { userId: appUser.id, repairId: `repair-${fixture.id}` });
+  const page = await context.newPage();
+  const state = installApiRoutes(page, appUser);
+  state.stage = "resolved";
+  state.repairStatusOverride = "retry_blocked";
+  state.repairGateOverride = {
+    allowed: false,
+    reason: "Backend từ chối phiên stale",
+  };
+
+  await page.goto(`${appOrigin}/convert`, { waitUntil: "domcontentloaded" });
+  const step5 = page.getByRole("button", { name: /5 Xuất lại chứng từ thất bại/ });
+  await expect(step5).toHaveAttribute("aria-current", "step");
+  await expect(page.getByText("Backend từ chối phiên stale", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Tạo file xuất lại" })).toBeDisabled();
+  expect(state.requests.some((request) =>
+    request.method() === "POST" && request.url().endsWith("/retry-batches"),
+  )).toBe(false);
+  await context.close();
+});
+
+test("new warning readiness resets stale acknowledgement before export", async ({ browser }) => {
+  const fixture = fixtures.find((item) => item.flow === "warnings");
+  const context = await browser.newContext();
+  await seedAuth(context, appUser);
+  await context.addInitScript(({ userId, repairId }) => {
+    localStorage.setItem(
+      `ezformat:misa-repair:v1:${userId}`,
+      JSON.stringify({ repairId }),
+    );
+  }, { userId: appUser.id, repairId: `repair-${fixture.id}` });
+  const page = await context.newPage();
+  const state = installApiRoutes(page, appUser);
+  state.stage = "resolved";
+
+  await page.goto(`${appOrigin}/convert`, { waitUntil: "domcontentloaded" });
+  const acknowledgement = page.getByLabel(/Tôi đã rà soát 1 cảnh báo/);
+  const createButton = page.getByRole("button", { name: "Tạo file xuất lại" });
+  await acknowledgement.check();
+  await expect(createButton).toBeEnabled();
+
+  state.repairVersionOverride = 4;
+  state.readinessOverride = {
+    version: 4,
+    hash: "b".repeat(64),
+    summary: { fatal: 0, blocker: 0, warning: 1, info: 0 },
+    issues: [{ severity: "warning", code: "new_warning", message: "Cảnh báo mới" }],
+  };
+  await page.getByRole("button", { name: "Tiếp tục phiên sửa lỗi" }).click();
+
+  await expect(acknowledgement).not.toBeChecked();
+  await expect(createButton).toBeDisabled();
+  await expect(page.getByText("Hãy xác nhận cảnh báo trước khi xuất lại.", { exact: true })).toBeVisible();
+  expect(state.requests.some((request) =>
+    request.method() === "POST" && request.url().endsWith("/retry-batches"),
+  )).toBe(false);
+  await context.close();
+});
+
 test("ambiguous matching blocks confirmation and retry", async ({ browser }) => {
   const fixture = fixtures.find((item) => item.flow === "ambiguous");
   const context = await browser.newContext();
@@ -614,7 +726,7 @@ test("unknown import status alone blocks retry after matching and correction", a
   await issueTable.getByLabel(/Giá trị sửa cho dòng/).fill("HH-FIXED");
   await issueTable.getByRole("button", { name: "Áp dụng cách sửa" }).click();
   await page.getByRole("button", { name: /5 Xuất lại chứng từ thất bại/ }).click();
-  await expect(page.getByText("Còn chứng từ chưa xác nhận đã import hay thất bại.", { exact: true })).toBeVisible();
+  await expect(page.getByText("Còn document group chưa xác nhận trạng thái import", { exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "Tạo file xuất lại" })).toBeDisabled();
   expect(state.requests.some((request) => request.method() === "POST" && request.url().includes("/retry-batches"))).toBe(false);
   await context.close();

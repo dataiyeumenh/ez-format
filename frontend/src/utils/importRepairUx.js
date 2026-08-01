@@ -1,10 +1,30 @@
 export const IMPORT_REPAIR_ERROR_STATUS = new Set([409, 410, 422]);
 
+export const IMPORT_REPAIR_STATUS_STEP = Object.freeze({
+  uploaded: 0,
+  needs_schema_mapping: 1,
+  needs_match_review: 2,
+  ready_for_repair: 4,
+  retry_blocked: 4,
+  retry_ready: 4,
+  retry_exported: 4,
+  closed: 4,
+  failed: 3,
+});
+
+export function getImportRepairStep(status) {
+  return Object.hasOwn(IMPORT_REPAIR_STATUS_STEP, status)
+    ? IMPORT_REPAIR_STATUS_STEP[status]
+    : 3;
+}
+
 export function getRepairRefreshId(resumableRepairId, repair) {
   return resumableRepairId || repair?.repairId || repair?.id || repair?._id || "";
 }
 
 export function getRetryGate({
+  status,
+  backendGate,
   summary = {},
   readiness = {},
   warningsAcknowledged = false,
@@ -12,6 +32,13 @@ export function getRetryGate({
   readinessVersion = null,
   sessionVersion = null,
 }) {
+  const backendReason = String(backendGate?.reason || "").trim();
+  if (backendGate?.allowed === false) {
+    return {
+      enabled: false,
+      reason: backendReason || "Backend chưa cho phép xuất lại phiên sửa lỗi này.",
+    };
+  }
   if (Number(summary.unknownDocumentGroups || 0) > 0) {
     return { enabled: false, reason: "Còn chứng từ chưa xác nhận đã import hay thất bại." };
   }
@@ -39,6 +66,14 @@ export function getRetryGate({
   }
   if (Number(readinessVersion) !== Number(sessionVersion)) {
     return { enabled: false, reason: "Phiên kiểm tra readiness không còn khớp phiên sửa lỗi." };
+  }
+  if (status !== "ready_for_repair") {
+    return {
+      enabled: false,
+      reason: status === "retry_blocked" && backendReason
+        ? backendReason
+        : "Trạng thái phiên sửa lỗi chưa cho phép xuất lại.",
+    };
   }
   return { enabled: true, reason: "Sẵn sàng xuất lại các chứng từ thất bại." };
 }

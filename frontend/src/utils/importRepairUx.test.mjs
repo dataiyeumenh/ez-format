@@ -3,10 +3,67 @@ import test from "node:test";
 
 import { MISA_IMPORT_GUIDE } from "../content/misaImportGuide.js";
 import {
+  getImportRepairStep,
   getRepairRefreshId,
   getRetryGate,
   mergeImportRepairWorkspacePage,
 } from "./importRepairUx.js";
+
+const repairStatusStepCases = [
+  ["uploaded", 0],
+  ["needs_schema_mapping", 1],
+  ["needs_match_review", 2],
+  ["ready_for_repair", 4],
+  ["retry_blocked", 4],
+  ["retry_ready", 4],
+  ["retry_exported", 4],
+  ["closed", 4],
+  ["failed", 3],
+  ["unknown", 3],
+  ["future_backend_status", 3],
+  [null, 3],
+  [undefined, 3],
+];
+
+for (const [status, expectedStep] of repairStatusStepCases) {
+  test(`repair status ${status ?? "missing"} maps to step ${expectedStep + 1}`, () => {
+    assert.equal(getImportRepairStep(status), expectedStep);
+  });
+}
+
+const eligibleRetryInput = {
+  summary: {
+    unknownDocumentGroups: 0,
+    failedDocumentGroups: 1,
+    unresolvedIssues: 0,
+    unmatchedIssues: 0,
+    ambiguousIssues: 0,
+  },
+  readiness: { fatal: 0, blocker: 0, warning: 0 },
+  readinessHash: "a".repeat(64),
+  readinessVersion: 8,
+  sessionVersion: 8,
+};
+
+for (const status of ["failed", "future_backend_status", undefined]) {
+  test(`repair status ${status ?? "missing"} fails the retry gate closed`, () => {
+    const gate = getRetryGate({ ...eligibleRetryInput, status });
+
+    assert.equal(gate.enabled, false);
+    assert.match(gate.reason, /trạng thái/i);
+  });
+}
+
+test("backend retry denial overrides otherwise eligible ready state", () => {
+  const gate = getRetryGate({
+    ...eligibleRetryInput,
+    status: "ready_for_repair",
+    backendGate: { allowed: false, reason: "Backend từ chối phiên stale" },
+  });
+
+  assert.equal(gate.enabled, false);
+  assert.equal(gate.reason, "Backend từ chối phiên stale");
+});
 
 test("unknown document status disables retry", () => {
   const gate = getRetryGate({
@@ -19,8 +76,33 @@ test("unknown document status disables retry", () => {
   assert.match(gate.reason, /chưa xác nhận/i);
 });
 
+test("retry_blocked status disables retry and exposes the backend reason", () => {
+  const gate = getRetryGate({
+    status: "retry_blocked",
+    backendGate: {
+      allowed: false,
+      reason: "Readiness còn deterministic blocker",
+    },
+    summary: {
+      unknownDocumentGroups: 0,
+      failedDocumentGroups: 1,
+      unresolvedIssues: 0,
+      unmatchedIssues: 0,
+      ambiguousIssues: 0,
+    },
+    readiness: { fatal: 0, blocker: 0, warning: 0 },
+    readinessHash: "a".repeat(64),
+    readinessVersion: 8,
+    sessionVersion: 8,
+  });
+
+  assert.equal(gate.enabled, false);
+  assert.equal(gate.reason, "Readiness còn deterministic blocker");
+});
+
 test("mixed imported and failed document groups are complete for retry", () => {
   const gate = getRetryGate({
+    status: "ready_for_repair",
     summary: {
       unknownDocumentGroups: 0,
       failedDocumentGroups: 1,

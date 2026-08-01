@@ -1,6 +1,10 @@
 import { AlertTriangle, FileWarning, HelpCircle, Loader2, RefreshCw, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { formatImportRepairError, getRepairRefreshId } from "../../utils/importRepairUx.js";
+import {
+  formatImportRepairError,
+  getImportRepairStep,
+  getRepairRefreshId,
+} from "../../utils/importRepairUx.js";
 import ImportIssueWorkspace from "./ImportIssueWorkspace.jsx";
 import ImportResultUploadStep from "./ImportResultUploadStep.jsx";
 import ImportSchemaMappingStep from "./ImportSchemaMappingStep.jsx";
@@ -25,10 +29,8 @@ const repairExpiryLabel = (expiresAt) => {
 };
 const repairStepState = (repair, inspection) => {
   if (!repair && !inspection) return 0;
-  if (repair?.status === "needs_schema_mapping" || inspection) return 1;
-  if (repair?.status === "needs_match_review") return 2;
-  if (repair?.status === "ready_for_retry" || repair?.status === "repairing") return 3;
-  return 4;
+  if (inspection) return 1;
+  return getImportRepairStep(repair?.status);
 };
 
 const MisaImportRepairPanel = ({ capability, userId, runId, hasManifest, repairApi }) => {
@@ -96,7 +98,11 @@ const MisaImportRepairPanel = ({ capability, userId, runId, hasManifest, repairA
     setResumableRepairId(saved.repairId);
     setBusy("resume");
     api.getImportRepair(saved.repairId).then((next) => {
-      setRepair(next); setOpen(true); setNotice("Đã khôi phục phiên sửa lỗi import trước đó.");
+      setRepair(next);
+      setInspection(null);
+      setActiveStep(repairStepState(next, null));
+      setOpen(true);
+      setNotice("Đã khôi phục phiên sửa lỗi import trước đó.");
     }).catch(recoverFailure).finally(() => setBusy(""));
   }, [api, enabled, recoverFailure, runId, userId]);
 
@@ -107,7 +113,7 @@ const MisaImportRepairPanel = ({ capability, userId, runId, hasManifest, repairA
       const next = await api.getImportRepair(id);
       setRepair(next);
       setInspection(null);
-      setActiveStep(Math.max(activeStep, repairStepState(next, null)));
+      setActiveStep(repairStepState(next, null));
     } catch (requestError) { recoverFailure(requestError); } finally { setBusy(""); }
   };
 
@@ -210,7 +216,7 @@ const MisaImportRepairPanel = ({ capability, userId, runId, hasManifest, repairA
     </section>}
     {open && <section className="mt-5 rounded-2xl border border-slate-200 bg-white shadow-card" aria-labelledby="repair-wizard-title">
       <header className="flex items-start justify-between gap-4 border-b border-slate-100 p-5 sm:p-6"><div><p className="text-xs font-bold uppercase tracking-[0.16em] text-primary-700">Sửa lỗi import MISA</p><h2 id="repair-wizard-title" className="mt-1 text-xl font-black text-slate-950">Chỉ xuất lại chứng từ đã xác nhận</h2></div><button type="button" className="btn-secondary min-h-11 min-w-11 px-3" onClick={() => setOpen(false)} aria-label="Đóng sửa lỗi import"><X size={18} /></button></header>
-      <div className="border-b border-slate-100 px-5 py-4 sm:px-6"><ol className="grid gap-2 sm:grid-cols-5" aria-label="Tiến trình sửa lỗi import">{STEPS.map((step, index) => <li key={step}><button type="button" onClick={() => setActiveStep(index)} disabled={index > Math.max(stepState, activeStep)} aria-current={activeStep === index ? "step" : undefined} className={`flex min-h-11 w-full items-center gap-2 rounded-xl px-3 text-left text-xs font-bold ${activeStep === index ? "bg-primary-600 text-white" : index <= stepState ? "bg-primary-50 text-primary-800" : "bg-slate-100 text-slate-500"}`}><span>{index + 1}</span><span>{step}</span></button></li>)}</ol></div>
+      <div className="border-b border-slate-100 px-5 py-4 sm:px-6"><ol className="grid gap-2 sm:grid-cols-5" aria-label="Tiến trình sửa lỗi import">{STEPS.map((step, index) => <li key={step}><button type="button" onClick={() => setActiveStep(index)} disabled={index > stepState} aria-current={activeStep === index ? "step" : undefined} className={`flex min-h-11 w-full items-center gap-2 rounded-xl px-3 text-left text-xs font-bold ${activeStep === index ? "bg-primary-600 text-white" : index <= stepState ? "bg-primary-50 text-primary-800" : "bg-slate-100 text-slate-500"}`}><span>{index + 1}</span><span>{step}</span></button></li>)}</ol></div>
       <div className="p-5 sm:p-6"><div className="sr-only" aria-live="polite">{notice || error}</div>{repair?.expiresAt && <p className="mb-4 rounded-lg bg-slate-50 px-3 py-2 text-xs font-semibold text-slate-600">Phiên khả dụng đến {repairExpiryLabel(repair.expiresAt)}.</p>}{recovery === "stale" && <div className="mb-4 rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900"><p className="font-bold">Phiên sửa lỗi đã thay đổi ở tab khác</p><p className="mt-1">Tải lại phiên trước khi tiếp tục để dùng version mới nhất.</p><button type="button" className="btn-secondary mt-3 min-h-11" onClick={() => refresh(getRepairRefreshId(resumableRepairId, repair))} disabled={busy === "refresh"}><RefreshCw size={16} />Tải lại phiên</button></div>}{recovery === "offline" && <div className="mb-4 rounded-xl border border-cyan-200 bg-cyan-50 p-4 text-sm text-cyan-950"><p className="font-bold">Không thể kết nối Converter</p><p className="mt-1">Phiên đã lưu vẫn còn nguyên. Kết nối lại dịch vụ rồi thử lại.</p><button type="button" className="btn-secondary mt-3 min-h-11" onClick={() => refresh(getRepairRefreshId(resumableRepairId, repair))} disabled={busy === "refresh"}><RefreshCw size={16} />Kết nối lại dịch vụ</button></div>}{error && !recovery && <div role="alert" className="mb-4 flex gap-3 rounded-xl border border-rose-200 bg-rose-50 p-4 text-sm text-rose-800"><AlertTriangle size={18} className="shrink-0" />{error}</div>}{notice && <div className="mb-4 rounded-xl border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-800">{notice}</div>}{isExpired ? <div className="rounded-xl border border-amber-200 bg-amber-50 p-5"><p className="font-bold text-amber-900">Phiên sửa lỗi đã hết hạn</p><p className="mt-1 text-sm text-amber-800">Tải lại file lỗi MISA để bắt đầu một phiên mới.</p></div> : <>{activeStep === 0 && <ImportResultUploadStep runId={runId} disabled={!hasManifest} loading={busy === "upload"} onSubmit={upload} />}{activeStep === 1 && <ImportSchemaMappingStep inspection={inspection || repair} loading={busy === "schema"} onSubmit={submitSchema} />}{activeStep === 2 && <ImportIssueWorkspace repair={repair} busyId={busy} onConfirmMatch={confirmMatch} onSetStatus={setStatus} onResolve={resolveIssue} />}{activeStep === 3 && <div className="space-y-4"><p className="rounded-xl border border-cyan-100 bg-cyan-50 p-4 text-sm leading-6 text-cyan-950">Rà từng lỗi, xác nhận chứng từ, rồi chọn cách sửa trong bảng. Khi mọi dòng đã resolved, sang bước xuất lại.</p><button type="button" className="btn-secondary min-h-11" onClick={() => { setActiveStep(2); refresh(); }} disabled={busy === "refresh"}>{busy === "refresh" ? <Loader2 size={17} className="animate-spin" /> : <RefreshCw size={17} />}Rà lại trạng thái</button></div>}{activeStep === 4 && <RetryBatchReview repair={repair} busy={busy === "retry" || busy === "download"} onCreate={createBatch} onDownload={downloadBatch} />}</>}</div>
     </section>}
     <MisaNewUserGuide open={guideOpen} onClose={() => setGuideOpen(false)} userId={userId} />
