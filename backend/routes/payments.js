@@ -1,6 +1,7 @@
 const express = require("express");
 const {
   createPayment,
+  previewCoupon,
   getPayment,
   handlePayOSWebhook,
   syncPayment,
@@ -14,8 +15,9 @@ router.use(requireDb);
 
 router.post("/payos-webhook", handlePayOSWebhook);
 
+router.post("/preview-coupon", protect, previewCoupon);
 router.post("/create", protect, createPayment);
-router.post("/:orderCode/sync", syncPayment);
+router.post("/:orderCode/sync", protect, syncPayment);
 router.get("/:orderCode", protect, getPayment);
 
 module.exports = router;

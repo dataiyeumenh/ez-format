@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Download, Loader2, MoreVertical, RefreshCw } from "lucide-react";
+import { Download, Loader2, RefreshCw } from "lucide-react";
 import {
   BarChart,
   Bar,
@@ -11,6 +11,7 @@ import {
 } from "recharts";
 import AdminLayout from "../../components/admin/AdminLayout";
 import api from "../../services/api";
+import { formatRevenueDate } from "../../utils/revenue";
 
 const rangeOptions = [
   { label: "Hôm nay", value: "today" },
@@ -48,19 +49,6 @@ function formatVnd(amount = 0) {
     currency: "VND",
     maximumFractionDigits: 0,
   }).format(amount);
-}
-
-function formatDateTime(dateValue) {
-  if (!dateValue) return "—";
-  const date = new Date(dateValue);
-  if (Number.isNaN(date.getTime())) return "—";
-  return new Intl.DateTimeFormat("vi-VN", {
-    day: "2-digit",
-    month: "2-digit",
-    year: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-  }).format(date);
 }
 
 function initials(name = "?") {
@@ -296,13 +284,14 @@ const RevenuePage = () => {
                   <thead>
                     <tr className="border-b border-gray-50">
                       {[
-                        "DATE",
-                        "USER",
-                        "PLAN",
-                        "ORDER",
-                        "AMOUNT",
-                        "STATUS",
-                        "ACTION",
+                        "NGÀY",
+                        "NGƯỜI DÙNG",
+                        "GÓI DỊCH VỤ",
+                        "MÃ ĐƠN HÀNG",
+                        "SỐ TIỀN GỐC",
+                        "SỐ TIỀN SAU GIẢM",
+                        "TRẠNG THÁI",
+                        "MÃ GIẢM GIÁ",
                       ].map((h) => (
                         <th
                           key={h}
@@ -317,7 +306,7 @@ const RevenuePage = () => {
                     {transactions.length === 0 ? (
                       <tr>
                         <td
-                          colSpan={7}
+                          colSpan={8}
                           className="px-5 py-10 text-center text-sm text-gray-500"
                         >
                           Chưa có giao dịch thanh toán nào.
@@ -330,7 +319,7 @@ const RevenuePage = () => {
                           className="border-b border-gray-50 last:border-0 hover:bg-gray-50/50 transition-colors"
                         >
                           <td className="px-5 py-4 text-sm text-gray-500 whitespace-nowrap">
-                            {formatDateTime(t.createdAt)}
+                            {formatRevenueDate(t.createdAt)}
                           </td>
                           <td className="px-5 py-4">
                             <div className="flex items-center gap-3">
@@ -361,6 +350,9 @@ const RevenuePage = () => {
                             </div>
                           </td>
                           <td className="px-5 py-4 text-sm font-semibold text-gray-900">
+                            {formatVnd(t.originalAmount ?? t.amount)}
+                          </td>
+                          <td className="px-5 py-4 text-sm font-semibold text-gray-900">
                             {formatVnd(t.amount)}
                           </td>
                           <td className="px-5 py-4">
@@ -372,9 +364,13 @@ const RevenuePage = () => {
                             </span>
                           </td>
                           <td className="px-5 py-4">
-                            <button className="text-gray-400 hover:text-gray-600">
-                              <MoreVertical size={16} />
-                            </button>
+                            {t.couponCode ? (
+                              <span className="font-mono text-xs font-semibold text-blue-700">
+                                {t.couponCode}
+                              </span>
+                            ) : (
+                              <span className="text-sm text-gray-400">Không có</span>
+                            )}
                           </td>
                         </tr>
                       ))

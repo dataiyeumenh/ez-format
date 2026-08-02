@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Download, ChevronLeft, ChevronRight, RefreshCw } from "lucide-react";
 import AdminLayout from "../../components/admin/AdminLayout";
 import api from "../../services/api";
+import { FILE_HISTORY_COLUMNS } from "../../utils/fileHistory";
 
 const statusLabels = {
   completed: "Hoàn thành",
@@ -231,7 +232,7 @@ const FilesPage = () => {
             <table className="w-full">
               <thead>
                 <tr className="border-b border-gray-50">
-                  {["USER", "TÊN FILE", "ĐỊNH DẠNG", "KÍCH THƯỚC", "TRẠNG THÁI", "NGÀY & GIỜ", "HÀNH ĐỘNG"].map((h) => (
+                  {FILE_HISTORY_COLUMNS.map((h) => (
                     <th key={h} className="text-left text-xs font-semibold text-gray-400 uppercase tracking-wider px-5 py-3">
                       {h}
                     </th>
@@ -241,13 +242,13 @@ const FilesPage = () => {
               <tbody>
                 {loading && runs.length === 0 ? (
                   <tr>
-                    <td colSpan={7} className="px-5 py-10 text-center text-sm text-gray-500">
+                    <td colSpan={FILE_HISTORY_COLUMNS.length} className="px-5 py-10 text-center text-sm text-gray-500">
                       Đang tải lịch sử chuyển đổi...
                     </td>
                   </tr>
                 ) : runs.length === 0 ? (
                   <tr>
-                    <td colSpan={7} className="px-5 py-10 text-center text-sm text-gray-500">
+                    <td colSpan={FILE_HISTORY_COLUMNS.length} className="px-5 py-10 text-center text-sm text-gray-500">
                       Chưa có lịch sử chuyển đổi nào.
                     </td>
                   </tr>
@@ -281,7 +282,6 @@ const FilesPage = () => {
                         </span>
                       </td>
                       <td className="px-5 py-4 text-sm text-gray-500">{formatDateTime(run.createdAt)}</td>
-                      <td className="px-5 py-4 text-sm text-gray-400">—</td>
                     </tr>
                   ))
                 )}

@@ -19,6 +19,12 @@ const {
   createPlan,
   updatePlan,
 } = require("../controllers/planController");
+const {
+  createCoupon,
+  listCoupons,
+  updateCoupon,
+  updateCouponStatus,
+} = require("../controllers/couponController");
 
 router.use(protect, adminOnly);
 
@@ -26,6 +32,9 @@ router.route("/users").get(getUsers).post(createUser);
 router.route("/users/:id").put(updateUser).delete(deleteUser);
 router.route("/plans").get(getAdminPlans).post(createPlan);
 router.route("/plans/:id").put(updatePlan);
+router.route("/coupons").get(listCoupons).post(createCoupon);
+router.route("/coupons/:id").put(updateCoupon);
+router.patch("/coupons/:id/status", updateCouponStatus);
 router.get("/revenue", getRevenue);
 router.get("/conversion-runs", getAdminConversionRuns);
 router.get("/feedback", getAdminFeedback);

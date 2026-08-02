@@ -391,7 +391,7 @@ const UsersPage = () => {
                 <thead>
                   <tr className="border-b border-gray-50">
                     {[
-                      "USER",
+                      "NGƯỜI DÙNG",
                       "GÓI DỊCH VỤ",
                       "TRẠNG THÁI",
                       "HOẠT ĐỘNG GẦN NHẤT",

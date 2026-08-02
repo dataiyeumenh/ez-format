@@ -1,5 +1,7 @@
+const Payment = require("../models/Payment");
 const User = require("../models/User");
 const { getPayOSClient } = require("./payosClient");
+const { recordCouponUsage } = require("./couponService");
 const { applyPaidPlanToUser } = require("./subscriptionService");
 
 const PAYOS_STATUS_TO_PAYMENT_STATUS = {
@@ -16,54 +18,196 @@ function normalizePayOSStatus(status) {
   return PAYOS_STATUS_TO_PAYMENT_STATUS[String(status || "").toUpperCase()] || "pending";
 }
 
-async function applyPaidPayment(payment, remotePaymentLink) {
-  if (Number(remotePaymentLink.amount) !== Number(payment.amount)) {
-    payment.status = "failed";
-    return;
-  }
-
-  const user = await User.findById(payment.user);
-  if (!user) {
-    payment.status = "failed";
-    return;
-  }
-
-  payment.paidAt = payment.paidAt || new Date();
-  const plan = payment.plan?.code ? payment.plan : await payment.populate("plan").then((doc) => doc.plan);
-  applyPaidPlanToUser(user, plan, payment.paidAt);
-  await user.save();
-
-  payment.status = "paid";
-}
-
-async function syncPaymentStatusFromPayOS(payment) {
-  if (!payment || payment.status === "paid") return payment;
-
-  const payOS = getPayOSClient();
-  const remotePaymentLink = await payOS.paymentRequests.get(
-    payment.paymentLinkId || payment.orderCode,
-  );
-  const nextStatus = normalizePayOSStatus(remotePaymentLink.status);
-
+function mergePayOSData(payment, snapshotPayOSData, remotePaymentLink) {
   payment.payosData = {
     ...(payment.payosData || {}),
+    ...(snapshotPayOSData || {}),
     lastSync: {
       syncedAt: new Date(),
       paymentLink: remotePaymentLink,
     },
   };
-
-  if (nextStatus === "paid") {
-    await applyPaidPayment(payment, remotePaymentLink);
-  } else {
-    payment.status = nextStatus;
-  }
-
-  await payment.save();
-  return payment;
 }
 
+function mirrorPaymentState(snapshot, storedPayment) {
+  if (!snapshot || !storedPayment || snapshot === storedPayment) return storedPayment;
+  snapshot.status = storedPayment.status;
+  snapshot.paidAt = storedPayment.paidAt;
+  snapshot.payosData = storedPayment.payosData;
+  return storedPayment;
+}
+
+function createPaymentStatusSynchronizer({
+  PaymentModel = Payment,
+  UserModel = User,
+  getPayOSClient: getPayOSClientForSync = getPayOSClient,
+  recordCouponUsage: recordCouponUsageForSettlement = recordCouponUsage,
+} = {}) {
+  async function withTransaction(work) {
+    const session = await PaymentModel.db.startSession();
+    try {
+      let result;
+      await session.withTransaction(async () => {
+        result = await work(session);
+      });
+      return result;
+    } finally {
+      await session.endSession();
+    }
+  }
+
+  async function withPaymentTransaction(paymentId, work) {
+    return withTransaction(async (session) => {
+      const payment = await PaymentModel.findById(paymentId)
+        .session(session)
+        .populate("plan");
+      return work(payment, session);
+    });
+  }
+
+  async function settlePaidPayment(
+    storedPayment,
+    remotePaymentLink,
+    snapshotPayOSData,
+    session,
+  ) {
+    if (storedPayment.status === "paid") {
+      if (storedPayment.coupon) {
+        await recordCouponUsageForSettlement({
+          couponId: storedPayment.coupon,
+          userId: storedPayment.user,
+          paymentId: storedPayment._id,
+          discountAmount: storedPayment.discountAmount || 0,
+          session,
+        });
+      }
+      return storedPayment;
+    }
+
+    mergePayOSData(storedPayment, snapshotPayOSData, remotePaymentLink);
+    if (Number(remotePaymentLink.amount) !== Number(storedPayment.amount)) {
+      storedPayment.status = "failed";
+      await storedPayment.save({ session });
+      return storedPayment;
+    }
+
+    const user = await UserModel.findById(storedPayment.user).session(session);
+    if (!user) {
+      storedPayment.status = "failed";
+      await storedPayment.save({ session });
+      return storedPayment;
+    }
+
+    storedPayment.paidAt = storedPayment.paidAt || new Date();
+    applyPaidPlanToUser(user, storedPayment.plan, storedPayment.paidAt);
+    storedPayment.status = "paid";
+
+    if (storedPayment.coupon) {
+      await recordCouponUsageForSettlement({
+        couponId: storedPayment.coupon,
+        userId: storedPayment.user,
+        paymentId: storedPayment._id,
+        discountAmount: storedPayment.discountAmount || 0,
+        session,
+      });
+    }
+
+    await user.save({ session });
+    await storedPayment.save({ session });
+    return storedPayment;
+  }
+
+  async function applyPaidPayment(payment, remotePaymentLink, snapshotPayOSData) {
+    return withPaymentTransaction(payment._id, async (storedPayment, session) => {
+      if (!storedPayment) return payment;
+      return settlePaidPayment(
+        storedPayment,
+        remotePaymentLink,
+        snapshotPayOSData,
+        session,
+      );
+    });
+  }
+
+  async function createAndSettleZeroTotalPayment(
+    paymentData,
+    remotePaymentLink = { amount: 0, status: "PAID" },
+    snapshotPayOSData = { freeCheckout: true },
+  ) {
+    if (Number(paymentData?.amount) !== 0) {
+      throw new Error("Zero-total settlement requires a zero payment amount");
+    }
+
+    return withTransaction(async (session) => {
+      const [storedPayment] = await PaymentModel.create([paymentData], { session });
+      await storedPayment.populate("plan");
+      return settlePaidPayment(
+        storedPayment,
+        remotePaymentLink,
+        snapshotPayOSData,
+        session,
+      );
+    });
+  }
+
+  async function applyNonPaidPaymentStatus(
+    payment,
+    nextStatus,
+    remotePaymentLink,
+    snapshotPayOSData,
+  ) {
+    return withPaymentTransaction(payment._id, async (storedPayment, session) => {
+      if (!storedPayment || storedPayment.status === "paid") {
+        return storedPayment || payment;
+      }
+
+      mergePayOSData(storedPayment, snapshotPayOSData, remotePaymentLink);
+      storedPayment.status = nextStatus;
+      await storedPayment.save({ session });
+      return storedPayment;
+    });
+  }
+
+  async function syncPaymentStatusFromPayOS(payment) {
+    if (!payment || payment.status === "paid") return payment;
+
+    const payOS = getPayOSClientForSync();
+    const remotePaymentLink = await payOS.paymentRequests.get(
+      payment.paymentLinkId || payment.orderCode,
+    );
+    const nextStatus = normalizePayOSStatus(remotePaymentLink.status);
+
+    if (nextStatus === "paid") {
+      const settledPayment = await applyPaidPayment(
+        payment,
+        remotePaymentLink,
+        payment.payosData,
+      );
+      return mirrorPaymentState(payment, settledPayment);
+    }
+
+    const syncedPayment = await applyNonPaidPaymentStatus(
+      payment,
+      nextStatus,
+      remotePaymentLink,
+      payment.payosData,
+    );
+    return mirrorPaymentState(payment, syncedPayment);
+  }
+
+  return {
+    applyNonPaidPaymentStatus,
+    applyPaidPayment,
+    createAndSettleZeroTotalPayment,
+    syncPaymentStatusFromPayOS,
+    withPaymentTransaction,
+  };
+}
+
+const defaultSynchronizer = createPaymentStatusSynchronizer();
+
 module.exports = {
+  createPaymentStatusSynchronizer,
   normalizePayOSStatus,
-  syncPaymentStatusFromPayOS,
+  ...defaultSynchronizer,
 };

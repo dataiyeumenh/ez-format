@@ -210,7 +210,7 @@ function formatDateKey(date) {
   }).format(date);
 }
 
-function formatPayment(payment) {
+function formatRevenuePayment(payment) {
   const user = payment.user || {};
   return {
     id: payment._id,
@@ -219,6 +219,9 @@ function formatPayment(payment) {
     planCode: payment.planCode,
     planName: payment.planName || PLAN_LABELS[payment.planCode] || payment.planCode,
     amount: payment.amount,
+    originalAmount: payment.originalAmount ?? payment.amount,
+    discountAmount: payment.discountAmount || 0,
+    couponCode: payment.couponCode || "",
     status: payment.status,
     checkoutUrl: payment.checkoutUrl,
     paidAt: payment.paidAt,
@@ -365,7 +368,7 @@ const getRevenue = async (req, res) => {
       },
       chart,
       planRevenue,
-      transactions: recentPayments.map(formatPayment),
+      transactions: recentPayments.map(formatRevenuePayment),
     });
   } catch (error) {
     res
@@ -380,4 +383,5 @@ module.exports = {
   deleteUser,
   createUser,
   getRevenue,
+  formatRevenuePayment,
 };
