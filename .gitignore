@@ -11,6 +11,9 @@ dist/
 .pytest_cache/
 __pycache__/
 *.py[cod]
+.fastembed_cache/
+.superpowers/
+docs/
 
 backend/.env
 frontend/.env

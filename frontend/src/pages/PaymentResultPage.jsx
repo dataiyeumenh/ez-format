@@ -6,6 +6,7 @@ import Footer from "../components/Footer";
 import { useAuth } from "../context/AuthContext";
 import UserPlanBadge from "../components/UserPlanBadge";
 import api from "../services/api";
+import { hasPaidBenefit } from "../utils/paymentFlow";
 
 const copy = {
   success: {
@@ -32,11 +33,12 @@ const PaymentResultPage = ({ status = "success" }) => {
     searchParams.get("orderCode") ||
     searchParams.get("order_code") ||
     searchParams.get("ordercode");
+  const alreadySettled = searchParams.get("settled") === "1";
 
   useEffect(() => {
-    if (!orderCode) return;
+    if (!orderCode || alreadySettled) return;
     api.post(`/payments/${orderCode}/sync`).catch(() => {});
-  }, [orderCode]);
+  }, [alreadySettled, orderCode]);
 
   useEffect(() => {
     if (status !== "success") return;
@@ -47,11 +49,7 @@ const PaymentResultPage = ({ status = "success" }) => {
       attempts += 1;
       try {
         const updatedUser = await refreshUser();
-        const hasPaidBenefit =
-          updatedUser?.plan === "Monthly" ||
-          updatedUser?.plan === "Yearly" ||
-          Number(updatedUser?.fileCredits || 0) > 0;
-        if (hasPaidBenefit || attempts >= 6) {
+        if (hasPaidBenefit(updatedUser) || attempts >= 6) {
           if (!cancelled) setRefreshing(false);
           return;
         }
@@ -64,13 +62,13 @@ const PaymentResultPage = ({ status = "success" }) => {
       }
     };
 
-    const timer = window.setTimeout(refreshUntilUpdated, 1500);
+    const timer = window.setTimeout(refreshUntilUpdated, alreadySettled ? 0 : 1500);
 
     return () => {
       cancelled = true;
       window.clearTimeout(timer);
     };
-  }, [refreshUser, status]);
+  }, [alreadySettled, refreshUser, status]);
 
   return (
     <div className="min-h-screen flex flex-col bg-white">

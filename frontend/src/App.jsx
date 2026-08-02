@@ -20,6 +20,7 @@ const AdminDashboard = lazy(() => import("./pages/admin/DashboardPage"));
 const UsersPage = lazy(() => import("./pages/admin/UsersPage"));
 const FilesPage = lazy(() => import("./pages/admin/FilesPage"));
 const PlansPage = lazy(() => import("./pages/admin/PlansPage"));
+const CouponsPage = lazy(() => import("./pages/admin/CouponsPage"));
 const RevenuePage = lazy(() => import("./pages/admin/RevenuePage"));
 const LogsPage = lazy(() => import("./pages/admin/LogsPage"));
 
@@ -102,6 +103,16 @@ function App() {
               <AdminRoute>
                 <Suspense fallback={<PageLoader />}>
                   <PlansPage />
+                </Suspense>
+              </AdminRoute>
+            }
+          />
+          <Route
+            path="/admin/coupons"
+            element={
+              <AdminRoute>
+                <Suspense fallback={<PageLoader />}>
+                  <CouponsPage />
                 </Suspense>
               </AdminRoute>
             }
