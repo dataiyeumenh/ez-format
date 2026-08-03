@@ -1,7 +1,17 @@
 import { useEffect, useCallback, useState } from "react";
 import { Download, ChevronLeft, ChevronRight, Loader2 } from "lucide-react";
 import AdminLayout from "../../components/admin/AdminLayout";
-import { FEEDBACK_CATEGORIES, fetchAdminFeedback } from "../../services/feedback";
+import {
+  FEEDBACK_CATEGORIES,
+  fetchAdminFeedback,
+  updateAdminFeedbackStatus,
+} from "../../services/feedback";
+import {
+  FEEDBACK_STATUSES,
+  formatFeedbackDate,
+  getFeedbackRatingMeta,
+  getFeedbackStatusMeta,
+} from "../../utils/feedback";
 
 const ITEMS_PER_PAGE = 10;
 
@@ -42,27 +52,16 @@ const getAvatarColor = (id = "") =>
   AVATAR_COLORS[parseInt(id.toString().slice(-2), 16) % AVATAR_COLORS.length] ||
   AVATAR_COLORS[0];
 
-const formatDateTime = (iso) => {
-  if (!iso) return "—";
-  const date = new Date(iso);
-  if (Number.isNaN(date.getTime())) return "—";
-  return new Intl.DateTimeFormat("vi-VN", {
-    day: "2-digit",
-    month: "2-digit",
-    year: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-  }).format(date);
-};
-
 function buildCsv(rows) {
-  const headers = ["User", "Email", "Loại", "Nội dung", "Thời gian"];
+  const headers = ["User", "Email", "Loại", "Nội dung", "Trạng thái", "Đánh giá", "Thời gian"];
   const lines = rows.map((row) => [
     row.user?.name || "",
     row.user?.email || "",
     categoryLabels[row.category] || row.category || "",
     row.message || "",
-    formatDateTime(row.createdAt),
+    getFeedbackStatusMeta(row.status).label,
+    getFeedbackRatingMeta(row.rating)?.label || "Chưa đánh giá",
+    formatFeedbackDate(row.createdAt),
   ]);
   return [headers, ...lines]
     .map((line) => line.map((cell) => `"${String(cell).replace(/"/g, '""')}"`).join(","))
@@ -75,8 +74,11 @@ const LogsPage = () => {
   const [totalPages, setTotalPages] = useState(1);
   const [currentPage, setCurrentPage] = useState(1);
   const [filterCategory, setFilterCategory] = useState("");
+  const [statusFilter, setStatusFilter] = useState("");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+  const [actionError, setActionError] = useState("");
+  const [updatingId, setUpdatingId] = useState(null);
 
   const loadFeedback = useCallback(async () => {
     setLoading(true);
@@ -86,6 +88,7 @@ const LogsPage = () => {
         page: currentPage,
         limit: ITEMS_PER_PAGE,
         category: filterCategory || undefined,
+        status: statusFilter || undefined,
       });
       setItems(data.feedback || []);
       setStats(data.stats || { total: 0, bug: 0, feature: 0, ui: 0, other: 0 });
@@ -95,7 +98,7 @@ const LogsPage = () => {
     } finally {
       setLoading(false);
     }
-  }, [currentPage, filterCategory]);
+  }, [currentPage, filterCategory, statusFilter]);
 
   useEffect(() => {
     loadFeedback();
@@ -103,7 +106,25 @@ const LogsPage = () => {
 
   const resetFilters = () => {
     setFilterCategory("");
+    setStatusFilter("");
     setCurrentPage(1);
+  };
+
+  const handleStatusChange = async (item, nextStatus) => {
+    setUpdatingId(item.id);
+    setActionError("");
+    try {
+      const data = await updateAdminFeedbackStatus(item.id, nextStatus);
+      setItems((current) =>
+        current.map((entry) => (entry.id === item.id ? data.feedback : entry)),
+      );
+    } catch (err) {
+      setActionError(
+        err.response?.data?.message || "Không thể cập nhật trạng thái góp ý",
+      );
+    } finally {
+      setUpdatingId(null);
+    }
   };
 
   const handleExport = () => {
@@ -196,8 +217,8 @@ const LogsPage = () => {
         {/* Table */}
         <div className="bg-white rounded-xl border border-gray-100">
           {/* Filters */}
-          <div className="flex items-center justify-between px-5 py-4 border-b border-gray-100">
-            <div className="flex items-center gap-2">
+          <div className="flex flex-col gap-3 border-b border-gray-100 px-5 py-4 sm:flex-row sm:items-center sm:justify-between">
+            <div className="flex flex-wrap items-center gap-2">
               <span className="text-sm text-gray-500 font-medium">Bộ lọc:</span>
               <select
                 value={filterCategory}
@@ -214,6 +235,21 @@ const LogsPage = () => {
                   </option>
                 ))}
               </select>
+              <select
+                value={statusFilter}
+                onChange={(e) => {
+                  setStatusFilter(e.target.value);
+                  setCurrentPage(1);
+                }}
+                className="rounded-lg border border-gray-200 px-3 py-1.5 text-sm text-gray-600 focus:outline-none focus:ring-2 focus:ring-blue-500/20"
+              >
+                <option value="">Tất cả trạng thái</option>
+                {FEEDBACK_STATUSES.map((status) => (
+                  <option key={status.value} value={status.value}>
+                    {status.label}
+                  </option>
+                ))}
+              </select>
             </div>
             <button
               onClick={resetFilters}
@@ -222,6 +258,12 @@ const LogsPage = () => {
               ⚙ Reset Filters
             </button>
           </div>
+
+          {actionError && (
+            <div className="border-b border-rose-100 bg-rose-50 px-5 py-3 text-sm text-rose-600">
+              {actionError}
+            </div>
+          )}
 
           <div className="overflow-x-auto">
             {loading ? (
@@ -247,7 +289,7 @@ const LogsPage = () => {
               <table className="w-full">
                 <thead>
                   <tr className="border-b border-gray-50">
-                    {["USER", "LOẠI", "NỘI DUNG", "THỜI GIAN"].map((h) => (
+                    {["USER", "LOẠI", "NỘI DUNG", "TRẠNG THÁI", "ĐÁNH GIÁ", "THỜI GIAN"].map((h) => (
                       <th
                         key={h}
                         className="text-left text-xs font-semibold text-gray-400 uppercase tracking-wider px-5 py-3"
@@ -258,11 +300,14 @@ const LogsPage = () => {
                   </tr>
                 </thead>
                 <tbody>
-                  {items.map((item) => (
-                    <tr
-                      key={item.id}
-                      className="border-b border-gray-50 last:border-0 hover:bg-gray-50/50 transition-colors"
-                    >
+                      {items.map((item) => {
+                        const statusMeta = getFeedbackStatusMeta(item.status);
+                        const ratingMeta = getFeedbackRatingMeta(item.rating);
+                    return (
+                      <tr
+                        key={item.id}
+                        className="border-b border-gray-50 last:border-0 hover:bg-gray-50/50 transition-colors"
+                      >
                       <td className="px-5 py-4">
                         <div className="flex items-center gap-3">
                           <div
@@ -292,11 +337,38 @@ const LogsPage = () => {
                       <td className="px-5 py-4 text-sm text-gray-700 max-w-md">
                         <p className="whitespace-pre-wrap break-words">{item.message}</p>
                       </td>
-                      <td className="px-5 py-4 text-sm text-gray-500 whitespace-nowrap">
-                        {formatDateTime(item.createdAt)}
+                      <td className="px-5 py-4 whitespace-nowrap">
+                        <select
+                          aria-label={`Trạng thái góp ý của ${item.user?.name || "người dùng"}`}
+                          value={statusMeta.value}
+                          disabled={updatingId === item.id}
+                          onChange={(event) =>
+                            handleStatusChange(item, event.target.value)
+                          }
+                          className={`rounded-lg border-0 px-2.5 py-1.5 text-xs font-semibold outline-none ring-1 ring-inset ring-black/5 disabled:cursor-wait disabled:opacity-60 ${statusMeta.className}`}
+                        >
+                          {FEEDBACK_STATUSES.map((status) => (
+                            <option key={status.value} value={status.value}>
+                              {status.label}
+                            </option>
+                          ))}
+                        </select>
+                          </td>
+                          <td className="px-5 py-4 whitespace-nowrap">
+                            {ratingMeta ? (
+                              <span className={`rounded-full border px-2.5 py-1 text-xs font-semibold ${ratingMeta.className}`}>
+                                {ratingMeta.label}
+                              </span>
+                            ) : (
+                              <span className="text-xs text-gray-400">Chưa đánh giá</span>
+                            )}
+                          </td>
+                          <td className="px-5 py-4 text-sm text-gray-500 whitespace-nowrap">
+                        {formatFeedbackDate(item.createdAt)}
                       </td>
-                    </tr>
-                  ))}
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
             )}

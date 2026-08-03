@@ -1,6 +1,8 @@
 const Feedback = require("../models/Feedback");
 const {
   VALID_CATEGORIES,
+  VALID_RATINGS,
+  VALID_STATUSES,
   buildFeedbackFilter,
   serializeFeedback,
 } = require("../services/feedbackService");
@@ -76,7 +78,139 @@ async function getAdminFeedback(req, res) {
   }
 }
 
+async function getMyFeedback(req, res) {
+  try {
+    const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+    const limit = Math.min(50, Math.max(1, parseInt(req.query.limit, 10) || 20));
+    const skip = (page - 1) * limit;
+    const filter = { user: req.user._id };
+
+    const [total, items] = await Promise.all([
+      Feedback.countDocuments(filter),
+      Feedback.find(filter).sort({ createdAt: -1 }).skip(skip).limit(limit),
+    ]);
+
+    return res.json({
+      success: true,
+      total,
+      page,
+      limit,
+      totalPages: Math.max(1, Math.ceil(total / limit)),
+      feedback: items.map(serializeFeedback),
+    });
+  } catch (_error) {
+    return res.status(500).json({
+      success: false,
+      message: "Không thể tải lịch sử góp ý",
+    });
+  }
+}
+
+async function updateFeedbackStatus(req, res) {
+  const status = String(req.body.status || "").trim();
+  if (!VALID_STATUSES.has(status)) {
+    return res.status(400).json({
+      success: false,
+      message: "Trạng thái góp ý không hợp lệ",
+    });
+  }
+
+  try {
+    const feedback = await Feedback.findByIdAndUpdate(
+      req.params.id,
+      {
+        status,
+        statusUpdatedAt: new Date(),
+        statusUpdatedBy: req.user._id,
+      },
+      { new: true, runValidators: true },
+    ).populate("user", "name email");
+
+    if (!feedback) {
+      return res.status(404).json({
+        success: false,
+        message: "Không tìm thấy góp ý",
+      });
+    }
+
+    return res.json({
+      success: true,
+      feedback: serializeFeedback(feedback),
+    });
+  } catch (error) {
+    if (error?.name === "CastError") {
+      return res.status(404).json({
+        success: false,
+        message: "Không tìm thấy góp ý",
+      });
+    }
+    return res.status(500).json({
+      success: false,
+      message: "Không thể cập nhật trạng thái góp ý",
+    });
+  }
+}
+
+async function rateFeedback(req, res) {
+  const rating = String(req.body.rating || "").trim();
+  if (!VALID_RATINGS.has(rating)) {
+    return res.status(400).json({
+      success: false,
+      message: "Đánh giá mức độ hài lòng không hợp lệ",
+    });
+  }
+
+  try {
+    const feedback = await Feedback.findOneAndUpdate(
+      {
+        _id: req.params.id,
+        user: req.user._id,
+        status: "resolved",
+      },
+      { rating, ratedAt: new Date() },
+      { new: true, runValidators: true },
+    );
+
+    if (feedback) {
+      return res.json({
+        success: true,
+        feedback: serializeFeedback(feedback),
+      });
+    }
+
+    const ownedFeedback = await Feedback.exists({
+      _id: req.params.id,
+      user: req.user._id,
+    });
+    if (!ownedFeedback) {
+      return res.status(404).json({
+        success: false,
+        message: "Không tìm thấy góp ý",
+      });
+    }
+
+    return res.status(409).json({
+      success: false,
+      message: "Chỉ có thể đánh giá góp ý đã ở trạng thái Đã giải quyết",
+    });
+  } catch (error) {
+    if (error?.name === "CastError") {
+      return res.status(404).json({
+        success: false,
+        message: "Không tìm thấy góp ý",
+      });
+    }
+    return res.status(500).json({
+      success: false,
+      message: "Không thể lưu đánh giá góp ý",
+    });
+  }
+}
+
 module.exports = {
   createFeedback,
   getAdminFeedback,
+  getMyFeedback,
+  rateFeedback,
+  updateFeedbackStatus,
 };

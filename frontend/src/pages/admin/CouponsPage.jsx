@@ -459,9 +459,6 @@ export default function CouponsPage() {
         <div className="mx-auto max-w-7xl">
           <div className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
             <div>
-              <div className="mb-2 flex items-center gap-2 text-xs font-bold uppercase tracking-[0.18em] text-blue-600">
-                <TicketPercent size={15} /> Quản lý ưu đãi
-              </div>
               <h1 className="text-2xl font-bold tracking-tight text-slate-950 sm:text-3xl">
                 Chương trình đặc biệt
               </h1>

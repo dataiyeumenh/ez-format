@@ -6,6 +6,7 @@ import {
   FileText,
   Package,
   TicketPercent,
+  Megaphone,
   BarChart2,
   MessageSquare,
   Bell,
@@ -23,6 +24,7 @@ const navItems = [
   { icon: FileText, label: "Chuyển đổi file", path: "/admin/files" },
   { icon: Package, label: "Gói dịch vụ", path: "/admin/plans" },
   { icon: TicketPercent, label: "Chương trình đặc biệt", path: "/admin/coupons" },
+  { icon: Megaphone, label: "Thông báo", path: "/admin/notices" },
   { icon: BarChart2, label: "Phân tích doanh thu", path: "/admin/revenue" },
   { icon: MessageSquare, label: "Góp ý", path: "/admin/logs" },
 ];
@@ -139,12 +141,13 @@ const AdminLayout = ({ children, title: _title }) => {
               <span className="w-2 h-2 bg-green-500 rounded-full inline-block" />
               <span className="text-green-600 font-medium">Server: Tốt</span>
             </div>
-            <button className="relative text-gray-500 hover:text-gray-700">
+            <Link
+              to="/admin/notices"
+              aria-label="Quản lý thông báo"
+              className="relative rounded-lg p-1.5 text-gray-500 hover:bg-gray-50 hover:text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500"
+            >
               <Bell size={20} />
-              <span className="absolute -top-1 -right-1 w-4 h-4 bg-red-500 rounded-full text-white text-xs flex items-center justify-center">
-                3
-              </span>
-            </button>
+            </Link>
 
             {/* Avatar Dropdown */}
             <div className="relative" ref={dropdownRef}>
