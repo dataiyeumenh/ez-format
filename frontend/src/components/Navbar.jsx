@@ -6,6 +6,7 @@ import ezFormatLogo from "../assets/ezformat-main-logo.png";
 import UserPlanBadge from "./UserPlanBadge";
 import FeedbackModal from "./FeedbackModal";
 import ChangePasswordModal from "./ChangePasswordModal";
+import NoticeBell from "./NoticeBell";
 
 const Logo = () => (
   <Link to="/" className="flex items-center gap-2.5 group">
@@ -34,6 +35,7 @@ const Navbar = () => {
   const [feedbackOpen, setFeedbackOpen] = useState(false);
   const [changePwOpen, setChangePwOpen] = useState(false);
   const menuRef = useRef(null);
+  const mobileMenuRef = useRef(null);
 
   const closeMobile = () => setMobileOpen(false);
   const closeUserMenu = () => setUserMenuOpen(false);
@@ -49,11 +51,14 @@ const Navbar = () => {
     setLogoutConfirmOpen((open) => !open);
   };
 
-  // Click ra ngoài cụm menu desktop -> đóng mọi dropdown đang mở.
+  // Giữ menu đang tương tác; chỉ đóng khi click ngoài cả hai phiên bản.
   useEffect(() => {
     if (!userMenuOpen && !logoutConfirmOpen) return undefined;
     const handleClickOutside = (event) => {
-      if (menuRef.current && !menuRef.current.contains(event.target)) {
+      const clickedDesktopMenu = menuRef.current?.contains(event.target);
+      const clickedMobileMenu = mobileMenuRef.current?.contains(event.target);
+
+      if (!clickedDesktopMenu && !clickedMobileMenu) {
         setUserMenuOpen(false);
         setLogoutConfirmOpen(false);
       }
@@ -135,6 +140,7 @@ const Navbar = () => {
                     Dashboard
                   </NavLink>
                 )}
+                <NoticeBell />
                 <div className="relative">
                   <button
                     type="button"
@@ -206,20 +212,26 @@ const Navbar = () => {
             )}
           </div>
 
-          <button
-            type="button"
-            className="md:hidden p-2 rounded-lg hover:bg-gray-100 transition-colors"
-            onClick={() => setMobileOpen(!mobileOpen)}
-            aria-expanded={mobileOpen}
-            aria-label="Menu"
-          >
-            {mobileOpen ? <X size={24} /> : <Menu size={24} />}
-          </button>
+          <div className="flex items-center gap-1 md:hidden">
+            {user && <NoticeBell mobile />}
+            <button
+              type="button"
+              className="rounded-lg p-2 transition-colors hover:bg-gray-100"
+              onClick={() => setMobileOpen(!mobileOpen)}
+              aria-expanded={mobileOpen}
+              aria-label="Menu"
+            >
+              {mobileOpen ? <X size={24} /> : <Menu size={24} />}
+            </button>
+          </div>
         </div>
       </div>
 
       {mobileOpen && (
-        <div className="md:hidden border-t border-gray-100 bg-white px-4 py-4 space-y-1 animate-fade-in">
+        <div
+          ref={mobileMenuRef}
+          className="md:hidden border-t border-gray-100 bg-white px-4 py-4 space-y-1 animate-fade-in"
+        >
           <NavLink to="/" className={navLinkClass} onClick={closeMobile}>
             Trang chủ
           </NavLink>

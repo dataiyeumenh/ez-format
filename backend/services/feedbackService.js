@@ -7,6 +7,24 @@ const CATEGORY_LABELS = {
 
 const VALID_CATEGORIES = new Set(Object.keys(CATEGORY_LABELS));
 
+const STATUS_LABELS = {
+  new: "Mới",
+  received: "Đã tiếp nhận",
+  in_progress: "Đang xử lý",
+  resolved: "Đã giải quyết",
+  rejected: "Không thực hiện",
+};
+
+const VALID_STATUSES = new Set(Object.keys(STATUS_LABELS));
+
+const RATING_LABELS = {
+  satisfied: "Hài lòng",
+  very_satisfied: "Vô cùng hài lòng",
+  dissatisfied: "Chưa hài lòng",
+};
+
+const VALID_RATINGS = new Set(Object.keys(RATING_LABELS));
+
 function startOfDay(value) {
   const text = String(value);
   const date = /^\d{4}-\d{2}-\d{2}$/.test(text)
@@ -30,6 +48,18 @@ function buildFeedbackFilter(query = {}) {
   if (query.category && VALID_CATEGORIES.has(String(query.category))) {
     filter.category = String(query.category);
   }
+  if (query.status && VALID_STATUSES.has(String(query.status))) {
+    const status = String(query.status);
+    if (status === "new") {
+      filter.$or = [
+        { status: "new" },
+        { status: { $exists: false } },
+        { status: null },
+      ];
+    } else {
+      filter.status = status;
+    }
+  }
 
   const from = query.from ? startOfDay(query.from) : null;
   const to = query.to ? endOfDay(query.to) : null;
@@ -45,6 +75,8 @@ function serializeFeedback(item) {
   const user = item.user || {};
   const name = item.userNameSnapshot || user.name || "Không rõ";
   const email = item.userEmailSnapshot || user.email || "";
+  const status = VALID_STATUSES.has(item.status) ? item.status : "new";
+  const rating = VALID_RATINGS.has(item.rating) ? item.rating : null;
 
   return {
     id: String(item._id),
@@ -56,6 +88,12 @@ function serializeFeedback(item) {
     category: item.category,
     categoryLabel: CATEGORY_LABELS[item.category] || item.category,
     message: item.message || "",
+    status,
+    statusLabel: STATUS_LABELS[status],
+    statusUpdatedAt: item.statusUpdatedAt || null,
+    rating,
+    ratingLabel: rating ? RATING_LABELS[rating] : null,
+    ratedAt: rating ? item.ratedAt || null : null,
     createdAt: item.createdAt || null,
   };
 }
@@ -73,7 +111,11 @@ function summarizeFeedback(items) {
 
 module.exports = {
   CATEGORY_LABELS,
+  RATING_LABELS,
+  STATUS_LABELS,
   VALID_CATEGORIES,
+  VALID_RATINGS,
+  VALID_STATUSES,
   buildFeedbackFilter,
   serializeFeedback,
   summarizeFeedback,

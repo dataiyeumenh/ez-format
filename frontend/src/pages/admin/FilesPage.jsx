@@ -2,7 +2,10 @@ import { useEffect, useMemo, useState } from "react";
 import { Download, ChevronLeft, ChevronRight, RefreshCw } from "lucide-react";
 import AdminLayout from "../../components/admin/AdminLayout";
 import api from "../../services/api";
-import { FILE_HISTORY_COLUMNS } from "../../utils/fileHistory";
+import {
+  FILE_HISTORY_COLUMNS,
+  formatFileHistoryDate,
+} from "../../utils/fileHistory";
 
 const statusLabels = {
   completed: "Hoàn thành",
@@ -35,21 +38,8 @@ function initials(name = "") {
   return `${parts[0][0]}${parts[parts.length - 1][0]}`.toUpperCase();
 }
 
-function formatDateTime(value) {
-  if (!value) return "—";
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return "—";
-  return new Intl.DateTimeFormat("vi-VN", {
-    day: "2-digit",
-    month: "2-digit",
-    year: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-  }).format(date);
-}
-
 function buildCsv(rows) {
-  const headers = ["User", "Email", "Tên file", "Định dạng", "Kích thước", "Trạng thái", "Ngày giờ"];
+  const headers = ["User", "Email", "Tên file", "Định dạng", "Kích thước", "Trạng thái", "Ngày"];
   const lines = rows.map((row) => [
     row.user?.name || "",
     row.user?.email || "",
@@ -57,7 +47,7 @@ function buildCsv(rows) {
     row.format || "MISA",
     row.size || "",
     statusLabels[row.status] || row.status || "",
-    formatDateTime(row.createdAt),
+    formatFileHistoryDate(row.createdAt),
   ]);
   return [headers, ...lines]
     .map((line) => line.map((cell) => `"${String(cell).replace(/"/g, '""')}"`).join(","))
@@ -281,7 +271,7 @@ const FilesPage = () => {
                           {statusLabels[run.status] || run.status}
                         </span>
                       </td>
-                      <td className="px-5 py-4 text-sm text-gray-500">{formatDateTime(run.createdAt)}</td>
+                      <td className="px-5 py-4 text-sm text-gray-500">{formatFileHistoryDate(run.createdAt)}</td>
                     </tr>
                   ))
                 )}

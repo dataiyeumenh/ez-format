@@ -13,9 +13,36 @@ export async function submitFeedback({ category, message }) {
   return data;
 }
 
-export async function fetchAdminFeedback({ page = 1, limit = 10, category } = {}) {
-  const { data } = await api.get("/admin/feedback", {
-    params: { page, limit, category: category || undefined },
+export async function fetchMyFeedback({ page = 1, limit = 20 } = {}) {
+  const { data } = await api.get("/feedback/mine", {
+    params: { page, limit },
   });
+  return data;
+}
+
+export async function rateFeedback(id, rating) {
+  const { data } = await api.patch(`/feedback/${id}/rating`, { rating });
+  return data;
+}
+
+export async function fetchAdminFeedback({
+  page = 1,
+  limit = 10,
+  category,
+  status,
+} = {}) {
+  const { data } = await api.get("/admin/feedback", {
+    params: {
+      page,
+      limit,
+      category: category || undefined,
+      status: status || undefined,
+    },
+  });
+  return data;
+}
+
+export async function updateAdminFeedbackStatus(id, status) {
+  const { data } = await api.patch(`/admin/feedback/${id}/status`, { status });
   return data;
 }
