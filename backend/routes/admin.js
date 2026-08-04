@@ -5,6 +5,7 @@ const requireDb = require("../middleware/requireDb");
 
 const {
   getUsers,
+  getUserGrowth,
   updateUser,
   deleteUser,
   createUser,
@@ -35,6 +36,7 @@ const {
 router.use(protect, adminOnly, requireDb);
 
 router.route("/users").get(getUsers).post(createUser);
+router.get("/users/growth", getUserGrowth);
 router.route("/users/:id").put(updateUser).delete(deleteUser);
 router.route("/plans").get(getAdminPlans).post(createPlan);
 router.route("/plans/:id").put(updatePlan);

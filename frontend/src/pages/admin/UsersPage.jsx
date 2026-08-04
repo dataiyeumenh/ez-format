@@ -9,9 +9,22 @@ import {
   ChevronRight,
   Loader2,
 } from "lucide-react";
+import {
+  CartesianGrid,
+  Line,
+  LineChart,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+} from "recharts";
 import AdminLayout from "../../components/admin/AdminLayout";
 import { useAuth } from "../../context/AuthContext";
 import api from "../../services/api";
+import {
+  USER_GROWTH_RANGES,
+  formatUserGrowthDate,
+} from "../../utils/userGrowth";
 
 const ITEMS_PER_PAGE = 10;
 
@@ -99,6 +112,11 @@ const UsersPage = () => {
     isActive: true,
   });
   const [editLoading, setEditLoading] = useState(false);
+  const [growthRange, setGrowthRange] = useState("30d");
+  const [growthData, setGrowthData] = useState([]);
+  const [growthGranularity, setGrowthGranularity] = useState("day");
+  const [growthLoading, setGrowthLoading] = useState(true);
+  const [growthError, setGrowthError] = useState("");
   const freePlan = plans.find((plan) => plan.code === "free");
   const freePlanId = freePlan?.id || "";
 
@@ -129,6 +147,24 @@ const UsersPage = () => {
     }
   }, [currentPage, filterPlan, filterStatus]);
 
+  const fetchGrowth = useCallback(async () => {
+    setGrowthLoading(true);
+    setGrowthError("");
+    try {
+      const { data } = await api.get("/admin/users/growth", {
+        params: { range: growthRange },
+      });
+      setGrowthData(data.points || []);
+      setGrowthGranularity(data.granularity || "day");
+    } catch (err) {
+      setGrowthError(
+        err.response?.data?.message || "Không thể tải dữ liệu tăng trưởng",
+      );
+    } finally {
+      setGrowthLoading(false);
+    }
+  }, [growthRange]);
+
   useEffect(() => {
     fetchUsers();
   }, [fetchUsers]);
@@ -136,6 +172,10 @@ const UsersPage = () => {
   useEffect(() => {
     fetchPlans();
   }, [fetchPlans]);
+
+  useEffect(() => {
+    fetchGrowth();
+  }, [fetchGrowth]);
 
   useEffect(() => {
     if (!freePlanId) return;
@@ -219,7 +259,7 @@ const UsersPage = () => {
       });
       setShowAddModal(false);
       setAddForm({ name: "", email: "", password: "", plan: freePlanId });
-      fetchUsers();
+      await Promise.all([fetchUsers(), fetchGrowth()]);
     } catch (err) {
       alert(err.response?.data?.message || "Tạo tài khoản thất bại");
     } finally {
@@ -323,6 +363,114 @@ const UsersPage = () => {
             </div>
           ))}
         </div>
+
+        {/* User growth */}
+        <section
+          className="rounded-xl border border-gray-100 bg-white p-4 sm:p-5"
+          aria-labelledby="user-growth-title"
+        >
+          <div className="mb-5 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              <h2
+                id="user-growth-title"
+                className="text-base font-bold text-gray-900"
+              >
+                Tăng trưởng người dùng
+              </h2>
+              <p className="mt-0.5 text-sm text-gray-500">
+                Tổng người dùng tích lũy theo thời gian
+              </p>
+            </div>
+            <select
+              aria-label="Khoảng thời gian tăng trưởng người dùng"
+              value={growthRange}
+              onChange={(event) => setGrowthRange(event.target.value)}
+              className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm font-medium text-gray-700 outline-none transition focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20 sm:w-auto"
+            >
+              {USER_GROWTH_RANGES.map((range) => (
+                <option key={range.value} value={range.value}>
+                  {range.label}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div className="h-72 sm:h-80" aria-live="polite">
+            {growthLoading ? (
+              <div className="flex h-full items-center justify-center gap-3 text-gray-400">
+                <Loader2 size={20} className="animate-spin" aria-hidden="true" />
+                <span className="text-sm">Đang tải dữ liệu tăng trưởng</span>
+              </div>
+            ) : growthError ? (
+              <div className="flex h-full flex-col items-center justify-center gap-3 text-center">
+                <p className="text-sm text-red-600">{growthError}</p>
+                <button
+                  type="button"
+                  onClick={fetchGrowth}
+                  className="rounded-lg border border-gray-200 px-3 py-2 text-sm font-medium text-blue-600 transition hover:bg-blue-50 focus:outline-none focus:ring-2 focus:ring-blue-500/20"
+                >
+                  Thử lại
+                </button>
+              </div>
+            ) : growthData.length === 0 ? (
+              <div className="flex h-full items-center justify-center text-sm text-gray-400">
+                Chưa có dữ liệu người dùng
+              </div>
+            ) : (
+              <ResponsiveContainer width="100%" height="100%">
+                <LineChart
+                  data={growthData}
+                  margin={{ top: 8, right: 12, left: -10, bottom: 0 }}
+                >
+                  <CartesianGrid
+                    stroke="#E5E7EB"
+                    strokeDasharray="3 3"
+                    vertical={false}
+                  />
+                  <XAxis
+                    dataKey="date"
+                    axisLine={false}
+                    tickLine={false}
+                    minTickGap={28}
+                    tick={{ fontSize: 11, fill: "#6B7280" }}
+                    tickFormatter={(value) =>
+                      formatUserGrowthDate(value, growthGranularity)
+                    }
+                  />
+                  <YAxis
+                    allowDecimals={false}
+                    axisLine={false}
+                    tickLine={false}
+                    width={52}
+                    tick={{ fontSize: 11, fill: "#6B7280" }}
+                  />
+                  <Tooltip
+                    labelFormatter={(value) =>
+                      formatUserGrowthDate(value, growthGranularity, true)
+                    }
+                    formatter={(value) => [
+                      Number(value).toLocaleString("vi-VN"),
+                      "Tổng người dùng",
+                    ]}
+                    contentStyle={{
+                      border: "1px solid #E5E7EB",
+                      borderRadius: 10,
+                      boxShadow: "0 8px 24px rgba(15, 23, 42, 0.08)",
+                    }}
+                  />
+                  <Line
+                    type="monotone"
+                    dataKey="total"
+                    stroke="#2563EB"
+                    strokeWidth={3}
+                    dot={false}
+                    activeDot={{ r: 5, fill: "#2563EB", strokeWidth: 0 }}
+                  />
+                </LineChart>
+              </ResponsiveContainer>
+            )}
+          </div>
+        </section>
 
         {/* Table */}
         <div className="bg-white rounded-xl border border-gray-100">

@@ -7,6 +7,13 @@ const {
   normalizeSubscriptionState,
 } = require("../services/subscriptionService");
 const { findActivePlanByCodeOrId, getDefaultFreePlan } = require("../services/planService");
+const {
+  addPeriod,
+  buildCumulativeUserSeries,
+  normalizeUserGrowthRange,
+  startOfVietnamDay,
+  startOfVietnamMonth,
+} = require("../services/userGrowthService");
 
 // @desc    Get all users (admin only)
 // @route   GET /api/admin/users
@@ -54,6 +61,85 @@ const getUsers = async (req, res) => {
     res
       .status(500)
       .json({ success: false, message: "Lỗi server", error: error.message });
+  }
+};
+
+// @desc    Get cumulative user growth (admin only)
+// @route   GET /api/admin/users/growth
+// @access  Private/Admin
+const getUserGrowth = async (req, res) => {
+  try {
+    const range = normalizeUserGrowthRange(req.query.range);
+    const now = new Date();
+    let granularity = "day";
+    let start;
+    let endExclusive;
+
+    if (range === "all") {
+      granularity = "month";
+      const earliestUser = await User.findOne({ createdAt: { $type: "date" } })
+        .sort({ createdAt: 1 })
+        .select("createdAt")
+        .lean();
+
+      if (!earliestUser) {
+        return res.json({
+          success: true,
+          range,
+          granularity,
+          total: 0,
+          points: [],
+        });
+      }
+
+      start = startOfVietnamMonth(earliestUser.createdAt);
+      endExclusive = addPeriod(startOfVietnamMonth(now), granularity);
+    } else {
+      const dayCount = range === "90d" ? 90 : 30;
+      const todayStart = startOfVietnamDay(now);
+      start = new Date(todayStart.getTime() - (dayCount - 1) * 24 * 60 * 60 * 1000);
+      endExclusive = addPeriod(todayStart, granularity);
+    }
+
+    const baseline = await User.countDocuments({ createdAt: { $lt: start } });
+    const dateFormat = granularity === "month" ? "%Y-%m" : "%Y-%m-%d";
+    const registrations = await User.aggregate([
+      { $match: { createdAt: { $gte: start, $lt: endExclusive } } },
+      {
+        $group: {
+          _id: {
+            $dateToString: {
+              date: "$createdAt",
+              format: dateFormat,
+              timezone: "+07:00",
+            },
+          },
+          count: { $sum: 1 },
+        },
+      },
+      { $sort: { _id: 1 } },
+    ]);
+    const points = buildCumulativeUserSeries({
+      start,
+      endExclusive,
+      granularity,
+      baseline,
+      registrations,
+    });
+
+    return res.json({
+      success: true,
+      range,
+      granularity,
+      total: points.at(-1)?.total || baseline,
+      points,
+    });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: "Không thể tải dữ liệu tăng trưởng người dùng",
+      error: error.message,
+    });
   }
 };
 
@@ -379,6 +465,7 @@ const getRevenue = async (req, res) => {
 
 module.exports = {
   getUsers,
+  getUserGrowth,
   updateUser,
   deleteUser,
   createUser,
