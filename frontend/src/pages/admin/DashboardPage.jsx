@@ -8,6 +8,7 @@ import {
   YAxis,
   Tooltip,
   ResponsiveContainer,
+  CartesianGrid,
   PieChart,
   Pie,
   Cell,
@@ -20,10 +21,12 @@ import {
   FileText,
   Activity,
   Loader2,
+  Globe2,
 } from "lucide-react";
 import { Link } from "react-router-dom";
 import AdminLayout from "../../components/admin/AdminLayout";
 import api from "../../services/api";
+import { formatVisitChartDate } from "../../utils/websiteVisits";
 
 const statusLabels = {
   completed: "Hoàn thành",
@@ -137,7 +140,13 @@ const DashboardPage = () => {
     );
   }
 
-  const { stats, conversionsByDay, revenueByWeek, planDistribution } = data;
+  const {
+    stats,
+    conversionsByDay,
+    revenueByWeek,
+    planDistribution,
+    visitsByDay = [],
+  } = data;
   const totalDist = planDistribution.reduce((sum, item) => sum + (item.value || 0), 0);
 
   const statCards = [
@@ -169,13 +178,20 @@ const DashboardPage = () => {
       icon: TrendingUp,
       color: "text-green-600 bg-green-50",
     },
+    {
+      label: "LƯỢT TRUY CẬP HÔM NAY",
+      value: Number(stats.visitsToday?.value || 0).toLocaleString("vi-VN"),
+      changePct: stats.visitsToday?.changePct || 0,
+      icon: Globe2,
+      color: "text-cyan-600 bg-cyan-50",
+    },
   ];
 
   return (
     <AdminLayout>
       <div className="p-6 space-y-6">
         {/* Stats */}
-        <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4">
+        <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-5 gap-4">
           {statCards.map((stat) => (
             <div
               key={stat.label}
@@ -196,6 +212,90 @@ const DashboardPage = () => {
             </div>
           ))}
         </div>
+
+        {/* Website traffic */}
+        <section
+          className="rounded-xl border border-gray-100 bg-white p-5"
+          aria-labelledby="website-traffic-title"
+        >
+          <div className="mb-5 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              <h2
+                id="website-traffic-title"
+                className="text-sm font-semibold text-gray-900"
+              >
+                Lượt truy cập website
+              </h2>
+              <p className="mt-1 text-xs text-gray-400">
+                Từ 01/05/2026 đến nay
+              </p>
+            </div>
+            <div className="rounded-lg bg-cyan-50 px-3 py-2 text-right">
+              <p className="text-[10px] font-semibold uppercase tracking-wide text-cyan-700">
+                Tổng lượt truy cập
+              </p>
+              <p className="text-lg font-black text-cyan-900">
+                {Number(data.totalVisits || 0).toLocaleString("vi-VN")}
+              </p>
+            </div>
+          </div>
+
+          {visitsByDay.length === 0 ? (
+            <div className="flex h-64 items-center justify-center text-sm text-gray-400">
+              Chưa có dữ liệu truy cập
+            </div>
+          ) : (
+            <ResponsiveContainer width="100%" height={260}>
+              <LineChart
+                data={visitsByDay}
+                margin={{ top: 8, right: 12, left: -8, bottom: 0 }}
+              >
+                <CartesianGrid
+                  stroke="#E5E7EB"
+                  strokeDasharray="3 3"
+                  vertical={false}
+                />
+                <XAxis
+                  dataKey="date"
+                  axisLine={false}
+                  tickLine={false}
+                  minTickGap={30}
+                  tick={{ fontSize: 10, fill: "#9CA3AF" }}
+                  tickFormatter={(value) => formatVisitChartDate(value)}
+                />
+                <YAxis
+                  allowDecimals={false}
+                  axisLine={false}
+                  tickLine={false}
+                  width={44}
+                  tick={{ fontSize: 10, fill: "#9CA3AF" }}
+                />
+                <Tooltip
+                  labelFormatter={(value) => formatVisitChartDate(value, true)}
+                  formatter={(value) => [
+                    Number(value).toLocaleString("vi-VN"),
+                    "Lượt truy cập",
+                  ]}
+                  contentStyle={{
+                    fontSize: 12,
+                    border: "1px solid #E5E7EB",
+                    boxShadow: "0 8px 24px rgba(15, 23, 42, 0.08)",
+                    borderRadius: 8,
+                  }}
+                  cursor={{ stroke: "#CBD5E1" }}
+                />
+                <Line
+                  type="monotone"
+                  dataKey="visits"
+                  stroke="#0891B2"
+                  strokeWidth={2.5}
+                  dot={false}
+                  activeDot={{ r: 4, fill: "#0891B2", strokeWidth: 0 }}
+                />
+              </LineChart>
+            </ResponsiveContainer>
+          )}
+        </section>
 
         {/* Charts row */}
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">

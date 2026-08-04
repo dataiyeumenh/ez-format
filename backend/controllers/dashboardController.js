@@ -2,7 +2,13 @@ const User = require("../models/User");
 const Payment = require("../models/Payment");
 const ConversionRun = require("../models/ConversionRun");
 const Plan = require("../models/Plan");
+const WebsiteVisit = require("../models/WebsiteVisit");
 const { serializeConversionRun } = require("../services/conversionRunService");
+const {
+  WEBSITE_LAUNCH_DATE,
+  summarizeWebsiteVisits,
+  toVietnamDateKey,
+} = require("../services/websiteVisitService");
 const {
   vnStartOfDay,
   vnStartOfMonth,
@@ -48,6 +54,7 @@ async function getDashboard(req, res) {
     const prevMonthStart = vnStartOfPrevMonth(now);
     const sevenDaysAgoStart = addDaysUtc(todayStart, -6); // 7 ngày gồm hôm nay
     const fourWeeksAgoStart = addDaysUtc(todayStart, -27); // 28 ngày = 4 tuần
+    const todayDateKey = toVietnamDateKey(now);
 
     const [
       totalUsers,
@@ -60,6 +67,7 @@ async function getDashboard(req, res) {
       filesYesterday,
       monthlyRevenue,
       prevMonthlyRevenue,
+      websiteVisitRows,
     ] = await Promise.all([
       User.countDocuments({}),
       User.countDocuments({ isActive: true }),
@@ -74,7 +82,18 @@ async function getDashboard(req, res) {
       ConversionRun.countDocuments({ createdAt: { $gte: yesterdayStart, $lt: todayStart } }),
       sumPaid({ paidAt: { $gte: monthStart } }),
       sumPaid({ paidAt: { $gte: prevMonthStart, $lt: monthStart } }),
+      WebsiteVisit.find({
+        dateKey: { $gte: WEBSITE_LAUNCH_DATE, $lte: todayDateKey },
+      })
+        .select("dateKey count -_id")
+        .sort({ dateKey: 1 })
+        .lean(),
     ]);
+
+    const websiteVisits = summarizeWebsiteVisits({
+      todayDateKey,
+      rows: websiteVisitRows,
+    });
 
     // Chuyển đổi theo ngày (7 ngày gần nhất)
     const dayRuns = await ConversionRun.find({
@@ -190,6 +209,13 @@ async function getDashboard(req, res) {
           value: monthlyRevenue,
           changePct: changePct(monthlyRevenue, prevMonthlyRevenue),
         },
+        visitsToday: {
+          value: websiteVisits.visitsToday,
+          changePct: changePct(
+            websiteVisits.visitsToday,
+            websiteVisits.visitsYesterday,
+          ),
+        },
       },
       activeTotal: activeUsers,
       conversionsByDay,
@@ -198,6 +224,8 @@ async function getDashboard(req, res) {
       recentConversions,
       newUsersToday,
       newUsersTodayCount,
+      totalVisits: websiteVisits.totalVisits,
+      visitsByDay: websiteVisits.visitsByDay,
     });
   } catch (error) {
     res.status(500).json({ success: false, message: "Lỗi server", error: error.message });

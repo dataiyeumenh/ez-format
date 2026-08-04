@@ -1,6 +1,7 @@
 const mongoose = require("mongoose");
 const dns = require("dns").promises;
 const CouponUsage = require("../models/CouponUsage");
+const WebsiteVisit = require("../models/WebsiteVisit");
 
 const connectDB = async () => {
   const mongoUri = process.env.MONGO_URI;
@@ -33,7 +34,7 @@ const connectDB = async () => {
     }
 
     const conn = await mongoose.connect(mongoUri);
-    await CouponUsage.init();
+    await Promise.all([CouponUsage.init(), WebsiteVisit.init()]);
     console.log("[DB] MongoDB connected:", conn.connection.host);
   } catch (error) {
     console.error("[DB] MongoDB connection failed:", error.message);

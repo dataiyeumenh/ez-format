@@ -4,6 +4,7 @@ import { Loader2 } from "lucide-react";
 import { AuthProvider } from "./context/AuthContext";
 import AdminRoute from "./components/AdminRoute";
 import ProtectedRoute from "./components/ProtectedRoute";
+import WebsiteVisitTracker from "./components/WebsiteVisitTracker";
 
 import LandingPage from "./pages/LandingPage";
 import ConvertPage from "./pages/ConvertPage";
@@ -37,6 +38,7 @@ function App() {
   return (
     <AuthProvider>
       <Router>
+        <WebsiteVisitTracker />
         <Routes>
           <Route path="/" element={<LandingPage />} />
           <Route

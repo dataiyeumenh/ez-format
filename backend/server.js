@@ -45,6 +45,7 @@ app.use("/api/conversion-runs", require("./routes/conversionRuns"));
 app.use("/api/payments", require("./routes/payments"));
 app.use("/api/feedback", require("./routes/feedback"));
 app.use("/api/notices", require("./routes/notices"));
+app.use("/api/analytics", require("./routes/analytics"));
 
 // Backward-compatible alias for older admin revenue bundles.
 app.get("/api/revenue", requireDb, protect, adminOnly, getRevenue);
