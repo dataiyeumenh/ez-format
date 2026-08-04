@@ -1,39 +1,39 @@
 {
-  "timestamp": "2026-08-04 06:17:02",
   "ok": true,
-  "steps": [
-    {
-      "status": "ok",
-      "name": "Prerequisites",
-      "seconds": 0.0074158
-    },
-    {
-      "status": "ok",
-      "name": "Fixtures templates",
-      "seconds": 0.0056933
-    },
-    {
-      "status": "ok",
-      "name": "Backend syntax",
-      "seconds": 0.2550502
-    },
-    {
-      "status": "ok",
-      "name": "Frontend build",
-      "seconds": 3.8023766
-    },
-    {
-      "status": "ok",
-      "name": "Converter API smoke",
-      "seconds": 1.5757605
-    }
-  ],
-  "failed": [],
+  "timestamp": "2026-08-04 07:27:21",
   "passed": [
     "Prerequisites",
     "Fixtures templates",
     "Backend syntax",
     "Frontend build",
     "Converter API smoke"
+  ],
+  "failed": [],
+  "steps": [
+    {
+      "status": "ok",
+      "seconds": 0.0173509,
+      "name": "Prerequisites"
+    },
+    {
+      "status": "ok",
+      "seconds": 0.0144889,
+      "name": "Fixtures templates"
+    },
+    {
+      "status": "ok",
+      "seconds": 0.2784134,
+      "name": "Backend syntax"
+    },
+    {
+      "status": "ok",
+      "seconds": 3.8913528,
+      "name": "Frontend build"
+    },
+    {
+      "status": "ok",
+      "seconds": 1.8346846,
+      "name": "Converter API smoke"
+    }
   ]
 }
