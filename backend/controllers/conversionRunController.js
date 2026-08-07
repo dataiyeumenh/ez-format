@@ -22,10 +22,12 @@ async function deductCreditForCompletedRun(userId) {
 
 // Quét các run "processing" quá 5 giờ -> chuyển sang "cancelled"
 // (user upload nhưng không tải xuống nên không bao giờ completed).
-async function cancelStaleProcessingRuns() {
+async function cancelStaleProcessingRuns(userId = null) {
   const cutoff = new Date(Date.now() - STALE_PROCESSING_MS);
+  const filter = { status: "processing", startedAt: { $lt: cutoff } };
+  if (userId) filter.user = userId;
   await ConversionRun.updateMany(
-    { status: "processing", startedAt: { $lt: cutoff } },
+    filter,
     {
       $set: {
         status: "cancelled",
@@ -34,6 +36,49 @@ async function cancelStaleProcessingRuns() {
       },
     },
   );
+}
+
+async function getUserConversionRuns(req, res) {
+  try {
+    await cancelStaleProcessingRuns(req.user._id);
+
+    const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+    const limit = Math.min(50, Math.max(1, parseInt(req.query.limit, 10) || 10));
+    const skip = (page - 1) * limit;
+    const owner = { user: req.user._id };
+    const filter = { ...buildConversionRunFilter(req.query), ...owner };
+    const statsFilter = {
+      ...buildConversionRunFilter({ from: req.query.from, to: req.query.to }),
+      ...owner,
+    };
+
+    const [total, runs, totalAll, completed, failed, processing, cancelled] =
+      await Promise.all([
+        ConversionRun.countDocuments(filter),
+        ConversionRun.find(filter).sort({ createdAt: -1 }).skip(skip).limit(limit),
+        ConversionRun.countDocuments(statsFilter),
+        ConversionRun.countDocuments({ ...statsFilter, status: "completed" }),
+        ConversionRun.countDocuments({ ...statsFilter, status: "failed" }),
+        ConversionRun.countDocuments({ ...statsFilter, status: "processing" }),
+        ConversionRun.countDocuments({ ...statsFilter, status: "cancelled" }),
+      ]);
+
+    res.json({
+      success: true,
+      total,
+      page,
+      limit,
+      totalPages: Math.max(1, Math.ceil(total / limit)),
+      stats: { total: totalAll, completed, failed, processing, cancelled },
+      runs: runs.map(serializeConversionRun),
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: "Không thể tải lịch sử chuyển đổi",
+      error: error.message,
+    });
+  }
 }
 
 function cleanFileName(fileName) {
@@ -171,5 +216,6 @@ async function getAdminConversionRuns(req, res) {
 module.exports = {
   createConversionRun,
   updateConversionRunStatus,
+  getUserConversionRuns,
   getAdminConversionRuns,
 };

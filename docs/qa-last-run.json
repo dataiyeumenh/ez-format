@@ -1,29 +1,30 @@
 {
-  "timestamp": "2026-08-05 02:51:58",
+  "timestamp": "2026-08-08 03:03:12",
+  "ok": true,
   "steps": [
     {
-      "seconds": 0.01707,
       "status": "ok",
+      "seconds": 0.0202175,
       "name": "Prerequisites"
     },
     {
-      "seconds": 0.0136432,
       "status": "ok",
+      "seconds": 0.0138596,
       "name": "Fixtures templates"
     },
     {
-      "seconds": 0.2718614,
       "status": "ok",
+      "seconds": 0.2912402,
       "name": "Backend syntax"
     },
     {
-      "seconds": 3.8706623,
       "status": "ok",
+      "seconds": 3.8737717,
       "name": "Frontend build"
     },
     {
-      "seconds": 1.9282112,
       "status": "ok",
+      "seconds": 1.8746706,
       "name": "Converter API smoke"
     }
   ],
@@ -34,6 +35,5 @@
     "Backend syntax",
     "Frontend build",
     "Converter API smoke"
-  ],
-  "ok": true
+  ]
 }

@@ -71,5 +71,6 @@ const conversionRunSchema = new mongoose.Schema(
 
 conversionRunSchema.index({ createdAt: -1 });
 conversionRunSchema.index({ status: 1, createdAt: -1 });
+conversionRunSchema.index({ user: 1, createdAt: -1 });
 
 module.exports = mongoose.model("ConversionRun", conversionRunSchema);

@@ -1,11 +1,35 @@
 const Feedback = require("../models/Feedback");
+const Notice = require("../models/Notice");
 const {
+  STATUS_LABELS,
   VALID_CATEGORIES,
   VALID_RATINGS,
   VALID_STATUSES,
   buildFeedbackFilter,
   serializeFeedback,
 } = require("../services/feedbackService");
+
+function buildStatusNotice(feedback, status) {
+  const normalizedMessage = String(feedback.message || "")
+    .replace(/\s+/g, " ")
+    .trim();
+  const excerpt =
+    normalizedMessage.length > 80
+      ? `${normalizedMessage.slice(0, 77)}...`
+      : normalizedMessage;
+
+  if (status === "resolved") {
+    return {
+      title: "Góp ý của bạn đã được giải quyết",
+      description: `Góp ý “${excerpt}” đã được giải quyết. Hãy mở mục Góp ý, chọn “Góp ý của tôi” để đánh giá mức độ hài lòng.`,
+    };
+  }
+
+  return {
+    title: "Trạng thái góp ý đã được cập nhật",
+    description: `Góp ý “${excerpt}” đã chuyển sang trạng thái “${STATUS_LABELS[status]}”.`,
+  };
+}
 
 async function createFeedback(req, res) {
   try {
@@ -116,8 +140,8 @@ async function updateFeedbackStatus(req, res) {
   }
 
   try {
-    const feedback = await Feedback.findByIdAndUpdate(
-      req.params.id,
+    let feedback = await Feedback.findOneAndUpdate(
+      { _id: req.params.id, status: { $ne: status } },
       {
         status,
         statusUpdatedAt: new Date(),
@@ -127,9 +151,21 @@ async function updateFeedbackStatus(req, res) {
     ).populate("user", "name email");
 
     if (!feedback) {
-      return res.status(404).json({
-        success: false,
-        message: "Không tìm thấy góp ý",
+      feedback = await Feedback.findById(req.params.id).populate(
+        "user",
+        "name email",
+      );
+      if (!feedback) {
+        return res.status(404).json({
+          success: false,
+          message: "Không tìm thấy góp ý",
+        });
+      }
+    } else {
+      const recipient = feedback.user?._id || feedback.user;
+      await Notice.create({
+        ...buildStatusNotice(feedback, status),
+        recipient,
       });
     }
 
