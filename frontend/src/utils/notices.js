@@ -27,3 +27,10 @@ export function formatUnreadCount(value) {
   const count = Math.max(0, Math.trunc(Number(value) || 0));
   return count > 99 ? "99+" : String(count);
 }
+
+export function getNoticeListParams(scope) {
+  return {
+    limit: 50,
+    scope: scope === "individual" ? "individual" : "broadcast",
+  };
+}

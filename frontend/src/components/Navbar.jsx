@@ -5,6 +5,7 @@ import { LogOut, Menu, X } from "lucide-react";
 import ezFormatLogo from "../assets/ezformat-main-logo.png";
 import UserPlanBadge from "./UserPlanBadge";
 import FeedbackModal from "./FeedbackModal";
+import ConversionHistoryModal from "./ConversionHistoryModal";
 import ChangePasswordModal from "./ChangePasswordModal";
 import NoticeBell from "./NoticeBell";
 
@@ -15,7 +16,9 @@ const Logo = () => (
       alt="EzFormat logo"
       className="w-9 h-9 object-contain transition-transform group-hover:scale-105"
     />
-    <span className="text-xl font-extrabold tracking-tight text-gray-950">EzFormat</span>
+    <span className="text-xl font-extrabold tracking-tight text-gray-950">
+      EzFormat
+    </span>
   </Link>
 );
 
@@ -33,6 +36,7 @@ const Navbar = () => {
   const [userMenuOpen, setUserMenuOpen] = useState(false);
   const [logoutConfirmOpen, setLogoutConfirmOpen] = useState(false);
   const [feedbackOpen, setFeedbackOpen] = useState(false);
+  const [historyOpen, setHistoryOpen] = useState(false);
   const [changePwOpen, setChangePwOpen] = useState(false);
   const menuRef = useRef(null);
   const mobileMenuRef = useRef(null);
@@ -183,6 +187,16 @@ const Navbar = () => {
                       >
                         Góp ý
                       </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          closeUserMenu();
+                          setHistoryOpen(true);
+                        }}
+                        className="mt-1 block w-full rounded-xl px-3 py-2 text-left text-sm font-semibold text-gray-700 hover:bg-gray-50"
+                      >
+                        Lịch sử chuyển đổi
+                      </button>
                     </div>
                   )}
                 </div>
@@ -295,6 +309,17 @@ const Navbar = () => {
                     >
                       Góp ý
                     </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        closeUserMenu();
+                        closeMobile();
+                        setHistoryOpen(true);
+                      }}
+                      className="mt-1 block w-full rounded-xl px-3 py-2 text-left text-sm font-semibold text-gray-700 hover:bg-gray-50"
+                    >
+                      Lịch sử chuyển đổi
+                    </button>
                   </div>
                 )}
               </div>
@@ -331,6 +356,10 @@ const Navbar = () => {
       )}
 
       <FeedbackModal open={feedbackOpen} onClose={() => setFeedbackOpen(false)} />
+      <ConversionHistoryModal
+        open={historyOpen}
+        onClose={() => setHistoryOpen(false)}
+      />
       <ChangePasswordModal open={changePwOpen} onClose={() => setChangePwOpen(false)} />
     </nav>
   );

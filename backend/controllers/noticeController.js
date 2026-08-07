@@ -12,10 +12,36 @@ function resolveLimit(value) {
   return Math.min(parsed, 50);
 }
 
+function buildVisibilityFilter(user, scope) {
+  if (user?.role === "admin") {
+    if (scope === "broadcast") return { recipient: null };
+    if (scope === "individual") {
+      return { recipient: { $exists: true, $ne: null } };
+    }
+    return {};
+  }
+  return {
+    $or: [{ recipient: null }, { recipient: user._id }],
+  };
+}
+
+function addCreatedAfter(filter, createdAfter) {
+  const dateFilter = { createdAt: { $gt: createdAfter } };
+  return Object.keys(filter).length > 0
+    ? { $and: [filter, dateFilter] }
+    : dateFilter;
+}
+
 async function listNotices(req, res) {
   try {
+    const isAdmin = req.user?.role === "admin";
+    const visibilityFilter = buildVisibilityFilter(req.user, req.query?.scope);
+    let noticeQuery = Notice.find(visibilityFilter);
+    if (isAdmin) {
+      noticeQuery = noticeQuery.populate("recipient", "name email");
+    }
     const [notices, readState] = await Promise.all([
-      Notice.find({})
+      noticeQuery
         .sort({ createdAt: -1 })
         .limit(resolveLimit(req.query?.limit)),
       NoticeReadState.findOne({ user: req.user._id }),
@@ -24,11 +50,11 @@ async function listNotices(req, res) {
       ? new Date(readState.readThrough)
       : null;
     const unreadFilter = readThrough
-      ? { createdAt: { $gt: readThrough } }
-      : {};
+      ? addCreatedAfter(visibilityFilter, readThrough)
+      : visibilityFilter;
     const unreadCount = await Notice.countDocuments(unreadFilter);
     const items = notices.map((notice) => ({
-      ...serializeNotice(notice),
+      ...serializeNotice(notice, { includeRecipient: isAdmin }),
       isRead: Boolean(
         readThrough && new Date(notice.createdAt).getTime() <= readThrough.getTime(),
       ),
@@ -72,9 +98,9 @@ async function markNoticesRead(req, res) {
       { upsert: true, new: true, setDefaultsOnInsert: true },
     );
     const effectiveReadThrough = state?.readThrough || readThrough;
-    const unreadCount = await Notice.countDocuments({
-      createdAt: { $gt: effectiveReadThrough },
-    });
+    const unreadCount = await Notice.countDocuments(
+      addCreatedAfter(buildVisibilityFilter(req.user), effectiveReadThrough),
+    );
 
     return res.json({ success: true, unreadCount });
   } catch (_error) {
@@ -114,6 +140,7 @@ async function createNotice(req, res) {
 }
 
 module.exports = {
+  buildVisibilityFilter,
   createNotice,
   listNotices,
   markNoticesRead,

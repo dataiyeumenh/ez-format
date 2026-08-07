@@ -38,14 +38,27 @@ function toIsoString(value) {
   return Number.isNaN(date.getTime()) ? null : date.toISOString();
 }
 
-function serializeNotice(notice) {
-  return {
+function serializeNotice(notice, { includeRecipient = false } = {}) {
+  const result = {
     id: String(notice._id || notice.id),
     title: notice.title,
     description: notice.description,
     createdAt: toIsoString(notice.createdAt),
     updatedAt: toIsoString(notice.updatedAt),
   };
+
+  if (includeRecipient) {
+    const recipient = notice.recipient;
+    result.recipient = recipient
+      ? {
+          id: String(recipient._id || recipient.id || recipient),
+          name: recipient.name || "",
+          email: recipient.email || "",
+        }
+      : null;
+  }
+
+  return result;
 }
 
 module.exports = {

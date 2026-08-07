@@ -4,8 +4,24 @@ import test from "node:test";
 import {
   formatNoticeDate,
   formatUnreadCount,
+  getNoticeListParams,
   normalizeNoticeForm,
 } from "./notices.js";
+
+test("builds admin notice list params for each supported tab", () => {
+  assert.deepEqual(getNoticeListParams("broadcast"), {
+    limit: 50,
+    scope: "broadcast",
+  });
+  assert.deepEqual(getNoticeListParams("individual"), {
+    limit: 50,
+    scope: "individual",
+  });
+  assert.deepEqual(getNoticeListParams("unexpected"), {
+    limit: 50,
+    scope: "broadcast",
+  });
+});
 
 test("normalizes a notice form for the API", () => {
   assert.deepEqual(

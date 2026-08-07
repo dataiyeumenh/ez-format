@@ -13,6 +13,7 @@ import {
   X,
 } from "lucide-react";
 import AdminLayout from "../../components/admin/AdminLayout";
+import DateTimePicker from "../../components/DateTimePicker";
 import api from "../../services/api";
 import {
   COUPON_STATUS_OPTIONS,
@@ -294,21 +295,21 @@ function CouponDialog({ coupon, plans, open, saving, apiError, onClose, onSave }
                 />
               </Field>
               <Field label="Bắt đầu" required>
-                <input
-                  type="datetime-local"
+                <DateTimePicker
                   required
                   value={form.startDate}
-                  onChange={(event) => update("startDate", event.target.value)}
+                  onChange={(value) => update("startDate", value)}
+                  ariaLabel="Chọn thời gian bắt đầu"
                   className={inputClass}
                 />
               </Field>
               <Field label="Kết thúc" required>
-                <input
-                  type="datetime-local"
+                <DateTimePicker
                   required
                   min={form.startDate}
                   value={form.endDate}
-                  onChange={(event) => update("endDate", event.target.value)}
+                  onChange={(value) => update("endDate", value)}
+                  ariaLabel="Chọn thời gian kết thúc"
                   className={inputClass}
                 />
               </Field>

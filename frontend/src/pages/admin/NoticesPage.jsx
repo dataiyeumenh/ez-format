@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import * as Dialog from "@radix-ui/react-dialog";
 import {
   BellRing,
@@ -6,11 +6,17 @@ import {
   Plus,
   RefreshCw,
   Send,
+  UserRound,
+  UsersRound,
   X,
 } from "lucide-react";
 import AdminLayout from "../../components/admin/AdminLayout";
 import api from "../../services/api";
-import { formatNoticeDate, normalizeNoticeForm } from "../../utils/notices";
+import {
+  formatNoticeDate,
+  getNoticeListParams,
+  normalizeNoticeForm,
+} from "../../utils/notices";
 
 const emptyForm = { title: "", description: "" };
 
@@ -129,6 +135,7 @@ function NoticeDialog({ open, saving, error, onClose, onSubmit }) {
 }
 
 export default function NoticesPage() {
+  const [activeScope, setActiveScope] = useState("broadcast");
   const [notices, setNotices] = useState([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -137,21 +144,31 @@ export default function NoticesPage() {
   const [dialogError, setDialogError] = useState("");
   const [successMessage, setSuccessMessage] = useState("");
   const [dialogOpen, setDialogOpen] = useState(false);
+  const requestIdRef = useRef(0);
 
   const loadNotices = useCallback(async ({ silent = false } = {}) => {
+    const requestId = ++requestIdRef.current;
     if (silent) setRefreshing(true);
     else setLoading(true);
     setPageError("");
     try {
-      const { data } = await api.get("/admin/notices", { params: { limit: 50 } });
-      setNotices(data.notices || []);
+      const { data } = await api.get("/admin/notices", {
+        params: getNoticeListParams(activeScope),
+      });
+      if (requestId === requestIdRef.current) {
+        setNotices(data.notices || []);
+      }
     } catch (error) {
-      setPageError(error.response?.data?.message || "Không thể tải thông báo.");
+      if (requestId === requestIdRef.current) {
+        setPageError(error.response?.data?.message || "Không thể tải thông báo.");
+      }
     } finally {
-      setLoading(false);
-      setRefreshing(false);
+      if (requestId === requestIdRef.current) {
+        setLoading(false);
+        setRefreshing(false);
+      }
     }
-  }, []);
+  }, [activeScope]);
 
   useEffect(() => {
     loadNotices();
@@ -163,7 +180,11 @@ export default function NoticesPage() {
     try {
       const payload = normalizeNoticeForm(form);
       const { data } = await api.post("/admin/notices", payload);
-      setNotices((current) => [data.notice, ...current]);
+      if (activeScope === "broadcast") {
+        setNotices((current) => [data.notice, ...current]);
+      } else {
+        setActiveScope("broadcast");
+      }
       setDialogOpen(false);
       setSuccessMessage("Thông báo đã được gửi đến toàn bộ người dùng.");
     } catch (error) {
@@ -233,7 +254,11 @@ export default function NoticesPage() {
         <section className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
           <div className="flex items-center justify-between border-b border-slate-100 px-5 py-4">
             <div>
-              <h2 className="font-bold text-slate-900">Lịch sử đã gửi</h2>
+              <h2 className="font-bold text-slate-900">
+                {activeScope === "broadcast"
+                  ? "Thông báo toàn bộ người dùng"
+                  : "Thông báo từng người dùng"}
+              </h2>
               <p className="mt-0.5 text-xs text-slate-400">Tối đa 50 thông báo mới nhất</p>
             </div>
             <span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-semibold text-slate-600">
@@ -241,6 +266,43 @@ export default function NoticesPage() {
             </span>
           </div>
 
+          <div
+            role="tablist"
+            aria-label="Phạm vi thông báo"
+            className="flex gap-1 border-b border-slate-100 bg-slate-50/70 px-3 pt-2 sm:px-5"
+          >
+            {[
+              {
+                id: "broadcast",
+                label: "Toàn bộ người dùng",
+                icon: UsersRound,
+              },
+              {
+                id: "individual",
+                label: "Từng người dùng",
+                icon: UserRound,
+              },
+            ].map((tab) => {
+              const Icon = tab.icon;
+              const active = activeScope === tab.id;
+              return (
+                <button
+                  key={tab.id}
+                  type="button"
+                  role="tab"
+                  aria-selected={active}
+                  aria-controls="notice-list-panel"
+                  onClick={() => setActiveScope(tab.id)}
+                  className={`inline-flex min-h-11 items-center gap-2 border-b-2 px-3 py-2.5 text-sm font-semibold transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-1 ${active ? "border-blue-600 text-blue-700" : "border-transparent text-slate-500 hover:border-slate-300 hover:text-slate-800"}`}
+                >
+                  <Icon size={16} aria-hidden="true" />
+                  {tab.label}
+                </button>
+              );
+            })}
+          </div>
+
+          <div id="notice-list-panel" role="tabpanel">
           {loading ? (
             <div className="flex min-h-64 items-center justify-center gap-2 text-sm text-slate-500">
               <Loader2 size={18} className="animate-spin text-blue-600" />
@@ -253,7 +315,9 @@ export default function NoticesPage() {
               </div>
               <h3 className="font-bold text-slate-800">Chưa có thông báo</h3>
               <p className="mt-1 max-w-sm text-sm text-slate-500">
-                Gửi thông báo đầu tiên để cập nhật thông tin cho toàn bộ người dùng.
+                {activeScope === "broadcast"
+                  ? "Gửi thông báo đầu tiên để cập nhật thông tin cho toàn bộ người dùng."
+                  : "Thông báo riêng khi xử lý góp ý của người dùng sẽ xuất hiện tại đây."}
               </p>
             </div>
           ) : (
@@ -270,6 +334,12 @@ export default function NoticesPage() {
                         {formatNoticeDate(notice.createdAt)}
                       </time>
                     </div>
+                    {activeScope === "individual" && notice.recipient && (
+                      <p className="mt-1 text-xs font-medium text-blue-700">
+                        {notice.recipient.name || "Người dùng"}
+                        {notice.recipient.email && ` · ${notice.recipient.email}`}
+                      </p>
+                    )}
                     <p className="mt-2 whitespace-pre-wrap break-words text-sm leading-6 text-slate-600">
                       {notice.description}
                     </p>
@@ -278,6 +348,7 @@ export default function NoticesPage() {
               ))}
             </div>
           )}
+          </div>
         </section>
       </div>
 

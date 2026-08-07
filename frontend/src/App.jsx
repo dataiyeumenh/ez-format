@@ -56,8 +56,14 @@ function App() {
           <Route path="/pricing" element={<PricingPage />} />
           <Route path="/contact" element={<ContactPage />} />
           <Route path="/payment" element={<PaymentPage />} />
-          <Route path="/payment/success" element={<PaymentResultPage status="success" />} />
-          <Route path="/payment/cancel" element={<PaymentResultPage status="cancel" />} />
+          <Route
+            path="/payment/success"
+            element={<PaymentResultPage status="success" />}
+          />
+          <Route
+            path="/payment/cancel"
+            element={<PaymentResultPage status="cancel" />}
+          />
 
           {/* Admin routes */}
           <Route

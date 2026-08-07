@@ -10,6 +10,7 @@ const {
 } = require("../services/noticeService");
 const {
   createNotice,
+  buildVisibilityFilter,
   listNotices,
   markNoticesRead,
 } = require("../controllers/noticeController");
@@ -30,15 +31,23 @@ function createResponse() {
 }
 
 test("notice model stores required title and description with timestamps", () => {
+  const recipient = new mongoose.Types.ObjectId();
   const notice = new Notice({
     title: "  Bảo trì hệ thống  ",
     description: "  Hệ thống bảo trì lúc 22:00.  ",
+    recipient,
   });
 
   assert.equal(notice.validateSync(), undefined);
   assert.equal(notice.title, "Bảo trì hệ thống");
   assert.equal(notice.description, "Hệ thống bảo trì lúc 22:00.");
+  assert.equal(String(notice.recipient), String(recipient));
   assert.equal(Notice.schema.options.timestamps, true);
+  assert.ok(
+    Notice.schema
+      .indexes()
+      .some(([fields]) => fields.recipient === 1 && fields.createdAt === -1),
+  );
 });
 
 test("notice model rejects missing and oversized content", () => {
@@ -105,13 +114,50 @@ test("normalizes and serializes notice API payloads", () => {
   );
 });
 
-test("lists newest notices with a hard maximum of 50", async () => {
+test("admin notice serialization includes the targeted recipient", () => {
+  assert.deepEqual(
+    serializeNotice(
+      {
+        _id: "notice-id",
+        title: "Đã xử lý góp ý",
+        description: "Nội dung",
+        recipient: {
+          _id: "user-id",
+          name: "Nguyễn Minh",
+          email: "minh@example.com",
+        },
+      },
+      { includeRecipient: true },
+    ).recipient,
+    {
+      id: "user-id",
+      name: "Nguyễn Minh",
+      email: "minh@example.com",
+    },
+  );
+});
+
+test("admin notice scopes separate broadcast and targeted records", () => {
+  const admin = { _id: "admin-id", role: "admin" };
+  assert.deepEqual(buildVisibilityFilter(admin, "broadcast"), {
+    recipient: null,
+  });
+  assert.deepEqual(buildVisibilityFilter(admin, "individual"), {
+    recipient: { $exists: true, $ne: null },
+  });
+  assert.deepEqual(buildVisibilityFilter(admin, "unknown"), {});
+});
+
+test("lists only broadcast and recipient notices with a hard maximum of 50", async () => {
   const originalFind = Notice.find;
   const originalCountDocuments = Notice.countDocuments;
   const originalFindReadState = NoticeReadState.findOne;
   let requestedLimit = null;
-  Notice.find = () => ({
+  Notice.find = (filter) => ({
     sort(sort) {
+      assert.deepEqual(filter, {
+        $or: [{ recipient: null }, { recipient: "user-id" }],
+      });
       assert.deepEqual(sort, { createdAt: -1 });
       return this;
     },
@@ -130,7 +176,10 @@ test("lists newest notices with a hard maximum of 50", async () => {
   });
   Notice.countDocuments = async (filter) => {
     assert.deepEqual(filter, {
-      createdAt: { $gt: new Date("2025-08-03T02:00:00.000Z") },
+      $and: [
+        { $or: [{ recipient: null }, { recipient: "user-id" }] },
+        { createdAt: { $gt: new Date("2025-08-03T02:00:00.000Z") } },
+      ],
     });
     return 3;
   };
@@ -158,6 +207,49 @@ test("lists newest notices with a hard maximum of 50", async () => {
   }
 });
 
+test("admin notice list applies the selected scope and includes recipients", async () => {
+  const originalFind = Notice.find;
+  const originalCountDocuments = Notice.countDocuments;
+  const originalFindReadState = NoticeReadState.findOne;
+
+  Notice.find = (filter) => ({
+    populate(path, fields) {
+      assert.deepEqual(filter, { recipient: null });
+      assert.equal(path, "recipient");
+      assert.equal(fields, "name email");
+      return this;
+    },
+    sort() {
+      return this;
+    },
+    limit() {
+      return Promise.resolve([]);
+    },
+  });
+  Notice.countDocuments = async (filter) => {
+    assert.deepEqual(filter, { recipient: null });
+    return 0;
+  };
+  NoticeReadState.findOne = async () => null;
+
+  try {
+    const res = createResponse();
+    await listNotices(
+      {
+        query: { scope: "broadcast" },
+        user: { _id: "admin-id", role: "admin" },
+      },
+      res,
+    );
+    assert.equal(res.statusCode, 200);
+    assert.equal(res.body.total, 0);
+  } finally {
+    Notice.find = originalFind;
+    Notice.countDocuments = originalCountDocuments;
+    NoticeReadState.findOne = originalFindReadState;
+  }
+});
+
 test("marks notices read only for the authenticated user", async () => {
   const originalFindOneAndUpdate = NoticeReadState.findOneAndUpdate;
   const originalCountDocuments = Notice.countDocuments;
@@ -174,7 +266,12 @@ test("marks notices read only for the authenticated user", async () => {
     return { readThrough: cursor };
   };
   Notice.countDocuments = async (filter) => {
-    assert.deepEqual(filter, { createdAt: { $gt: cursor } });
+    assert.deepEqual(filter, {
+      $and: [
+        { $or: [{ recipient: null }, { recipient: "user-id" }] },
+        { createdAt: { $gt: cursor } },
+      ],
+    });
     return 0;
   };
 

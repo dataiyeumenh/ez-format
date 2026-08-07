@@ -3,6 +3,7 @@ const test = require("node:test");
 const mongoose = require("mongoose");
 
 const Feedback = require("../models/Feedback");
+const Notice = require("../models/Notice");
 const {
   RATING_LABELS,
   STATUS_LABELS,
@@ -274,21 +275,27 @@ test("user feedback history is scoped to the authenticated user", async () => {
   }
 });
 
-test("admin updates feedback status with audit metadata", async () => {
+test("admin updates feedback status and notifies the feedback owner", async () => {
   const feedbackId = new mongoose.Types.ObjectId();
   const adminId = new mongoose.Types.ObjectId();
-  const originalUpdate = Feedback.findByIdAndUpdate;
+  const userId = new mongoose.Types.ObjectId();
+  const originalUpdate = Feedback.findOneAndUpdate;
+  const originalCreateNotice = Notice.create;
   let capturedUpdate;
+  let capturedNotice;
 
-  Feedback.findByIdAndUpdate = (_id, update, options) => {
-    assert.equal(String(_id), String(feedbackId));
+  Feedback.findOneAndUpdate = (filter, update, options) => {
+    assert.deepEqual(filter, {
+      _id: String(feedbackId),
+      status: { $ne: "resolved" },
+    });
     assert.deepEqual(options, { new: true, runValidators: true });
     capturedUpdate = update;
     return {
       async populate() {
         return {
           _id: feedbackId,
-          user: new mongoose.Types.ObjectId(),
+          user: { _id: userId, name: "Minh", email: "minh@example.com" },
           category: "bug",
           message: "Nút tải lỗi",
           status: update.status,
@@ -296,6 +303,10 @@ test("admin updates feedback status with audit metadata", async () => {
         };
       },
     };
+  };
+  Notice.create = async (payload) => {
+    capturedNotice = payload;
+    return payload;
   };
 
   try {
@@ -313,8 +324,62 @@ test("admin updates feedback status with audit metadata", async () => {
     assert.equal(String(capturedUpdate.statusUpdatedBy), String(adminId));
     assert.ok(capturedUpdate.statusUpdatedAt instanceof Date);
     assert.equal(res.body.feedback.statusLabel, "Đã giải quyết");
+    assert.equal(String(capturedNotice.recipient), String(userId));
+    assert.equal(capturedNotice.title, "Góp ý của bạn đã được giải quyết");
+    assert.match(capturedNotice.description, /Nút tải lỗi/);
+    assert.match(capturedNotice.description, /đánh giá mức độ hài lòng/);
   } finally {
-    Feedback.findByIdAndUpdate = originalUpdate;
+    Feedback.findOneAndUpdate = originalUpdate;
+    Notice.create = originalCreateNotice;
+  }
+});
+
+test("admin saving the same feedback status does not send another notice", async () => {
+  const feedbackId = new mongoose.Types.ObjectId();
+  const userId = new mongoose.Types.ObjectId();
+  const originalUpdate = Feedback.findOneAndUpdate;
+  const originalFindById = Feedback.findById;
+  const originalCreateNotice = Notice.create;
+  let noticeCreated = false;
+
+  Feedback.findOneAndUpdate = () => ({
+    async populate() {
+      return null;
+    },
+  });
+  Feedback.findById = () => ({
+    async populate() {
+      return {
+        _id: feedbackId,
+        user: { _id: userId, name: "Minh", email: "minh@example.com" },
+        category: "bug",
+        message: "Nút tải lỗi",
+        status: "received",
+      };
+    },
+  });
+  Notice.create = async () => {
+    noticeCreated = true;
+  };
+
+  try {
+    const res = createResponse();
+    await updateFeedbackStatus(
+      {
+        params: { id: String(feedbackId) },
+        body: { status: "received" },
+        user: { _id: new mongoose.Types.ObjectId() },
+      },
+      res,
+    );
+
+    assert.equal(res.statusCode, 200);
+    assert.equal(res.body.feedback.status, "received");
+    assert.equal(noticeCreated, false);
+  } finally {
+    Feedback.findOneAndUpdate = originalUpdate;
+    Feedback.findById = originalFindById;
+    Notice.create = originalCreateNotice;
   }
 });
 

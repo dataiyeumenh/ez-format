@@ -14,10 +14,16 @@ const noticeSchema = new mongoose.Schema(
       trim: true,
       maxlength: [1000, "Nội dung không được quá 1000 ký tự"],
     },
+    recipient: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      default: null,
+    },
   },
   { timestamps: true },
 );
 
 noticeSchema.index({ createdAt: -1 });
+noticeSchema.index({ recipient: 1, createdAt: -1 });
 
 module.exports = mongoose.model("Notice", noticeSchema);
