@@ -10,6 +10,7 @@ const {
 } = require("../services/noticeService");
 const {
   createNotice,
+  buildVisibilityFilter,
   listNotices,
   markNoticesRead,
 } = require("../controllers/noticeController");
@@ -113,6 +114,40 @@ test("normalizes and serializes notice API payloads", () => {
   );
 });
 
+test("admin notice serialization includes the targeted recipient", () => {
+  assert.deepEqual(
+    serializeNotice(
+      {
+        _id: "notice-id",
+        title: "Đã xử lý góp ý",
+        description: "Nội dung",
+        recipient: {
+          _id: "user-id",
+          name: "Nguyễn Minh",
+          email: "minh@example.com",
+        },
+      },
+      { includeRecipient: true },
+    ).recipient,
+    {
+      id: "user-id",
+      name: "Nguyễn Minh",
+      email: "minh@example.com",
+    },
+  );
+});
+
+test("admin notice scopes separate broadcast and targeted records", () => {
+  const admin = { _id: "admin-id", role: "admin" };
+  assert.deepEqual(buildVisibilityFilter(admin, "broadcast"), {
+    recipient: null,
+  });
+  assert.deepEqual(buildVisibilityFilter(admin, "individual"), {
+    recipient: { $exists: true, $ne: null },
+  });
+  assert.deepEqual(buildVisibilityFilter(admin, "unknown"), {});
+});
+
 test("lists only broadcast and recipient notices with a hard maximum of 50", async () => {
   const originalFind = Notice.find;
   const originalCountDocuments = Notice.countDocuments;
@@ -172,14 +207,19 @@ test("lists only broadcast and recipient notices with a hard maximum of 50", asy
   }
 });
 
-test("admin notice list remains unfiltered", async () => {
+test("admin notice list applies the selected scope and includes recipients", async () => {
   const originalFind = Notice.find;
   const originalCountDocuments = Notice.countDocuments;
   const originalFindReadState = NoticeReadState.findOne;
 
   Notice.find = (filter) => ({
+    populate(path, fields) {
+      assert.deepEqual(filter, { recipient: null });
+      assert.equal(path, "recipient");
+      assert.equal(fields, "name email");
+      return this;
+    },
     sort() {
-      assert.deepEqual(filter, {});
       return this;
     },
     limit() {
@@ -187,7 +227,7 @@ test("admin notice list remains unfiltered", async () => {
     },
   });
   Notice.countDocuments = async (filter) => {
-    assert.deepEqual(filter, {});
+    assert.deepEqual(filter, { recipient: null });
     return 0;
   };
   NoticeReadState.findOne = async () => null;
@@ -195,7 +235,10 @@ test("admin notice list remains unfiltered", async () => {
   try {
     const res = createResponse();
     await listNotices(
-      { query: {}, user: { _id: "admin-id", role: "admin" } },
+      {
+        query: { scope: "broadcast" },
+        user: { _id: "admin-id", role: "admin" },
+      },
       res,
     );
     assert.equal(res.statusCode, 200);

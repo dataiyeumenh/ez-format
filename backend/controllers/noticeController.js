@@ -12,8 +12,14 @@ function resolveLimit(value) {
   return Math.min(parsed, 50);
 }
 
-function buildVisibilityFilter(user) {
-  if (user?.role === "admin") return {};
+function buildVisibilityFilter(user, scope) {
+  if (user?.role === "admin") {
+    if (scope === "broadcast") return { recipient: null };
+    if (scope === "individual") {
+      return { recipient: { $exists: true, $ne: null } };
+    }
+    return {};
+  }
   return {
     $or: [{ recipient: null }, { recipient: user._id }],
   };
@@ -28,9 +34,14 @@ function addCreatedAfter(filter, createdAfter) {
 
 async function listNotices(req, res) {
   try {
-    const visibilityFilter = buildVisibilityFilter(req.user);
+    const isAdmin = req.user?.role === "admin";
+    const visibilityFilter = buildVisibilityFilter(req.user, req.query?.scope);
+    let noticeQuery = Notice.find(visibilityFilter);
+    if (isAdmin) {
+      noticeQuery = noticeQuery.populate("recipient", "name email");
+    }
     const [notices, readState] = await Promise.all([
-      Notice.find(visibilityFilter)
+      noticeQuery
         .sort({ createdAt: -1 })
         .limit(resolveLimit(req.query?.limit)),
       NoticeReadState.findOne({ user: req.user._id }),
@@ -43,7 +54,7 @@ async function listNotices(req, res) {
       : visibilityFilter;
     const unreadCount = await Notice.countDocuments(unreadFilter);
     const items = notices.map((notice) => ({
-      ...serializeNotice(notice),
+      ...serializeNotice(notice, { includeRecipient: isAdmin }),
       isRead: Boolean(
         readThrough && new Date(notice.createdAt).getTime() <= readThrough.getTime(),
       ),
@@ -129,6 +140,7 @@ async function createNotice(req, res) {
 }
 
 module.exports = {
+  buildVisibilityFilter,
   createNotice,
   listNotices,
   markNoticesRead,

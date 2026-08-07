@@ -1,34 +1,34 @@
 {
-  "timestamp": "2026-08-08 03:03:12",
+  "timestamp": "2026-08-08 03:18:04",
+  "failed": [],
   "ok": true,
   "steps": [
     {
-      "status": "ok",
-      "seconds": 0.0202175,
-      "name": "Prerequisites"
+      "name": "Prerequisites",
+      "seconds": 0.0066393,
+      "status": "ok"
     },
     {
-      "status": "ok",
-      "seconds": 0.0138596,
-      "name": "Fixtures templates"
+      "name": "Fixtures templates",
+      "seconds": 0.005583,
+      "status": "ok"
     },
     {
-      "status": "ok",
-      "seconds": 0.2912402,
-      "name": "Backend syntax"
+      "name": "Backend syntax",
+      "seconds": 0.2718144,
+      "status": "ok"
     },
     {
-      "status": "ok",
-      "seconds": 3.8737717,
-      "name": "Frontend build"
+      "name": "Frontend build",
+      "seconds": 3.6809534,
+      "status": "ok"
     },
     {
-      "status": "ok",
-      "seconds": 1.8746706,
-      "name": "Converter API smoke"
+      "name": "Converter API smoke",
+      "seconds": 1.5310648,
+      "status": "ok"
     }
   ],
-  "failed": [],
   "passed": [
     "Prerequisites",
     "Fixtures templates",
